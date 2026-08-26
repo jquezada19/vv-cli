@@ -147,6 +147,35 @@ check("F14b verification ran clean", "verification clean" in r.stdout, r.stdout 
 r = run("resolve", "folder/Note")
 check("F13 extensionless path resolves", r.stdout.strip() == "folder/Note.md", r.stdout + r.stderr)
 
+# ---- F15: a fence closes only on its own marker type ----
+w("Fence.md", "## A\n```\n~~~\n## not a heading\n```\n\n## B\nreal\n")
+r = run("outline", "Fence.md")
+titles = [l.split("\t")[2] for l in r.stdout.strip().split("\n")]
+check("F15a tilde inside backticks is inert", "not a heading" not in titles, r.stdout)
+check("F15b following heading still found", "B" in titles, r.stdout)
+
+# ---- F16: unterminated frontmatter is treated as body, never half-parsed ----
+w("Unterm.md", "---\ntype: t\nno closing marker\n\n## S\nbody\n")
+before = open(os.path.join(VAULT, "Unterm.md")).read()
+r = run("set", "Unterm.md", "type", "changed")
+after = open(os.path.join(VAULT, "Unterm.md")).read()
+check("F16 unterminated fm not duplicated", after.count("---") <= before.count("---") + 2 and "no closing marker" in after, repr(after[:120]))
+
+# ---- F17: a byte-order mark survives a frontmatter edit ----
+bomfile = os.path.join(VAULT, "Bom.md")
+with open(bomfile, "w", encoding="utf-8-sig", newline="") as f:
+    f.write("---\nk: v\n---\nbody\n")
+r = run("set", "Bom.md", "k", "v2")
+raw = open(bomfile, "rb").read()
+check("F17a BOM preserved", raw.startswith(b"\xef\xbb\xbf"), raw[:12])
+check("F17b single frontmatter block", raw.decode("utf-8-sig").count("---") == 2 and "k: v2" in raw.decode("utf-8-sig"))
+
+# ---- F18: non-UTF-8 files fail clearly instead of crashing ----
+with open(os.path.join(VAULT, "Latin.md"), "wb") as f:
+    f.write(b"---\nk: caf\xe9\n---\nbody\n")
+r = run("outline", "Latin.md")
+check("F18 non-UTF-8 clean error", r.returncode == 5 and "not valid UTF-8" in r.stderr and "Traceback" not in r.stderr, r.stderr[:120])
+
 shutil.rmtree(VAULT, ignore_errors=True)
 shutil.rmtree(OUTSIDE, ignore_errors=True)
 print(f"\n{len(fails)} failures: {fails}" if fails else "\nALL PANEL-FINDING TESTS PASS")

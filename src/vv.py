@@ -79,23 +79,43 @@ def rel(fp):
     return os.path.relpath(fp, VAULT)
 
 # ---------- md structure (shared with vnote2, fence-aware) ----------
+BOM = "﻿"
+
+def fm_bounds(lines):
+    """Index one past the closing '---' of frontmatter, or 0. Tolerates a leading BOM."""
+    if not lines:
+        return 0
+    first = lines[0].lstrip(BOM).rstrip("\r")
+    if first != "---":
+        return 0
+    for i in range(1, len(lines)):
+        if lines[i].rstrip("\r") == "---":
+            return i + 1
+    return 0  # unterminated: treat the whole file as body, never as frontmatter
+
+def fence_mask(lines, start=0):
+    """Line indices inside fenced blocks. A fence closes only on its OWN marker type
+    (CommonMark): ``` does not close ~~~ and vice versa."""
+    masked = set()
+    marker = None
+    for i in range(start, len(lines)):
+        l = lines[i]
+        m = re.match(r"^\s{0,3}(`{3,}|~{3,})", l)
+        if marker is None:
+            if m:
+                marker = m.group(1)[0]
+                masked.add(i)
+        else:
+            masked.add(i)
+            if m and m.group(1)[0] == marker and not l.strip().rstrip(marker):
+                marker = None
+    return masked
+
 def parse(text):
     lines = text.split("\n")
-    fenced = set(); open_ = False
-    fm_end = 0
-    if lines and lines[0].rstrip("\r") == "---":
-        for i in range(1, len(lines)):
-            if lines[i].rstrip("\r") == "---":
-                fm_end = i + 1
-                break
-    fenced.update(range(fm_end))
-    for i, l in enumerate(lines):
-        if i < fm_end:
-            continue
-        if re.match(r"^(```|~~~)", l):
-            open_ = not open_; fenced.add(i)
-        elif open_:
-            fenced.add(i)
+    fm_end = fm_bounds(lines)
+    fenced = set(range(fm_end))
+    fenced |= fence_mask(lines, fm_end)
     heads = [(i, len(m.group(1)), m.group(2).strip())
              for i, l in enumerate(lines)
              if i not in fenced and (m := re.match(r"^(#{1,6})\s+(.*)$", l))]
@@ -119,15 +139,19 @@ def find_sec(lines, secs, sid):
     die(f"error: no section {sid} (run outline)")
 
 def split_fm(text):
-    m = re.match(r"^---\r?\n(.*?)\r?\n---\r?\n?", text, re.S)
-    return (m.group(1), text[m.end():]) if m else (None, text)
+    fm, body, _tail, _bom = split_fm_full(text)
+    return fm, body
 
 def split_fm_full(text):
-    """(fm, body, tail) — tail is the newline (if any) after the closing ---, preserved verbatim."""
-    m = re.match(r"^---\r?\n(.*?)\r?\n---(\r?\n)?", text, re.S)
+    """(fm, body, tail, bom). tail = the newline after the closing '---', preserved verbatim.
+    bom = a leading byte-order mark, preserved so writers can restore it.
+    Unterminated frontmatter yields fm=None: the file is body-only, never half-parsed."""
+    bom = BOM if text.startswith(BOM) else ""
+    t = text[len(bom):]
+    m = re.match(r"^---\r?\n(.*?)\r?\n---(\r?\n)?", t, re.S)
     if not m:
-        return None, text, ""
-    return m.group(1), text[m.end():], m.group(2) or ""
+        return None, text, "", bom
+    return m.group(1), t[m.end():], m.group(2) or "", bom
 
 def fm_props(fm):
     props = {}
@@ -138,8 +162,11 @@ def fm_props(fm):
     return props
 
 def read_raw(fp):
-    with open(fp, newline="") as f:
-        return f.read()
+    try:
+        with open(fp, newline="", encoding="utf-8") as f:
+            return f.read()
+    except UnicodeDecodeError as e:
+        die(f"error: {rel(fp)} is not valid UTF-8 ({e.reason} at byte {e.start}) — vv only edits UTF-8 notes", 5)
 
 def eol_of(text):
     return "\r\n" if "\r\n" in text else "\n"
@@ -241,10 +268,10 @@ def cmd_append(ref, text):
 def cmd_set(ref, key, value):
     fp = resolve(ref)
     text = read_raw(fp)
-    fm, body, tail = split_fm_full(text)
+    fm, body, tail, bom = split_fm_full(text)
     eol = eol_of(text)
     if fm is None:
-        atomic_write(fp, f"---{eol}{key}: {value}{eol}---{eol}{text}")
+        atomic_write(fp, bom + f"---{eol}{key}: {value}{eol}---{eol}" + text[len(bom):])
     else:
         fm_lines = fm.replace("\r\n", "\n").split("\n")
         if block_scalar_key(fm_lines, key):
@@ -255,13 +282,13 @@ def cmd_set(ref, key, value):
             fm_lines[hit[0]] = f"{key}: {value}"
         else:
             fm_lines.append(f"{key}: {value}")
-        atomic_write(fp, "---" + eol + eol.join(fm_lines) + eol + "---" + tail + body)
+        atomic_write(fp, bom + "---" + eol + eol.join(fm_lines) + eol + "---" + tail + body)
     out(f"set {key}={value} in {rel(fp)}")
 
 def cmd_unset(ref, key):
     fp = resolve(ref)
     text = read_raw(fp)
-    fm, body, tail = split_fm_full(text)
+    fm, body, tail, bom = split_fm_full(text)
     if fm is None:
         die(f"error: no frontmatter in {rel(fp)}")
     eol = eol_of(text)
@@ -271,7 +298,7 @@ def cmd_unset(ref, key):
     kept = [l for l in fm_lines if not re.match(rf"^{re.escape(key)}:", l)]
     if kept == fm_lines:
         die(f"error: no key {key} in {rel(fp)}")
-    atomic_write(fp, "---" + eol + eol.join(kept) + eol + "---" + tail + body)
+    atomic_write(fp, bom + "---" + eol + eol.join(kept) + eol + "---" + tail + body)
     out(f"unset {key} in {rel(fp)}")
 
 def cmd_new(*args):
@@ -466,23 +493,11 @@ def cmd_daily_append(text):
 JOURNAL_ROOT = os.path.expanduser("~/.cache/vv/journals")
 
 def masked_lines(text):
-    """Line indices where wikilinks are inert (fences, frontmatter) — reuse parse()'s mask."""
+    """Line indices where wikilinks are inert (fenced blocks). Frontmatter is NOT masked —
+    `related:` links there are real links. Same fence rules as parse()."""
     lines = text.split("\n")
-    fenced = set(); open_ = False
-    fm_end = 0
-    if lines and lines[0].rstrip("\r") == "---":
-        for i in range(1, len(lines)):
-            if lines[i].rstrip("\r") == "---":
-                fm_end = i + 1
-                break
-    for i, l in enumerate(lines):
-        if i < fm_end:
-            continue  # frontmatter links (related:) ARE real links — do not mask
-        if re.match(r"^(```|~~~)", l):
-            open_ = not open_; fenced.add(i)
-        elif open_:
-            fenced.add(i)
-    return lines, fenced
+    fm_end = fm_bounds(lines)
+    return lines, fence_mask(lines, fm_end)
 
 def strip_inline_code(line):
     return re.sub(r"`[^`]*`", lambda m: "\0" * len(m.group(0)), line)
