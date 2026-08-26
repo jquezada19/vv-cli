@@ -16,8 +16,12 @@ def run(*args, stdin=None):
 #    journals can't be touched. 3. On failure the fixture dir is KEPT as evidence.
 import tempfile, datetime as _dt
 def fresh_fixture(path):
+    # pre-existing content is preserved OUTSIDE the vault: an aside-dir inside
+    # Sandbox would poison later duplicate-basename tests (found 2026-08-26)
     if os.path.isdir(path) and os.listdir(path):
-        os.rename(path, path + ".pre-" + _dt.datetime.now().strftime("%H%M%S"))
+        keep = tempfile.mkdtemp(prefix="vv-kept-" + os.path.basename(path) + "-")
+        shutil.move(path, os.path.join(keep, os.path.basename(path)))
+        print(f"note: pre-existing {path} moved to {keep}")
     shutil.rmtree(path, ignore_errors=True)
     os.makedirs(path, exist_ok=True)
 _JR = tempfile.mkdtemp(prefix="vv-test-journals-")

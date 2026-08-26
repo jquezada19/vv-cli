@@ -55,39 +55,53 @@ fn cmd_search(args: &[String]) {
     let mut files = Vec::new();
     walk_ex(&root, &mut files, true); // search excludes Sandbox
     files.sort();
+    // ranking — IDENTICAL to cmd_search in vv.py (adapted from rustdoc search):
+    // a "/" term is a path filter; other terms score +500 for a NAME match plus
+    // +1 per content hit, and every term must match somewhere. Ties: shorter
+    // path, then lexicographic — deterministic across engines.
+    let path_terms: Vec<&String> = terms.iter().filter(|t| t.contains('/')).collect();
+    let body_terms: Vec<&String> = terms.iter().filter(|t| !t.contains('/')).collect();
     let mut hits: Vec<(usize, String, String)> = Vec::new();
     for fp in &files {
+        let rel = fp.strip_prefix(&root).unwrap_or(fp).to_string_lossy().to_string();
+        let rl = rel.to_lowercase();
+        if !path_terms.iter().all(|t| rl.contains(t.as_str())) {
+            continue;
+        }
         let text = match fs::read_to_string(fp) {
             Ok(t) => t,
             Err(_) => continue,
         };
         let low = text.to_lowercase();
+        let base = rl.rsplit('/').next().unwrap_or(&rl).trim_end_matches(".md").to_string();
         let mut score = 0usize;
-        let mut all = true;
-        let mut first_pos = usize::MAX;
-        for t in &terms {
+        let mut ok = true;
+        let mut first_pos: Option<usize> = None;
+        for t in &body_terms {
+            let in_name = base.contains(t.as_str());
             let c = low.matches(t.as_str()).count();
-            if c == 0 {
-                all = false;
+            if !in_name && c == 0 {
+                ok = false;
                 break;
             }
-            score += c;
-            if let Some(p) = low.find(t.as_str()) {
-                first_pos = first_pos.min(p);
+            score += if in_name { 500 } else { 0 } + c;
+            if c > 0 {
+                if let Some(p) = low.find(t.as_str()) {
+                    first_pos = Some(first_pos.map_or(p, |q: usize| q.min(p)));
+                }
             }
         }
-        if !all || score == 0 {
+        if !ok {
             continue;
         }
-        let start = first_pos.saturating_sub(w / 4);
+        let start = first_pos.map_or(0, |p| p.saturating_sub(w / 4));
         let start = (0..=start).rev().find(|i| text.is_char_boundary(*i)).unwrap_or(0);
         let end = (start + w).min(text.len());
         let end = (end..text.len().max(end)).find(|i| text.is_char_boundary(*i)).unwrap_or(text.len());
         let snip = text[start..end].replace('\n', " ¶ ");
-        let rel = fp.strip_prefix(&root).unwrap_or(fp).to_string_lossy().to_string();
         hits.push((score, rel, snip));
     }
-    hits.sort_by(|a, b| b.0.cmp(&a.0));
+    hits.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.len().cmp(&b.1.len())).then(a.1.cmp(&b.1)));
     let shown = hits.len().min(k);
     for (score, rel, snip) in hits.iter().take(k) {
         println!("== {} (score {})\n{}\n", rel, score, snip);
@@ -182,10 +196,15 @@ fn cmd_linkscan(args: &[String]) {
                 let mut line_fenced = false;
                 if i >= fm_end {
                     match (marker, fence) {
-                        (None, Some((c, n, _))) => {
+                        // CommonMark: a backtick fence's info string may not
+                        // contain backticks — ```code``` is an inline span
+                        (None, Some((c, n, rest)))
+                            if c == '~' || !rest.contains('`') =>
+                        {
                             marker = Some((c, n));
                             line_fenced = true;
                         }
+                        (None, Some(_)) => {}
                         (Some((mc, mn)), Some((c, n, rest)))
                             if c == mc && n >= mn && rest.trim().is_empty() =>
                         {

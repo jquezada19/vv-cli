@@ -47,11 +47,11 @@ def use_rust():
     matrix, adapted); unset = rust when built. Unknown values refuse loudly."""
     eng = os.environ.get("VV_ENGINE", "")
     if eng not in ("", "rust", "python"):
-        die(f"error: unknown VV_ENGINE '{eng}' (rust|python)")
+        die(f"engine: unknown VV_ENGINE '{eng}' — next: use rust|python or unset")
     if eng == "python":
         return False
     if eng == "rust" and not os.path.exists(VRUST):
-        die("error: VV_ENGINE=rust but the engine is not built (cd vrust && cargo build --release)")
+        die("engine: VV_ENGINE=rust but the engine is not built — next: cd vrust && cargo build --release")
     return os.path.exists(VRUST)
 
 def md_files():
@@ -68,7 +68,7 @@ def contain(path):
     full = path if os.path.isabs(path) else os.path.join(VAULT, path)
     real = os.path.realpath(full)
     if real != _VAULT_REAL and not real.startswith(_VAULT_REAL + os.sep):
-        die(f"error: path escapes vault: {path}")
+        die(f"escape: path leaves the vault: {path}")
     return full
 
 def resolve(ref):
@@ -89,7 +89,7 @@ def resolve(ref):
     if not hits:
         sugg = suggest_names(want, all_notes)
         extra = ("\ndid you mean: " + " | ".join(sugg)) if sugg else ""
-        die(f"error: no note matches '{ref}'{extra}")
+        die(f"not-found: no note matches '{ref}'{extra}")
     die("ambiguous: " + " | ".join(os.path.relpath(h, VAULT) for h in sorted(hits)[:5]))
 
 def suggest_names(want, paths, n=3):
@@ -141,7 +141,10 @@ def fence_mask(lines, start=0):
         # byte-counting equivalent — NBSP/tab indent is not fence indent)
         m = re.match(r"^ {0,3}(`{3,}|~{3,})(.*)$", l)
         if marker is None:
-            if m:
+            # CommonMark: a backtick fence's info string may not contain backticks —
+            # ```code``` on one line is an inline span, not a fence (caught by the
+            # expected-vector corpus + probed against Obsidian 2026-08-26)
+            if m and (m.group(1)[0] == "~" or "`" not in m.group(2)):
                 marker = (m.group(1)[0], len(m.group(1)))
                 masked.add(i)
         else:
@@ -176,7 +179,7 @@ def find_sec(lines, secs, sid):
     for s in secs:
         if s["id"] == sid:
             return s
-    die(f"error: no section {sid} (run outline)")
+    die(f"not-found: no section {sid} — next: vv outline NOTE")
 
 def split_fm(text):
     fm, body, _tail, _bom = split_fm_full(text)
@@ -206,7 +209,7 @@ def read_raw(fp):
         with open(fp, newline="", encoding="utf-8") as f:
             return f.read()
     except UnicodeDecodeError as e:
-        die(f"error: {rel(fp)} is not valid UTF-8 ({e.reason} at byte {e.start}) — vv only edits UTF-8 notes", 5)
+        die(f"utf8: {rel(fp)} is not valid UTF-8 ({e.reason} at byte {e.start}) — vv only edits UTF-8 notes", 5)
 
 def eol_of(text):
     return "\r\n" if "\r\n" in text else "\n"
@@ -295,7 +298,7 @@ def cmd_patch(ref, sid, expect):
     lines, secs = parse(read_raw(fp))
     s = find_sec(lines, secs, sid)
     if sid == "H0" and s["end"] > 0 and lines and lines[0].rstrip("\r") == "---":
-        die("error: H0 contains frontmatter — edit it with `set`/`unset`, not `patch` (patch would rewrite YAML as body)")
+        die("refused: H0 contains frontmatter — next: vv set/unset (patch would rewrite YAML as body)")
     cur = sec_text(lines, s)
     if sha8(cur) != expect:
         sys.stderr.write(f"stale: {sid} is {sha8(cur)}, expected {expect} — re-outline\n")
@@ -337,7 +340,7 @@ def cmd_set(ref, key, value):
     else:
         fm_lines = fm.replace("\r\n", "\n").split("\n")
         if block_scalar_key(fm_lines, key):
-            die(f"error: '{key}' has a multi-line/block value — edit it directly, not via `set` (would orphan continuation lines)")
+            die(f"refused: '{key}' has a multi-line/block value — next: edit the note directly (set would orphan continuation lines)")
         pat = re.compile(rf"^{re.escape(key)}:")
         hit = [i for i, l in enumerate(fm_lines) if pat.match(l)]
         if hit:
@@ -353,14 +356,14 @@ def cmd_unset(ref, key):
     text = read_raw(fp)
     fm, body, tail, bom = split_fm_full(text)
     if fm is None:
-        die(f"error: no frontmatter in {rel(fp)}")
+        die(f"not-found: no frontmatter in {rel(fp)}")
     eol = eol_of(text)
     fm_lines = fm.replace("\r\n", "\n").split("\n")
     if block_scalar_key(fm_lines, key):
-        die(f"error: '{key}' has a multi-line/block value — remove it directly, not via `unset` (would orphan continuation lines)")
+        die(f"refused: '{key}' has a multi-line/block value — next: edit the note directly (unset would orphan continuation lines)")
     kept = [l for l in fm_lines if not re.match(rf"^{re.escape(key)}:", l)]
     if kept == fm_lines:
-        die(f"error: no key {key} in {rel(fp)}")
+        die(f"not-found: no key {key} in {rel(fp)}")
     atomic_write(fp, bom + "---" + eol + eol.join(kept) + eol + "---" + tail + body)
     out(f"unset {key} in {rel(fp)}")
 
@@ -379,7 +382,7 @@ def cmd_new(*args):
         die("usage: new PATH [--template NAME] [--key value ...]")
     fp = contain(path if path.endswith(".md") else path + ".md")
     if os.path.exists(fp):
-        die(f"error: exists: {rel(fp)}")
+        die(f"exists: {rel(fp)} — next: pick another name or edit it")
     d = os.path.dirname(fp)
     if d:
         os.makedirs(d, exist_ok=True)
@@ -387,7 +390,7 @@ def cmd_new(*args):
     if template:
         hits = sorted(glob.glob(os.path.join(VAULT, "Templates", "**", template + "*.md"), recursive=True))
         if not hits:
-            die(f"error: no template matching '{template}' under Templates/")
+            die(f"not-found: no template matching '{template}' under Templates/")
         content = read_raw(hits[0])
     missing = []
     for k, v in kv.items():
@@ -509,7 +512,7 @@ def cmd_board(folder, *filters):
     want = dict(f.split("=", 1) for f in filters)
     root = os.path.join(VAULT, folder)
     if not os.path.isdir(root):
-        die(f"error: no such folder: {folder}")
+        die(f"not-found: no such folder: {folder}")
     rows = []
     for dirpath, dirs, names in os.walk(root):
         dirs[:] = [d for d in dirs if not d.startswith(".")]
@@ -566,23 +569,45 @@ def cmd_search(*args):
         elif a == "--w": w = int(next(it))
         else: terms.append(a.lower())
     if not terms:
-        die("error: no query")
+        die("usage: search needs a query — next: vv search <terms> [--k N] [--w CHARS]")
+    # ranking (adapted from rustdoc search; IDENTICAL in the rust engine):
+    #   term with "/"  -> path filter: must be a substring of the vault-relative path
+    #   other terms    -> match in the note NAME (+500) and/or content (+1 per hit);
+    #                     every term must match somewhere
+    # so a note NAMED after the query outranks a long note that merely mentions it.
+    # ties: shorter path first, then lexicographic — deterministic across engines.
+    path_terms = [t for t in terms if "/" in t]
+    body_terms = [t for t in terms if "/" not in t]
     hits = []
     for p in md_files():
-        if rel(p).startswith("Sandbox/") or (os.sep + "Sandbox" + os.sep) in p:
+        r_ = rel(p)
+        if r_.startswith("Sandbox/") or (os.sep + "Sandbox" + os.sep) in p:
             continue  # parity with the rust engine: Sandbox excluded at ANY depth
+        rl = r_.lower()
+        if not all(t in rl for t in path_terms):
+            continue
         try:
             text = open(p, errors="replace").read()
         except OSError:
             continue
         low = text.lower()
-        if not all(t in low for t in terms):
+        base = os.path.basename(r_)[:-3].lower()
+        score, pos, ok = 0, -1, True
+        for t in body_terms:
+            in_name = t in base
+            cnt = low.count(t)
+            if not in_name and cnt == 0:
+                ok = False
+                break
+            score += (500 if in_name else 0) + cnt
+            if cnt:
+                fp_ = low.find(t)
+                pos = fp_ if pos < 0 else min(pos, fp_)
+        if not ok:
             continue
-        score = sum(low.count(t) for t in terms)
-        pos = min(low.find(t) for t in terms)
-        start = max(0, pos - w // 4)
-        hits.append((score, rel(p), text[start:start + w].replace("\n", " ¶ ")))
-    hits.sort(key=lambda h: -h[0])
+        start = max(0, pos - w // 4) if pos >= 0 else 0   # name-only match: head of note
+        hits.append((score, r_, text[start:start + w].replace("\n", " ¶ ")))
+    hits.sort(key=lambda h: (-h[0], len(h[1]), h[1]))
     for score, r_, snip in hits[:k]:
         out(f"== {r_} (score {score})\n{snip}\n")
     out(f"({min(len(hits), k)} of {len(hits)} matches)")
@@ -592,7 +617,7 @@ def cmd_daily_append(text):
     today = datetime.date.today().isoformat()
     hits = glob.glob(os.path.join(VAULT, "Standups", f"*{today}*.md"))
     if not hits:
-        die(f"error: no standup note for {today} under Standups/")
+        die(f"not-found: no standup note for {today} under Standups/ — next: create it, then re-run")
     cur = open(hits[0]).read()
     atomic_write(hits[0], cur + ("" if cur.endswith("\n") else "\n") + text + "\n")
     out(f"appended to {rel(hits[0])}")
@@ -635,7 +660,8 @@ def masked_lines(text):
         else:
             m = re.match(r"^ {0,3}(`{3,}|~{3,})(.*)$", ls) if i >= fm_end else None
             if marker is None:
-                if m:
+                # backtick fence info strings may not contain backticks (CommonMark)
+                if m and (m.group(1)[0] == "~" or "`" not in m.group(2)):
                     marker = (m.group(1)[0], len(m.group(1)))
                     fenced.add(i)
                     continue
@@ -831,7 +857,7 @@ def cmd_show(ref, *args):
         out(t)
         used += len(t)
     if not started:
-        die(f"error: no section {start}")
+        die(f"not-found: no section {start} — next: vv outline NOTE")
 
 def cmd_deadends():
     n = 0
@@ -992,7 +1018,18 @@ def _rewrite_links(text, source_fp, new_rel_noext, rename_base, linking_fp=None)
         lines[i] = l
     return "\n".join(lines), changed
 
-def _do_relocate(ref, dest_rel_noext, apply_, opname):
+def _plan_token(args):
+    """The 8-hex token following --apply, if any: `--apply <sha8>` binds the apply
+    to the exact previewed plan (sqlx checksums an applied migration for the same
+    reason). Plain --apply keeps the one-shot behavior."""
+    a = list(args)
+    if "--apply" in a:
+        i = a.index("--apply")
+        if i + 1 < len(a) and re.fullmatch(r"[0-9a-f]{8}", a[i + 1]):
+            return a[i + 1]
+    return None
+
+def _do_relocate(ref, dest_rel_noext, apply_, opname, expect_plan=None):
     fp = resolve(ref)
     src_rel = rel(fp)
     # the destination is a WRITE target and gets the same containment as every
@@ -1000,25 +1037,35 @@ def _do_relocate(ref, dest_rel_noext, apply_, opname):
     new_fp = contain(dest_rel_noext + ".md")
     dest_rel_noext = rel(new_fp)[:-3]
     if os.path.exists(new_fp):
-        die(f"error: target exists: {dest_rel_noext}.md")
+        die(f"exists: target {dest_rel_noext}.md")
     new_base = os.path.basename(dest_rel_noext)
     rename_base = new_base if new_base.lower() != os.path.basename(fp)[:-3].lower() else None
     idx = basename_index()
     if rename_base and rename_base.lower() in idx:
-        die(f"error: another note already has basename '{new_base}' — bare links would be ambiguous")
+        die(f"refused: another note already has basename '{new_base}' — bare links would be ambiguous")
     hits, ambiguous = occurrences(fp, include_bare=bool(rename_base))
     if ambiguous:
         # rename: bare links can't be rewritten safely. move: bare links aren't
         # rewritten at all, but relocating one duplicate CHANGES which note the
         # same-folder/shortest-path tiers resolve them to — silent repointing.
-        die(f"error: source basename is ambiguous in vault — resolve duplicate notes first")
-    out(f"plan: {opname} {src_rel} -> {dest_rel_noext}.md")
+        die(f"refused: source basename is ambiguous in vault — next: resolve duplicate notes first")
+    # plan digest: operation + destination + every affected file's byte hash.
+    # `--apply <digest>` then executes exactly the previewed blast radius or
+    # exits stale — an edit or new link between preview and apply changes it.
+    canon = [opname, src_rel, dest_rel_noext]
+    for p in sorted(hits, key=rel):
+        with open(p, "rb") as f:
+            canon.append(f"{rel(p)}:{hits[p]}:{hashlib.sha256(f.read()).hexdigest()}")
+    plan_id = sha8("\n".join(canon))
+    out(f"plan {plan_id}: {opname} {src_rel} -> {dest_rel_noext}.md")
     out(f"files to rewrite: {len(hits)} ({sum(hits.values())} link occurrences)")
     for p, n in sorted(hits.items()):
         out(f"  {n}\t{rel(p)}")
     if not apply_:
-        out("(dry-run — pass --apply to execute)")
+        out(f"(dry-run — apply with: --apply, or --apply {plan_id} to bind to THIS plan)")
         return
+    if expect_plan and expect_plan != plan_id:
+        die(f"stale: plan is now {plan_id}, you reviewed {expect_plan} — next: re-run the dry-run", 3)
     # journal every file that will be written, plus the moved file itself (once)
     _dirty_gate()
     journal_targets = list(hits.keys()) + ([fp] if fp not in hits else [])
@@ -1072,20 +1119,20 @@ def _do_relocate(ref, dest_rel_noext, apply_, opname):
             os.rename(new_fp, fp)
         left = _journal_rollback(jdir, written)
         if left:
-            die(f"ROLLED BACK ({e}); NOT restored (changed by another writer, journal kept "
+            die(f"conflict: ROLLED BACK ({e}); NOT restored (changed by another writer, journal kept "
                 f"at {jdir}): {', '.join(left)}")
         _journal_done(jdir)   # clean rollback = nothing pending; don't trip the dirty gate
-        die(f"ROLLED BACK ({e}); originals restored")
+        die(f"rolled-back: ({e}); originals restored")
 
 def cmd_rename(ref, new_name, *args):
     fp = resolve(ref)
     dest = os.path.join(os.path.dirname(rel(fp)), new_name[:-3] if new_name.endswith(".md") else new_name)
-    _do_relocate(ref, dest, "--apply" in args, "rename")
+    _do_relocate(ref, dest, "--apply" in args, "rename", _plan_token(args))
 
 def cmd_move(ref, dest_folder, *args):
     fp = resolve(ref)
     dest = os.path.join(dest_folder.rstrip("/"), os.path.basename(rel(fp))[:-3])
-    _do_relocate(ref, dest, "--apply" in args, "move")
+    _do_relocate(ref, dest, "--apply" in args, "move", _plan_token(args))
 
 def cmd_lint(*args):
     canonical = os.path.join(VAULT, ".claude/skills/vault-lint/vault_lint.py")
@@ -1163,7 +1210,7 @@ def cmd_doctor(*args):
     js = _pending_journals()
     if "--rollback" in args or "--discard" in args:
         if not js:
-            die("error: no pending journal for this vault")
+            die("not-found: no pending journal for this vault")
         jdir = js[0]
         if "--discard" in args:
             _journal_done(jdir)
@@ -1171,7 +1218,7 @@ def cmd_doctor(*args):
         else:
             left = _journal_rollback(jdir)   # no `written` info after a crash: restore
             if left:
-                die(f"rollback incomplete — left alone (bytes match neither original nor "
+                die(f"conflict: rollback incomplete — left alone (bytes match neither original nor "
                     f"journal): {', '.join(left)}; journal kept at {jdir}")
             _journal_done(jdir)
             out(f"rolled back journal {os.path.basename(jdir)}; originals restored")
@@ -1202,15 +1249,37 @@ CMDS = {
     "rename": cmd_rename, "move": cmd_move, "lint": cmd_lint, "doctor": cmd_doctor,
 }
 
+def _check_arity(cmd, fn, args):
+    """Positional-arg validation at the boundary, so an INTERNAL TypeError is a
+    defect (traceback), never mislabeled as user error (review 2026-08-26)."""
+    import inspect
+    ps = [p for p in inspect.signature(fn).parameters.values()]
+    var = any(p.kind == p.VAR_POSITIONAL for p in ps)
+    pos = [p for p in ps if p.kind == p.POSITIONAL_OR_KEYWORD]
+    req = len([p for p in pos if p.default is p.empty])
+    hi = None if var else len(pos)
+    if len(args) < req or (hi is not None and len(args) > hi):
+        want = f"{req}+" if hi is None else (str(req) if req == hi else f"{req}-{hi}")
+        die(f"usage: {cmd} takes {want} positional args, got {len(args)} — "
+            f"next: run vv with no args for the command list")
+
 if __name__ == "__main__":
     a = sys.argv[1:]
+    if "--vault" in a:
+        i = a.index("--vault")
+        if i + 1 >= len(a):
+            die("usage: --vault requires a path")
+        VAULT = os.path.abspath(os.path.expanduser(a[i + 1]))
+        if not os.path.isdir(VAULT):
+            die(f"not-found: vault directory {VAULT}")
+        os.environ["VV_VAULT"] = VAULT   # rust engine subprocesses inherit it
+        _VAULT_REAL = os.path.realpath(VAULT)
+        a = a[:i] + a[i + 2:]
     if not a:
         sys.exit(__doc__)
     fn = CMDS.get(a[0])
     if not fn:
-        die(f"error: unknown command {a[0]}")
-    try:
-        fn(*a[1:])
-    except TypeError as e:
-        die(f"usage error: {e}")
+        die(f"usage: unknown command {a[0]} — next: run vv with no args for help")
+    _check_arity(a[0], fn, a[1:])
+    fn(*a[1:])
     _log(_out_total)

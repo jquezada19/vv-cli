@@ -22,8 +22,12 @@ def run(*args, stdin=None, env_extra=None):
 #    journals can't be touched. 3. On failure the fixture dir is KEPT as evidence.
 import tempfile, datetime as _dt
 def fresh_fixture(path):
+    # pre-existing content is preserved OUTSIDE the vault: an aside-dir inside
+    # Sandbox would poison later duplicate-basename tests (found 2026-08-26)
     if os.path.isdir(path) and os.listdir(path):
-        os.rename(path, path + ".pre-" + _dt.datetime.now().strftime("%H%M%S"))
+        keep = tempfile.mkdtemp(prefix="vv-kept-" + os.path.basename(path) + "-")
+        shutil.move(path, os.path.join(keep, os.path.basename(path)))
+        print(f"note: pre-existing {path} moved to {keep}")
     shutil.rmtree(path, ignore_errors=True)
     os.makedirs(path, exist_ok=True)
 _JR = tempfile.mkdtemp(prefix="vv-test-journals-")
@@ -46,7 +50,7 @@ def w(name, text):
 victim = os.path.join(OUTSIDE, "victim.md")
 open(victim, "w").write("ORIGINAL OUTSIDE CONTENT\n")
 r = run("append", victim, "appended")
-check("F1a absolute path outside vault refused", r.returncode == 1 and "escapes vault" in r.stderr, r.stderr)
+check("F1a absolute path outside vault refused", r.returncode == 1 and "escape:" in r.stderr, r.stderr)
 check("F1b outside file untouched", open(victim).read() == "ORIGINAL OUTSIDE CONTENT\n")
 r = run("append", "../" + os.path.basename(OUTSIDE) + "/victim.md", "x")
 check("F1c parent-relative path refused", r.returncode == 1, r.stderr)
@@ -245,7 +249,7 @@ w("FTarget.md", "# FTarget\n")
 w("FLink.md", "See [[FTarget]].\n")
 before = open(os.path.join(VAULT, "FLink.md")).read()
 r = run("rename", "FTarget.md", "FRenamed", "--apply", env_extra={"VV_FAULT_AFTER": "1"})
-check("C6a pre-rename fault aborts", r.returncode == 1 and "ROLLED BACK" in r.stderr, r.stderr[:120])
+check("C6a pre-rename fault aborts", r.returncode == 1 and "rolled-back" in r.stderr, r.stderr[:120])
 check("C6b links restored", open(os.path.join(VAULT, "FLink.md")).read() == before)
 check("C6c note not renamed", os.path.exists(os.path.join(VAULT, "FTarget.md")) and not os.path.exists(os.path.join(VAULT, "FRenamed.md")))
 shutil.rmtree(_JR, ignore_errors=True); os.makedirs(_JR, exist_ok=True)

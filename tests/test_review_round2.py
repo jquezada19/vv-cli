@@ -34,8 +34,12 @@ def run(*args, env=None):
 #    journals can't be touched. 3. On failure the fixture dir is KEPT as evidence.
 import tempfile, datetime as _dt
 def fresh_fixture(path):
+    # pre-existing content is preserved OUTSIDE the vault: an aside-dir inside
+    # Sandbox would poison later duplicate-basename tests (found 2026-08-26)
     if os.path.isdir(path) and os.listdir(path):
-        os.rename(path, path + ".pre-" + _dt.datetime.now().strftime("%H%M%S"))
+        keep = tempfile.mkdtemp(prefix="vv-kept-" + os.path.basename(path) + "-")
+        shutil.move(path, os.path.join(keep, os.path.basename(path)))
+        print(f"note: pre-existing {path} moved to {keep}")
     shutil.rmtree(path, ignore_errors=True)
     os.makedirs(path, exist_ok=True)
 _JR = tempfile.mkdtemp(prefix="vv-test-journals-")
@@ -117,7 +121,7 @@ open(f"{tv}/vault/Tgt.md", "w").write("x\n")
 open(f"{tv}/vault/Linker.md", "w").write("[[Tgt]]\n")
 r = run("rename", "Tgt.md", "Tgt2", "--apply",
         env={"VV_VAULT": f"{tv}/vault", "VV_FAULT_AFTER": "0", "VV_FAULT_KIND": "exit"})
-rolled = "ROLLED BACK" in (r.stdout + r.stderr)
+rolled = "rolled-back" in (r.stdout + r.stderr)
 intact = os.path.exists(f"{tv}/vault/Tgt.md") and not os.path.exists(f"{tv}/vault/Tgt2.md")
 check("V8 SystemExit mid-apply rolls back", r.returncode != 0 and rolled and intact,
       r.stdout + r.stderr)
@@ -205,8 +209,42 @@ check("V13a frontmatter alias pipe not flagged", "FmTgt QQ" not in r.stdout, r.s
 check("V13b hr below pipe-line not a delimiter", "HrTgt QQ" not in r.stdout, r.stdout[-400:])
 check("V13c single-column |---| still flagged", "table-pipe" in r.stdout and "OneCol QQ" in r.stdout, r.stdout[-400:])
 
+# V16: plan digest — --apply <sha8> binds to the previewed plan; a concurrent
+# edit changes the digest and the bound apply exits stale (3)
+import re as _re
+tv = tempfile.mkdtemp(prefix="vv-r2f-")
+os.makedirs(f"{tv}/vault")
+open(f"{tv}/vault/T.md", "w").write("x\n"); open(f"{tv}/vault/L.md", "w").write("[[T]]\n")
+env = {"VV_VAULT": f"{tv}/vault"}
+r = run("rename", "T.md", "T2", env=env)
+m = _re.search(r"^plan ([0-9a-f]{8}):", r.stdout, _re.M)
+check("V16a dry-run prints plan digest", bool(m), r.stdout)
+open(f"{tv}/vault/L.md", "a").write("changed\n")
+r = run("rename", "T.md", "T2", "--apply", m.group(1) if m else "00000000", env=env)
+check("V16b bound apply exits stale on drift", r.returncode == 3 and "stale:" in r.stderr, r.stdout + r.stderr)
+r = run("rename", "T.md", "T2", env=env)
+m2 = _re.search(r"^plan ([0-9a-f]{8}):", r.stdout, _re.M)
+r = run("rename", "T.md", "T2", "--apply", m2.group(1), env=env)
+check("V16c bound apply executes on match", "verification clean" in r.stdout, r.stdout + r.stderr)
+shutil.rmtree(tv, ignore_errors=True)
+
+# V17: --vault flag targets another vault without env
+tv = tempfile.mkdtemp(prefix="vv-r2g-")
+os.makedirs(f"{tv}/vault"); open(f"{tv}/vault/Solo.md", "w").write("## A\nbody\n")
+r = run("--vault", f"{tv}/vault", "outline", "Solo.md")
+check("V17 --vault targets the given vault", r.returncode == 0 and "A" in r.stdout, r.stdout + r.stderr)
+shutil.rmtree(tv, ignore_errors=True)
+
+# V18: error grammar — usage/engine kinds; arity checked at the boundary
+r = run("outline")
+check("V18a missing arg is usage:", r.returncode == 1 and r.stderr.startswith("usage:"), r.stderr)
+r = run("outline", "a", "b", "c")
+check("V18b extra args are usage:", r.returncode == 1 and r.stderr.startswith("usage:"), r.stderr)
+r = run("search", "x", env={"VV_ENGINE": "turbo"})
+check("V18c unknown engine is engine:", r.returncode == 1 and r.stderr.startswith("engine:"), r.stderr)
+
 if not fails:
     shutil.rmtree(SB, ignore_errors=True)
 shutil.rmtree(_JR, ignore_errors=True)
-print(f"\n{len(fails)} failures: {fails}" if fails else "\nALL PASS (round-2: 30)")
+print(f"\n{len(fails)} failures: {fails}" if fails else "\nALL PASS (round-2: 37)")
 sys.exit(1 if fails else 0)

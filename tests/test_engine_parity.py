@@ -93,12 +93,83 @@ CASES = {
     "nbsp_fence.md": "\u00a0\u00a0```\n[[NbspNotFenced]]\n",  # NBSP is not fence indent in either engine
     "triple_backslash.md": "[[Tri\\\\\\|alias]] and [[TrailTwo\\\\]]\n",  # one backslash consumed per boundary
 }
+# EXPECTED is hand-authored from the documented/probed semantics — an artifact
+# independent of BOTH engines, so a shared implementation bug cannot bless
+# itself through the rust==python comparison alone (review 2026-08-26).
+# Tuples: (file, 1-based line, kind w|m, target).
+EXPECTED = {
+    ("plain.md", 1, "w", "One"), ("plain.md", 1, "w", "Two"),
+    ("plain.md", 1, "w", "Three"), ("plain.md", 1, "w", "Four"),
+    ("fenced.md", 4, "w", "Visible"),
+    ("tilde.md", 4, "w", "VisibleAfterTilde"),
+    ("mixed_fence.md", 5, "w", "VisibleNow"),
+    ("inline.md", 1, "w", "NotInCode"),
+    ("double_backtick.md", 1, "w", "OutsideDouble"),
+    ("triple_inline.md", 1, "w", "AfterTriple"),
+    ("unclosed_backtick.md", 1, "w", "UnclosedSpan"),
+    ("nested_fence.md", 8, "w", "AfterNested"),
+    # long_fence: ```` (4-run) CLOSES the ``` opener; the later ``` re-opens a
+    # fence that swallows [[AfterShort]] — so no links at all
+    ("frontmatter.md", 3, "w", "FromYaml"), ("frontmatter.md", 5, "w", "FromBody"),
+    ("unterminated_fm.md", 4, "w", "AfterUnterminated"),
+    ("mdlinks.md", 1, "m", "Some%20Note.md"), ("mdlinks.md", 1, "m", "sub/Other.md"),
+    ("mdlinks.md", 1, "m", "http://x.com/page.md"),
+    ("unicode.md", 1, "w", "Überblick"), ("unicode.md", 1, "w", "日本語ノート"),
+    ("unicode.md", 1, "w", "emoji🚀note"),
+    ("indented_fence.md", 4, "w", "AfterIndented"),
+    ("crlf.md", 1, "w", "CrlfOne"), ("crlf.md", 5, "w", "CrlfTwo"),
+    ("escaped_pipe.md", 1, "w", "TableTarget"), ("escaped_pipe.md", 2, "w", "Frag"),
+    ("escaped_pipe.md", 3, "w", "TrailBack"),
+    ("html_comment.md", 1, "w", "AfterComment"), ("html_comment.md", 5, "w", "AfterBlock"),
+    ("html_comment.md", 6, "w", "InPercent"), ("html_comment.md", 7, "w", "NotAComment"),
+    ("comment_in_fence.md", 4, "w", "NotSwallowed"),
+    ("runlen.md", 1, "w", "RunLenY"),
+    ("empty_targets.md", 1, "w", "Real Target"),
+    ("rsqb_alias.md", 1, "w", "RSQTarget"),
+    ("glued_mdlink.md", 1, "w", "Glued"), ("glued_mdlink.md", 1, "m", "z.md"),
+    ("dbl_backslash.md", 1, "w", "Dbl\\"), ("dbl_backslash.md", 1, "w", "Trail"),
+    ("comment_overlap.md", 1, "w", "CleanLink"),
+    ("comment_in_alias.md", 1, "w", "AliasKept"), ("comment_in_alias.md", 1, "w", "Plain2"),
+    ("comment_owns_fence.md", 4, "w", "AfterCmtFence"),
+    ("nbsp_fence.md", 2, "w", "NbspNotFenced"),
+    ("triple_backslash.md", 1, "w", "Tri\\\\"), ("triple_backslash.md", 1, "w", "TrailTwo\\"),
+}
 tmp = tempfile.mkdtemp(prefix="vv-parity-")
 for name, body in CASES.items():
     with open(os.path.join(tmp, name), "w", newline="") as f:
         f.write(body)
 r, p = rust_links(tmp), py_links(tmp)
+check("synthetic: python == EXPECTED", p == EXPECTED,
+      f"only-python={sorted(p - EXPECTED)[:4]} only-expected={sorted(EXPECTED - p)[:4]}")
+check("synthetic: rust == EXPECTED", r == EXPECTED,
+      f"only-rust={sorted(r - EXPECTED)[:4]} only-expected={sorted(EXPECTED - r)[:4]}")
 check("synthetic: rust == python", r == p, f"only-rust={sorted(r - p)[:4]} only-python={sorted(p - r)[:4]}")
+
+# ---- search parity: same query -> same paths AND scores in both engines ----
+# (snippets may differ at multi-byte boundaries; ranking must not)
+SEARCH_CORPUS = {
+    "Alpha.md": "beta beta beta beta beta beta beta beta\n",   # many mentions
+    "beta.md": "unrelated body\n",                              # named match
+    "sub/beta notes.md": "one beta mention\n",                  # name + mention
+    "sub/gamma.md": "beta once\n",
+}
+tmp2 = tempfile.mkdtemp(prefix="vv-parity-s-")
+os.makedirs(os.path.join(tmp2, "sub"))
+for name, body in SEARCH_CORPUS.items():
+    with open(os.path.join(tmp2, name), "w") as f:
+        f.write(body)
+def search_lines(vault, engine, *q):
+    env = dict(os.environ, VV_VAULT=vault, VV_ENGINE=engine)
+    rr = subprocess.run([sys.executable, os.path.join(REPO, "src", "vv.py"), "search", *q],
+                        capture_output=True, text=True, env=env)
+    return [l.strip() for l in rr.stdout.split("\n") if l.startswith("==")]
+rs = search_lines(tmp2, "rust", "beta")
+ps = search_lines(tmp2, "python", "beta")
+check("search: rust == python (paths+scores)", rs == ps and len(rs) == 4, f"rust={rs} py={ps}")
+check("search: name matches outrank mention count",
+      len(rs) == 4 and "sub/beta notes.md" in rs[0] and rs[1].startswith("== beta.md")
+      and "Alpha.md" in rs[2], rs)
+shutil.rmtree(tmp2, ignore_errors=True)
 shutil.rmtree(tmp, ignore_errors=True)
 
 # ---- live corpus ----
