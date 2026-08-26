@@ -22,12 +22,23 @@ SKIP_DIRS = {".git", ".obsidian", ".claude", ".trash", "graphify-out"}
 _t0 = time.perf_counter()
 _op = sys.argv[1] if len(sys.argv) > 1 else "?"
 
-def _log(out_bytes):
+_cf_bytes = 0  # counterfactual: what a whole-file read of the touched notes would cost
+
+def _log(out_bytes, exit_code=0, kind=None):
+    # Test suites (VV_JOURNAL_ROOT) and explicit opt-out don't pollute the
+    # day-to-day usage log the shadow pilot reads.
+    if os.environ.get("VV_JOURNAL_ROOT") or os.environ.get("VV_NO_METRICS"):
+        return
     try:
+        rec = {"ts": datetime.datetime.now().isoformat(timespec="seconds"),
+               "op": _op, "ms": round((time.perf_counter() - _t0) * 1000),
+               "out_bytes": out_bytes, "exit": exit_code}
+        if kind:
+            rec["kind"] = kind
+        if _cf_bytes:
+            rec["cf_bytes"] = _cf_bytes
         with open(METRICS, "a") as f:
-            f.write(json.dumps({"ts": datetime.datetime.now().isoformat(timespec="seconds"),
-                                "op": _op, "ms": round((time.perf_counter() - _t0) * 1000),
-                                "out_bytes": out_bytes}) + "\n")
+            f.write(json.dumps(rec) + "\n")
     except OSError:
         pass
 
@@ -38,7 +49,10 @@ def out(s=""):
     print(s)
 
 def die(msg, code=1):
-    sys.stderr.write(msg + "\n"); _log(0); sys.exit(code)
+    sys.stderr.write(msg + "\n")
+    first = msg.split("\n", 1)[0].split(" ", 1)[0]
+    _log(0, code, first[:-1] if first.endswith(":") else None)
+    sys.exit(code)
 
 
 def use_rust():
@@ -71,21 +85,30 @@ def contain(path):
         die(f"escape: path leaves the vault: {path}")
     return full
 
+def _cf(fp):
+    """Tally the counterfactual cost (whole-file bytes) of a resolved note."""
+    global _cf_bytes
+    try:
+        _cf_bytes += os.path.getsize(fp)
+    except OSError:
+        pass
+    return fp
+
 def resolve(ref):
     """Vault-relative path if it exists, else wikilink-style bare-name resolution.
     All paths are contained to the vault (no abs/.. escape)."""
     fp = contain(ref)
     if os.path.isfile(fp):
-        return fp
+        return _cf(fp)
     # allow folder/Name (no .md) exact path resolution
     fp_md = contain(ref + ".md") if not ref.endswith(".md") else fp
     if os.path.isfile(fp_md):
-        return fp_md
+        return _cf(fp_md)
     want = (ref[:-3] if ref.endswith(".md") else ref).lower()
     all_notes = list(md_files())
     hits = [p for p in all_notes if os.path.basename(p)[:-3].lower() == want]
     if len(hits) == 1:
-        return hits[0]
+        return _cf(hits[0])
     if not hits:
         sugg = suggest_names(want, all_notes)
         extra = ("\ndid you mean: " + " | ".join(sugg)) if sugg else ""
@@ -302,7 +325,7 @@ def cmd_patch(ref, sid, expect):
     cur = sec_text(lines, s)
     if sha8(cur) != expect:
         sys.stderr.write(f"stale: {sid} is {sha8(cur)}, expected {expect} — re-outline\n")
-        _log(0); sys.exit(3)
+        _log(0, 3, "stale"); sys.exit(3)
     body = sys.stdin.read().replace("\r\n", "\n")
     if body.endswith("\n"):
         body = body[:-1]   # strip the one newline the caller's shell/`read` framing adds
@@ -561,7 +584,7 @@ def cmd_search(*args):
         sys.stdout.write(r.stdout); sys.stderr.write(r.stderr)
         global _out_total
         _out_total += len(r.stdout)
-        _log(_out_total); sys.exit(r.returncode)
+        _log(_out_total, r.returncode); sys.exit(r.returncode)
     k, w, terms = 5, 500, []
     it = iter(args)
     for a in it:
@@ -1138,7 +1161,7 @@ def cmd_lint(*args):
     canonical = os.path.join(VAULT, ".claude/skills/vault-lint/vault_lint.py")
     if "--quick" not in args and os.path.exists(canonical):
         r = subprocess.run([sys.executable, canonical] + [a for a in args], cwd=VAULT)
-        _log(_out_total); sys.exit(r.returncode)
+        _log(_out_total, r.returncode); sys.exit(r.returncode)
     # --quick: native broken-wikilink scan (fence/inline-code aware, path-style by last segment)
     limit = 50
     if "--limit" in args:
@@ -1236,7 +1259,7 @@ def cmd_doctor(*args):
     except OSError:
         out("metrics: NOT writable")
     if js:
-        _log(_out_total); sys.exit(4)
+        _log(_out_total, 4, "dirty"); sys.exit(4)
 
 CMDS = {
     "outline": cmd_outline, "read": cmd_read, "head": cmd_head, "resolve": cmd_resolve,
@@ -1277,6 +1300,7 @@ if __name__ == "__main__":
         a = a[:i] + a[i + 2:]
     if not a:
         sys.exit(__doc__)
+    _op = a[0]   # real command, even when --vault preceded it
     fn = CMDS.get(a[0])
     if not fn:
         die(f"usage: unknown command {a[0]} — next: run vv with no args for help")
