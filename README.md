@@ -25,6 +25,23 @@ Query:   board FOLDER [k=v ...] · tags [--counts] · props KEY [FOLDER]
 Daily:   daily-append TEXT
 ```
 
+## Commands (v1.5)
+
+```
+show NOTE [--max-bytes N] [--from SEC]   # budgeted read with continuation tokens
+impact NOTE                              # blast radius: incoming links, git state, frontmatter
+rename NOTE NEWNAME [--apply]            # link-aware rename; dry-run plan by default
+move NOTE DESTFOLDER [--apply]           # link-aware move; bare-name links stay untouched
+deadends                                 # notes with no outgoing links
+lint [--quick]                           # delegates to canonical vault_lint.py; --quick = native broken-link scan
+doctor                                   # vault/engine/git/journal/metrics health (exit 4 on unresolved journal)
+```
+
+Rename/move safety: resolver-driven (typed wikilink/embed/alias/heading/block/YAML/md-link
+occurrences; fenced and inline-code text never rewritten), plan-then-apply, journaled
+multi-file transaction with rollback + post-apply verification, ambiguity and collisions
+refuse before any write.
+
 `NOTE` is a vault-relative path or a bare name (wikilink-style resolution;
 ambiguity is an error, never a guess).
 

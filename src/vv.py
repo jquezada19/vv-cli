@@ -329,6 +329,8 @@ def cmd_search(*args):
         die("error: no query")
     hits = []
     for p in md_files():
+        if rel(p).startswith("Sandbox/"):
+            continue  # parity with vrust engine's exclusion set
         try:
             text = open(p, errors="replace").read()
         except OSError:
@@ -354,6 +356,302 @@ def cmd_daily_append(text):
     atomic_write(hits[0], cur + ("" if cur.endswith("\n") else "\n") + text + "\n")
     out(f"appended to {rel(hits[0])}")
 
+# ================= v1.5: show / deadends / impact / rename / move / lint / doctor =================
+
+JOURNAL_ROOT = os.path.expanduser("~/.cache/vv/journals")
+
+def masked_lines(text):
+    """Line indices where wikilinks are inert (fences, frontmatter) — reuse parse()'s mask."""
+    lines = text.split("\n")
+    fenced = set(); open_ = False
+    fm_end = 0
+    if lines and lines[0].rstrip("\r") == "---":
+        for i in range(1, len(lines)):
+            if lines[i].rstrip("\r") == "---":
+                fm_end = i + 1
+                break
+    for i, l in enumerate(lines):
+        if i < fm_end:
+            continue  # frontmatter links (related:) ARE real links — do not mask
+        if re.match(r"^(```|~~~)", l):
+            open_ = not open_; fenced.add(i)
+        elif open_:
+            fenced.add(i)
+    return lines, fenced
+
+def strip_inline_code(line):
+    return re.sub(r"`[^`]*`", lambda m: "\0" * len(m.group(0)), line)
+
+LINK_RE = re.compile(r"(!?\[\[)([^\]|#]+)((?:#[^\]|]*)?(?:\|[^\]]*)?)(\]\])")
+MDLINK_RE = re.compile(r"(\]\()([^)\s]+\.md)(\))")
+
+def link_targets_in(text):
+    """Yield (line_idx, kind, target) for active links; fenced lines excluded."""
+    lines, fenced = masked_lines(text)
+    for i, l in enumerate(lines):
+        if i in fenced:
+            continue
+        scan = strip_inline_code(l)
+        for m in LINK_RE.finditer(scan):
+            yield i, "wiki", m.group(2).strip()
+        for m in MDLINK_RE.finditer(scan):
+            yield i, "md", m.group(2)
+
+def basename_index():
+    """lowercased basename -> [paths]"""
+    idx = {}
+    for p in md_files():
+        idx.setdefault(os.path.basename(p)[:-3].lower(), []).append(p)
+    return idx
+
+def occurrences(source_fp, include_bare=True):
+    """Files with rewritable link occurrences of source. Returns (hits, ambiguous_note).
+    hits = {path: n_occurrences}. Bare-name links count only if source basename is unique."""
+    src_base = os.path.basename(source_fp)[:-3].lower()
+    src_rel_noext = rel(source_fp)[:-3].lower()
+    idx = basename_index()
+    ambiguous = len(idx.get(src_base, [])) > 1
+    hits = {}
+    for p in md_files():
+        try:
+            text = open(p, errors="replace").read()
+        except OSError:
+            continue
+        n = 0
+        for _, kind, tgt in link_targets_in(text):
+            t = tgt.lower()
+            if kind == "wiki":
+                if t == src_base and not ambiguous and include_bare:
+                    n += 1
+                elif t == src_rel_noext or t + ".md" == rel(source_fp).lower():
+                    n += 1
+            else:
+                import urllib.parse
+                dec = urllib.parse.unquote(tgt)
+                cand = os.path.normpath(os.path.join(os.path.dirname(p), dec))
+                if os.path.abspath(cand) == os.path.abspath(source_fp) or \
+                   os.path.normpath(os.path.join(VAULT, dec)) == source_fp:
+                    n += 1
+        if n:
+            hits[p] = n
+    return hits, ambiguous
+
+def cmd_show(ref, *args):
+    max_bytes, start = 4000, "H0"
+    it = iter(args)
+    for a in it:
+        if a == "--max-bytes": max_bytes = int(next(it))
+        elif a == "--from": start = next(it)
+    lines, secs = parse(open(resolve(ref)).read())
+    started = False
+    used = 0
+    for s in secs:
+        if s["id"] == start:
+            started = True
+        if not started:
+            continue
+        t = sec_text(lines, s)
+        if used + len(t) > max_bytes and used > 0:
+            out(f"[more: {s['id']} '{s['title']}' {len(t)}B — continue: vv show {ref} --from {s['id']}]")
+            break
+        out(t)
+        used += len(t)
+    if not started:
+        die(f"error: no section {start}")
+
+def cmd_deadends():
+    n = 0
+    for p in md_files():
+        if not any(True for _ in link_targets_in(open(p, errors="replace").read())):
+            out(rel(p)); n += 1
+    out(f"({n} deadends)")
+
+def _git(args_):
+    return subprocess.run(["git", "-C", VAULT] + args_, capture_output=True, text=True).stdout.strip()
+
+def cmd_impact(ref, *args):
+    fp = resolve(ref)
+    hits, ambiguous = occurrences(fp)
+    out(f"note: {rel(fp)}")
+    if ambiguous:
+        out("AMBIGUOUS: basename shared with another note — bare-name links NOT counted or rewritable")
+    out(f"incoming-link files: {len(hits)} ({sum(hits.values())} occurrences)")
+    for p, n in sorted(hits.items(), key=lambda kv: -kv[1])[:15]:
+        out(f"  {n}\t{rel(p)}")
+    dirty = _git(["status", "--porcelain", "--", rel(fp)])
+    out(f"git: {'DIRTY — uncommitted changes' if dirty else 'clean'}")
+    fm, _ = split_fm(open(fp).read())
+    props = fm_props(fm)
+    out(f"frontmatter: type={props.get('type','-')} status={props.get('status','-')}")
+
+def _journal_start(name, files):
+    ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    jdir = os.path.join(JOURNAL_ROOT, f"{ts}-{name}")
+    os.makedirs(jdir)
+    manifest = {"op": name, "ts": ts, "files": {}}
+    for fp in files:
+        key = rel(fp).replace("/", "%2F")
+        import shutil as _sh
+        _sh.copy2(fp, os.path.join(jdir, key))
+        manifest["files"][rel(fp)] = key
+    with open(os.path.join(jdir, "manifest.json"), "w") as f:
+        json.dump(manifest, f)
+    return jdir
+
+def _journal_rollback(jdir):
+    man = json.load(open(os.path.join(jdir, "manifest.json")))
+    import shutil as _sh
+    for r_, key in man["files"].items():
+        _sh.copy2(os.path.join(jdir, key), os.path.join(VAULT, r_))
+
+def _journal_done(jdir):
+    import shutil as _sh
+    _sh.rmtree(jdir)
+
+def _rewrite_links(text, source_fp, new_rel_noext, rename_base):
+    """Rewrite active links to source. new_rel_noext = new vault-relative path w/o .md;
+    rename_base = new bare name (None if unchanged)."""
+    src_base = os.path.basename(source_fp)[:-3]
+    src_rel_noext = rel(source_fp)[:-3]
+    lines, fenced = masked_lines(text)
+    changed = 0
+    for i, l in enumerate(lines):
+        if i in fenced:
+            continue
+        spans = [(m.start(), m.end()) for m in re.finditer(r"`[^`]*`", l)]
+        def in_span(pos):
+            return any(a <= pos < b for a, b in spans)
+        def wiki_sub(m):
+            nonlocal changed
+            if in_span(m.start()):
+                return m.group(0)
+            tgt = m.group(2).strip()
+            t = tgt.lower()
+            if t == src_base.lower() and rename_base:
+                changed += 1
+                return m.group(1) + rename_base + m.group(3) + m.group(4)
+            if t == src_rel_noext.lower():
+                changed += 1
+                return m.group(1) + new_rel_noext + m.group(3) + m.group(4)
+            return m.group(0)
+        def md_sub(m):
+            nonlocal changed
+            if in_span(m.start()):
+                return m.group(0)
+            import urllib.parse
+            dec = urllib.parse.unquote(m.group(2))
+            if os.path.normpath(os.path.join(VAULT, dec)) == source_fp:
+                changed += 1
+                return m.group(1) + urllib.parse.quote(new_rel_noext + ".md") + m.group(3)
+            return m.group(0)
+        nl = LINK_RE.sub(wiki_sub, l)
+        nl = MDLINK_RE.sub(md_sub, nl)
+        lines[i] = nl
+    return "\n".join(lines), changed
+
+def _do_relocate(ref, dest_rel_noext, apply_, opname):
+    fp = resolve(ref)
+    src_rel = rel(fp)
+    new_fp = os.path.join(VAULT, dest_rel_noext + ".md")
+    if os.path.exists(new_fp):
+        die(f"error: target exists: {dest_rel_noext}.md")
+    new_base = os.path.basename(dest_rel_noext)
+    rename_base = new_base if new_base.lower() != os.path.basename(fp)[:-3].lower() else None
+    idx = basename_index()
+    if rename_base and rename_base.lower() in idx:
+        die(f"error: another note already has basename '{new_base}' — bare links would be ambiguous")
+    hits, ambiguous = occurrences(fp, include_bare=bool(rename_base))
+    if ambiguous and rename_base:
+        die(f"error: source basename is ambiguous in vault — resolve duplicate notes first")
+    out(f"plan: {opname} {src_rel} -> {dest_rel_noext}.md")
+    out(f"files to rewrite: {len(hits)} ({sum(hits.values())} link occurrences)")
+    for p, n in sorted(hits.items()):
+        out(f"  {n}\t{rel(p)}")
+    if not apply_:
+        out("(dry-run — pass --apply to execute)")
+        return
+    jdir = _journal_start(opname, list(hits.keys()) + [fp])
+    try:
+        results = {}
+        for p in hits:
+            text = open(p).read()
+            new_text, changed = _rewrite_links(text, fp, dest_rel_noext, rename_base)
+            if changed != hits[p]:
+                raise RuntimeError(f"span mismatch in {rel(p)}: planned {hits[p]}, rewrote {changed}")
+            results[p] = new_text
+        for p, new_text in results.items():
+            atomic_write(p, new_text)
+        os.makedirs(os.path.dirname(new_fp), exist_ok=True)
+        os.rename(fp, new_fp)
+        # post-apply verification: no active link to the OLD identity may remain
+        old_base = os.path.basename(src_rel)[:-3].lower()
+        old_rel_noext = src_rel[:-3].lower()
+        stale = 0
+        for p in results:
+            for _, kind, tgt in link_targets_in(open(p).read()):
+                t = tgt.strip().lower()
+                if kind == "wiki" and (t == old_rel_noext or (rename_base and t == old_base)):
+                    stale += 1
+        if stale:
+            raise RuntimeError(f"verification failed: {stale} stale links remain")
+        _journal_done(jdir)
+        out(f"applied: {len(results)} files rewritten, note {opname}d, verification clean")
+    except Exception as e:
+        _journal_rollback(jdir)
+        if os.path.exists(new_fp) and not os.path.exists(fp):
+            os.rename(new_fp, fp)
+        die(f"ROLLED BACK ({e}); originals restored from journal {jdir}")
+
+def cmd_rename(ref, new_name, *args):
+    fp = resolve(ref)
+    dest = os.path.join(os.path.dirname(rel(fp)), new_name[:-3] if new_name.endswith(".md") else new_name)
+    _do_relocate(ref, dest, "--apply" in args, "rename")
+
+def cmd_move(ref, dest_folder, *args):
+    fp = resolve(ref)
+    dest = os.path.join(dest_folder.rstrip("/"), os.path.basename(rel(fp))[:-3])
+    _do_relocate(ref, dest, "--apply" in args, "move")
+
+def cmd_lint(*args):
+    canonical = os.path.join(VAULT, ".claude/skills/vault-lint/vault_lint.py")
+    if "--quick" not in args and os.path.exists(canonical):
+        r = subprocess.run([sys.executable, canonical] + [a for a in args], cwd=VAULT)
+        _log(_out_total); sys.exit(r.returncode)
+    # --quick: native broken-wikilink scan (fence/inline-code aware, path-style by last segment)
+    idx = basename_index()
+    stems = set(idx.keys())
+    for p in glob.glob(os.path.join(VAULT, "Templates/**/*.md"), recursive=True):
+        stems.add(os.path.basename(p)[:-3].lower())
+    n = 0
+    for p in md_files():
+        for i, kind, tgt in link_targets_in(open(p, errors="replace").read()):
+            if kind != "wiki":
+                continue
+            t = tgt.strip().lower()
+            if t.startswith(("reference-", "feedback-", "project-", "user-")):
+                out(f"memory-slug\t{rel(p)}:{i+1}\t[[{tgt}]]"); n += 1
+                continue
+            last = t.split("/")[-1]
+            if last not in stems:
+                out(f"broken-link\t{rel(p)}:{i+1}\t[[{tgt}]]"); n += 1
+    out(f"({n} findings)")
+
+def cmd_doctor():
+    out(f"vault: {VAULT} ({'ok' if os.path.isdir(VAULT) else 'MISSING'})")
+    out(f"engine: {'vrust ok' if os.path.exists(VRUST) else 'vrust MISSING (python fallback)'}")
+    dirty = _git(["status", "--porcelain"])
+    out(f"git: {'clean' if not dirty else f'{len(dirty.splitlines())} dirty paths'}")
+    js = sorted(glob.glob(os.path.join(JOURNAL_ROOT, "*"))) if os.path.isdir(JOURNAL_ROOT) else []
+    out(f"journals: {'none pending' if not js else 'UNRESOLVED: ' + ', '.join(os.path.basename(j) for j in js)}")
+    try:
+        with open(METRICS, "a"):
+            pass
+        out("metrics: writable")
+    except OSError:
+        out("metrics: NOT writable")
+    if js:
+        _log(_out_total); sys.exit(4)
+
 CMDS = {
     "outline": cmd_outline, "read": cmd_read, "head": cmd_head, "resolve": cmd_resolve,
     "patch": cmd_patch, "appendsec": cmd_appendsec, "append": cmd_append,
@@ -361,6 +659,8 @@ CMDS = {
     "backlinks": cmd_backlinks, "links": cmd_links, "orphans": cmd_orphans,
     "board": cmd_board, "tags": cmd_tags, "props": cmd_props,
     "search": cmd_search, "daily-append": cmd_daily_append,
+    "show": cmd_show, "deadends": cmd_deadends, "impact": cmd_impact,
+    "rename": cmd_rename, "move": cmd_move, "lint": cmd_lint, "doctor": cmd_doctor,
 }
 
 if __name__ == "__main__":
