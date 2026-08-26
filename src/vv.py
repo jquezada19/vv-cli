@@ -94,20 +94,23 @@ def fm_bounds(lines):
     return 0  # unterminated: treat the whole file as body, never as frontmatter
 
 def fence_mask(lines, start=0):
-    """Line indices inside fenced blocks. A fence closes only on its OWN marker type
-    (CommonMark): ``` does not close ~~~ and vice versa."""
+    """Line indices inside fenced blocks, per CommonMark:
+    a fence closes only on its OWN marker character AND a run at least as long as the
+    opener. So ```` ```` ```` is not closed by ``` — which is how nested code samples
+    are written — and ``` is never closed by ~~~."""
     masked = set()
-    marker = None
+    marker = None      # (char, length)
     for i in range(start, len(lines)):
-        l = lines[i]
-        m = re.match(r"^\s{0,3}(`{3,}|~{3,})", l)
+        l = lines[i].rstrip("\r")
+        m = re.match(r"^\s{0,3}(`{3,}|~{3,})(.*)$", l)
         if marker is None:
             if m:
-                marker = m.group(1)[0]
+                marker = (m.group(1)[0], len(m.group(1)))
                 masked.add(i)
         else:
             masked.add(i)
-            if m and m.group(1)[0] == marker and not l.strip().rstrip(marker):
+            if m and m.group(1)[0] == marker[0] and len(m.group(1)) >= marker[1] \
+                    and not m.group(2).strip():
                 marker = None
     return masked
 
@@ -201,6 +204,32 @@ def block_scalar_key(fm_lines, key):
             return False
     return False
 
+def splice(lines, start, end, new_lines):
+    """Replace lines[start:end] with `new_lines` (bare content, no line terminators)
+    and return the file text.
+
+    Terminators are never invented or dropped: the file's EOL style is applied to the
+    inserted lines, and the file's EOF-newline property is preserved exactly as it was.
+    `lines` is a split on "\\n", so on a CRLF file every element except the last carries
+    a trailing "\\r" and a file ending in a newline has "" as its last element."""
+    crlf = eol_of("\n".join(lines)) == "\r\n"
+    ended_with_newline = bool(lines) and lines[-1] == ""
+    body = [b.rstrip("\r") for b in new_lines]
+    if end >= len(lines):
+        # the replaced span reaches EOF: restore the file's original EOF-newline property
+        # only the terminator is normalized — interior blank lines are content and are kept
+        if ended_with_newline:
+            if not body or body[-1] != "":
+                body.append("")
+        elif body and body[-1] == "":
+            body.pop()
+    merged = list(lines[:start]) + body + list(lines[end:])
+    if crlf:
+        # every element except the final one is followed by a newline -> gets the \r
+        merged = [(m if m.endswith("\r") else m + "\r") if i < len(merged) - 1 else m.rstrip("\r")
+                  for i, m in enumerate(merged)]
+    return "\n".join(merged)
+
 WIKILINK = re.compile(r"\[\[([^\]|#]+)(?:#[^\]|]*)?(?:\|[^\]]*)?\]\]")
 
 # ---------- commands ----------
@@ -237,13 +266,9 @@ def cmd_patch(ref, sid, expect):
         _log(0); sys.exit(3)
     body = sys.stdin.read().replace("\r\n", "\n")
     if body.endswith("\n"):
-        body = body[:-1]
+        body = body[:-1]   # strip the one newline the caller's shell/`read` framing adds
     body_lines = [] if (body == "" and s["end"] == s["start"]) else body.split("\n")
-    if eol_of("\n".join(lines)) == "\r\n":
-        body_lines = [b + "\r" for b in body_lines]
-        if s["end"] == len(lines) and lines and not lines[-1].endswith("\r") and lines[-1] != "":
-            body_lines[-1] = body_lines[-1].rstrip("\r")
-    atomic_write(fp, "\n".join(lines[:s["start"]] + body_lines + lines[s["end"]:]))
+    atomic_write(fp, splice(lines, s["start"], s["end"], body_lines))
     out(f"patched {sid} in {rel(fp)} ({len(cur)}B -> {len(body)}B)")
 
 def cmd_appendsec(ref, sid, text):
@@ -253,9 +278,7 @@ def cmd_appendsec(ref, sid, text):
     ins = s["end"]
     while ins > s["start"] and lines[ins - 1].strip() == "":
         ins -= 1
-    if eol_of("\n".join(lines)) == "\r\n":
-        text = text + "\r"
-    atomic_write(fp, "\n".join(lines[:ins] + [text] + lines[ins:]))
+    atomic_write(fp, splice(lines, ins, ins, [text]))
     out(f"appended to {sid} in {rel(fp)}")
 
 def cmd_append(ref, text):
@@ -325,16 +348,41 @@ def cmd_new(*args):
         if not hits:
             die(f"error: no template matching '{template}' under Templates/")
         content = read_raw(hits[0])
+    missing = []
     for k, v in kv.items():
-        pat = re.compile(rf"^{re.escape(k)}:.*$", re.M)
-        if pat.search(content):
-            i = pat.search(content).start()
-            content = content[:i] + f"{k}: {v}" + content[pat.search(content).end():]  # literal, no re.sub template
-    if kv and not content.startswith("---"):
+        pat = re.compile(rf"^{re.escape(k)}:[^\r\n]*", re.M)
+        m = pat.search(content)
+        if m:
+            content = content[:m.start()] + f"{k}: {v}" + content[m.end():]  # literal, no re.sub template
+        else:
+            missing.append((k, v))
+    if missing and content.lstrip(BOM).startswith("---"):
+        # template HAS frontmatter: insert the new keys into it rather than dropping them
+        fm, body, tail, bom = split_fm_full(content)
+        if fm is not None:
+            eolc = eol_of(content)
+            fm_lines = fm.replace("\r\n", "\n").split("\n") + [f"{k}: {v}" for k, v in missing]
+            content = bom + "---" + eolc + eolc.join(fm_lines) + eolc + "---" + tail + body
+            missing = []
+    kv = dict(missing) if missing else ({} if content.lstrip(BOM).startswith("---") else kv)
+    if kv and not content.lstrip(BOM).startswith("---"):
         fmb = "\n".join(f"{k}: {v}" for k, v in kv.items())
         content = f"---\n{fmb}\n---\n" + content
     atomic_write(fp, content)
     out(f"created {rel(fp)}")
+
+def link_matches(from_fp, kind, target, tgt_fp, tgt_base, tgt_rel_noext, ambiguous):
+    """THE definition of 'this link resolves to that note'. Used by backlinks,
+    orphans, impact and rename so they can never disagree."""
+    t = target.strip().lower()
+    if kind == "wiki":
+        t_noext = t[:-3] if t.endswith(".md") else t
+        return (t_noext == tgt_base and not ambiguous) or t_noext == tgt_rel_noext
+    import urllib.parse
+    dec = urllib.parse.unquote(target.strip())
+    cand = os.path.normpath(os.path.join(os.path.dirname(from_fp), dec))
+    return os.path.abspath(cand) == os.path.abspath(tgt_fp) or \
+        os.path.normpath(os.path.join(VAULT, dec)) == tgt_fp
 
 def _links_to(target_fp):
     """True-if-p-links-to-target, using the SAME occurrence logic as impact/rename.
@@ -361,12 +409,18 @@ def _links_to(target_fp):
 
 def cmd_backlinks(ref):
     fp = resolve(ref)
-    pred = _links_to(fp)
-    n = 0
-    for p in md_files():
-        if p != fp and pred(p):
-            out(rel(p)); n += 1
-    out(f"({n} backlinks)")
+    tgt_base = os.path.basename(fp)[:-3].lower()
+    tgt_rel_noext = rel(fp)[:-3].lower()
+    ambiguous = len(basename_index().get(tgt_base, [])) > 1
+    hits = []
+    for p, _i, kind, t in scan_links(needle=tgt_base):
+        if p == fp or p in hits:
+            continue
+        if link_matches(p, kind, t, fp, tgt_base, tgt_rel_noext, ambiguous):
+            hits.append(p)
+    for p in sorted(hits):
+        out(rel(p))
+    out(f"({len(hits)} backlinks)")
 
 def cmd_links(ref):
     fp = resolve(ref)
@@ -383,10 +437,9 @@ def cmd_orphans(folder=""):
     files = list(md_files())
     # a note is linked if ANY note resolves a link to it (path-aware)
     all_targets = set()
-    for p in files:
-        for _, kind, t in link_targets_in(read_raw(p)):
-            tl = t.lower()
-            all_targets.add(tl[:-3] if tl.endswith(".md") else tl)
+    for _p, _i, _kind, t in scan_links():
+        tl = t.strip().lower()
+        all_targets.add(tl[:-3] if tl.endswith(".md") else tl)
     n = 0
     for p in sorted(files):
         if not (p == root or p.startswith(root + os.sep) or not folder):
@@ -499,8 +552,71 @@ def masked_lines(text):
     fm_end = fm_bounds(lines)
     return lines, fence_mask(lines, fm_end)
 
+def scan_links(needle=None):
+    """Yield (abs_path, line_idx0, kind, target) for every active link in the vault.
+
+    Uses the Rust engine when present (it does the I/O and lexing; ~2x faster), else the
+    Python scanner. Both are held to byte-identical output by tests/test_engine_parity.py —
+    the SEMANTICS (ambiguity, .md equivalence, relative resolution) stay here in Python so
+    there is only ever one definition of what a link MEANS.
+
+    `needle` prefilters wiki targets by substring (case-insensitive); markdown links are
+    always yielded because percent-encoding hides names from a substring filter.
+    """
+    if os.path.exists(VRUST):
+        cmd = [VRUST, "linkscan"] + (["--grep", needle] if needle else [])
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        if r.returncode == 0:
+            for line in r.stdout.split("\n"):
+                if not line:
+                    continue
+                rel_, ln, kind, tgt = line.split("\t", 3)
+                yield os.path.join(VAULT, rel_), int(ln) - 1, ("wiki" if kind == "w" else "md"), tgt
+            return
+    n = needle.lower() if needle else None
+    for p in md_files():
+        try:
+            text = read_raw(p)
+        except SystemExit:
+            continue
+        for i, kind, tgt in link_targets_in(text):
+            if n and kind == "wiki" and n not in tgt.lower():
+                continue
+            yield p, i, kind, tgt
+
+CODE_SPAN = re.compile(r"(?<!`)(`+)(?!`).*?(?<!`)\1(?!`)", re.S)
+
+def code_spans(line):
+    """(start, end) of inline code spans, CommonMark-style: a run of N backticks is
+    closed by a run of exactly N. Handles ``[[x]]`` as well as `[[x]]`."""
+    spans = []
+    i = 0
+    while i < len(line):
+        if line[i] == "`":
+            n = 0
+            while i + n < len(line) and line[i + n] == "`":
+                n += 1
+            close = line.find("`" * n, i + n)
+            while close != -1:
+                after = close + n
+                if (after >= len(line) or line[after] != "`"):
+                    break
+                close = line.find("`" * n, after + 1)
+            if close != -1:
+                spans.append((i, close + n))
+                i = close + n
+                continue
+            i += n
+            continue
+        i += 1
+    return spans
+
 def strip_inline_code(line):
-    return re.sub(r"`[^`]*`", lambda m: "\0" * len(m.group(0)), line)
+    masked = list(line)
+    for a, b in code_spans(line):
+        for k in range(a, b):
+            masked[k] = "\0"
+    return "".join(masked)
 
 LINK_RE = re.compile(r"(!?\[\[)([^\]|#]+)((?:#[^\]|]*)?(?:\|[^\]]*)?)(\]\])")
 MDLINK_RE = re.compile(r"(\]\()([^)\s]+\.md)(\))")
@@ -532,29 +648,21 @@ def occurrences(source_fp, include_bare=True):
     idx = basename_index()
     ambiguous = len(idx.get(src_base, [])) > 1
     hits = {}
-    for p in md_files():
-        try:
-            text = open(p, errors="replace").read()
-        except OSError:
-            continue
-        n = 0
-        for _, kind, tgt in link_targets_in(text):
-            t = tgt.lower()
-            if kind == "wiki":
-                t_noext = t[:-3] if t.endswith(".md") else t  # [[Note.md]] is the same target as [[Note]]
-                if t_noext == src_base and not ambiguous and include_bare:
-                    n += 1
-                elif t_noext == src_rel_noext:
-                    n += 1
-            else:
-                import urllib.parse
-                dec = urllib.parse.unquote(tgt)
-                cand = os.path.normpath(os.path.join(os.path.dirname(p), dec))
-                if os.path.abspath(cand) == os.path.abspath(source_fp) or \
-                   os.path.normpath(os.path.join(VAULT, dec)) == source_fp:
-                    n += 1
-        if n:
-            hits[p] = n
+    for p, _i, kind, tgt in scan_links(needle=src_base):
+        t = tgt.strip().lower()
+        if kind == "wiki":
+            t_noext = t[:-3] if t.endswith(".md") else t  # [[Note.md]] is the same target as [[Note]]
+            if t_noext == src_base and not ambiguous and include_bare:
+                hits[p] = hits.get(p, 0) + 1
+            elif t_noext == src_rel_noext:
+                hits[p] = hits.get(p, 0) + 1
+        else:
+            import urllib.parse
+            dec = urllib.parse.unquote(tgt.strip())
+            cand = os.path.normpath(os.path.join(os.path.dirname(p), dec))
+            if os.path.abspath(cand) == os.path.abspath(source_fp) or \
+               os.path.normpath(os.path.join(VAULT, dec)) == source_fp:
+                hits[p] = hits.get(p, 0) + 1
     return hits, ambiguous
 
 def cmd_show(ref, *args):
@@ -641,7 +749,7 @@ def _rewrite_links(text, source_fp, new_rel_noext, rename_base, linking_fp=None)
     for i, l in enumerate(lines):
         if i in fenced:
             continue
-        spans = [(m.start(), m.end()) for m in re.finditer(r"`[^`]*`", l)]
+        spans = code_spans(l)
         def in_span(pos):
             return any(a <= pos < b for a, b in spans)
         def wiki_sub(m):
@@ -718,9 +826,11 @@ def _do_relocate(ref, dest_rel_noext, apply_, opname):
             results[p] = new_text
         fault_after = int(os.environ.get("VV_FAULT_AFTER", "-1"))
         for wi, (p, new_text) in enumerate(results.items()):
-            if fault_after >= 0 and wi >= fault_after:
+            if 0 <= fault_after <= wi:
                 raise RuntimeError(f"INJECTED FAULT after {wi} writes")
             atomic_write(p, new_text)
+        if fault_after == len(results):
+            raise RuntimeError(f"INJECTED FAULT after {len(results)} writes (pre-rename)")
         d = os.path.dirname(new_fp)
         if d:
             os.makedirs(d, exist_ok=True)
@@ -764,23 +874,39 @@ def cmd_lint(*args):
         r = subprocess.run([sys.executable, canonical] + [a for a in args], cwd=VAULT)
         _log(_out_total); sys.exit(r.returncode)
     # --quick: native broken-wikilink scan (fence/inline-code aware, path-style by last segment)
+    limit = 50
+    if "--limit" in args:
+        limit = int(args[list(args).index("--limit") + 1])
     idx = basename_index()
     stems = set(idx.keys())
-    for p in glob.glob(os.path.join(VAULT, "Templates/**/*.md"), recursive=True):
+    for p in sorted(glob.glob(os.path.join(VAULT, "Templates/**/*.md"), recursive=True)):
         stems.add(os.path.basename(p)[:-3].lower())
-    n = 0
+    findings = []
     for p in md_files():
-        for i, kind, tgt in link_targets_in(open(p, errors="replace").read()):
+        try:
+            text = read_raw(p)
+        except SystemExit:
+            continue
+        for i, kind, tgt in link_targets_in(text):
             if kind != "wiki":
                 continue
             t = tgt.strip().lower()
             if t.startswith(("reference-", "feedback-", "project-", "user-")):
-                out(f"memory-slug\t{rel(p)}:{i+1}\t[[{tgt}]]"); n += 1
+                findings.append(("memory-slug", f"{rel(p)}:{i+1}", tgt))
                 continue
             last = t.split("/")[-1]
+            last = last[:-3] if last.endswith(".md") else last
             if last not in stems:
-                out(f"broken-link\t{rel(p)}:{i+1}\t[[{tgt}]]"); n += 1
-    out(f"({n} findings)")
+                findings.append(("broken-link", f"{rel(p)}:{i+1}", tgt))
+    # output is context: report every finding's COUNT, but print at most `limit` lines
+    from collections import Counter
+    by_kind = Counter(f[0] for f in findings)
+    for kind, loc, tgt in findings[:limit]:
+        out(f"{kind}\t{loc}\t[[{tgt}]]")
+    summary = " ".join(f"{k}={v}" for k, v in sorted(by_kind.items()))
+    shown = min(len(findings), limit)
+    more = f" — {len(findings) - shown} more, raise with --limit N" if len(findings) > shown else ""
+    out(f"({len(findings)} findings: {summary or 'none'}; showing {shown}{more})")
 
 def cmd_doctor():
     out(f"vault: {VAULT} ({'ok' if os.path.isdir(VAULT) else 'MISSING'})")

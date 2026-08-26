@@ -91,7 +91,7 @@ check("R8 deadends finds linkless note", "vv15test/RN Taken" in r.stdout, r.stdo
 
 # R9: lint --quick flags broken + memory-slug links, skips fenced
 open(f"{SB}/Broken.md", "w").write("[[Definitely Missing Note zzq]] and [[reference-some-memory]]\n```\n[[Also Missing But Fenced]]\n```\n")
-r = run("lint", "--quick")
+r = run("lint", "--quick", "--limit", "5000")
 check("R9a broken flagged", "broken-link" in r.stdout and "Definitely Missing Note zzq" in r.stdout)
 check("R9b memory-slug classed", "memory-slug" in r.stdout)
 check("R9c fenced skipped", "Also Missing But Fenced" not in r.stdout)

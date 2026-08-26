@@ -176,6 +176,65 @@ with open(os.path.join(VAULT, "Latin.md"), "wb") as f:
 r = run("outline", "Latin.md")
 check("F18 non-UTF-8 clean error", r.returncode == 5 and "not valid UTF-8" in r.stderr and "Traceback" not in r.stderr, r.stderr[:120])
 
+# ================= hands-on QA pass (Codex, 2026-08-26) =================
+
+# C1: a nested code sample (4-backtick fence containing ```) is not document structure
+w("Nested.md", "# Real Section\nbefore fence\n\n````markdown\nouter\n```python\n# fake heading inside outer fence\n```\nafter inner fence\n````\n\nafter outer fence\n\n# Next Section\nnext bytes\n")
+r = run("outline", "Nested.md")
+titles = [l.split("\t")[2] for l in r.stdout.strip().split("\n")]
+check("C1a nested fence not parsed as heading", "fake heading inside outer fence" not in titles, titles)
+rows = {l.split("\t")[2]: l.split("\t") for l in r.stdout.strip().split("\n")}
+r = run("patch", "Nested.md", rows["Real Section"][0], rows["Real Section"][4], stdin="# Real Section\nreplacement only\n\n")
+t = open(os.path.join(VAULT, "Nested.md")).read()
+check("C1b whole section replaced", t == "# Real Section\nreplacement only\n\n# Next Section\nnext bytes\n", repr(t))
+
+# C2: rename leaves double-backtick spans and nested fences alone
+w("RTarget.md", "# RTarget\n")
+w("RLinks.md",
+  "Bare [[RTarget]].\nInline `[[RTarget|c]]` stays.\nDouble ``[[RTarget|d]]`` stays.\n\n"
+  "````markdown\nouter\n```python\n[[RTarget|nested]] stays\n```\nouter\n````\n\ntail\n")
+r = run("rename", "RTarget.md", "RTarget2", "--apply")
+t = open(os.path.join(VAULT, "RLinks.md")).read()
+check("C2a active link rewritten", "Bare [[RTarget2]]." in t, t[:60])
+check("C2b single-backtick span untouched", "`[[RTarget|c]]`" in t)
+check("C2c double-backtick span untouched", "``[[RTarget|d]]``" in t, t)
+check("C2d nested fence untouched", "[[RTarget|nested]] stays" in t, t)
+
+# C3: patching the last section of a CRLF file keeps a valid CRLF terminator
+with open(os.path.join(VAULT, "CrlfEnd.md"), "wb") as f:
+    f.write(b"# End\r\nold end\r\n")
+r = run("outline", "CrlfEnd.md")
+row = r.stdout.strip().split("\n")[0].split("\t")
+r = run("patch", "CrlfEnd.md", row[0], row[4], stdin="# End\nnew end\n")
+raw = open(os.path.join(VAULT, "CrlfEnd.md"), "rb").read()
+check("C3 CRLF EOF terminator intact", raw == b"# End\r\nnew end\r\n", raw)
+
+# C4: a CRLF template with an override stays CRLF
+with open(os.path.join(VAULT, "Templates/Crlf.md"), "wb") as f:
+    f.write(b"---\r\ntype: t\r\n---\r\nbody\r\n")
+r = run("new", "FromCrlf", "--type", "changed")
+raw = open(os.path.join(VAULT, "FromCrlf.md"), "rb").read() if os.path.exists(os.path.join(VAULT, "FromCrlf.md")) else b""
+r = run("new", "FromCrlf2", "--template", "Crlf", "--type", "changed")
+raw2 = open(os.path.join(VAULT, "FromCrlf2.md"), "rb").read()
+check("C4 CRLF template stays CRLF", b"\n" not in raw2.replace(b"\r\n", b""), raw2)
+
+# C5: --key values absent from the template are added, not dropped
+w("Templates/Plain.md", "---\ntype: todo\n---\nBody\n")
+r = run("new", "WithKeys", "--template", "Plain", "--status", "open", "--owner", "jeff")
+t = open(os.path.join(VAULT, "WithKeys.md")).read()
+check("C5 missing keys added to template frontmatter",
+      "type: todo" in t and "status: open" in t and "owner: jeff" in t and t.count("---") == 2, repr(t))
+
+# C6: the fault hook can fire in the pre-rename window, and that rolls back cleanly
+w("FTarget.md", "# FTarget\n")
+w("FLink.md", "See [[FTarget]].\n")
+before = open(os.path.join(VAULT, "FLink.md")).read()
+r = run("rename", "FTarget.md", "FRenamed", "--apply", env_extra={"VV_FAULT_AFTER": "1"})
+check("C6a pre-rename fault aborts", r.returncode == 1 and "ROLLED BACK" in r.stderr, r.stderr[:120])
+check("C6b links restored", open(os.path.join(VAULT, "FLink.md")).read() == before)
+check("C6c note not renamed", os.path.exists(os.path.join(VAULT, "FTarget.md")) and not os.path.exists(os.path.join(VAULT, "FRenamed.md")))
+shutil.rmtree(os.path.expanduser("~/.cache/vv/journals"), ignore_errors=True)
+
 shutil.rmtree(VAULT, ignore_errors=True)
 shutil.rmtree(OUTSIDE, ignore_errors=True)
 print(f"\n{len(fails)} failures: {fails}" if fails else "\nALL PANEL-FINDING TESTS PASS")
