@@ -42,26 +42,64 @@ and fence masking that `grep` silently gets wrong (see *Correctness*, below).
 
 ## Commands
 
-```
-Read:    outline NOTE · read NOTE SEC · head NOTE · resolve NAME
-         show NOTE [--max-bytes N] [--from SEC]      # budgeted read, continuation tokens
-         search TERMS [--k N] [--w C]                # name-match ranked; "dir/" terms filter by path
-Write:   patch NOTE SEC SHA8 <stdin                  # compare-and-swap; exit 3 = stale, re-outline
-         appendsec NOTE SEC TEXT · append NOTE TEXT
-         set NOTE KEY VALUE · unset NOTE KEY · new PATH [--template T] [--key v ...]
-Graph:   backlinks NOTE · links NOTE · orphans [FOLDER] · deadends · impact NOTE
-Refactor: rename NOTE NEWNAME [--apply [PLAN]]       # link-aware; dry-run prints a plan digest;
-          move NOTE FOLDER [--apply [PLAN]]          #   --apply <digest> executes EXACTLY that plan or exits stale
-Query:   board FOLDER [k=v ...] · tags [--counts] · props KEY [FOLDER]
-Daily:   daily-append TEXT
-Health:  lint [--quick] · doctor [--rollback | --discard]
-```
+`NOTE` is a vault-relative path or a bare name (wikilink-style resolution — a
+failed lookup prints `did you mean:` suggestions).
 
-`NOTE` is a vault-relative path or a bare name (wikilink-style resolution; a
-failed lookup suggests near-misses). Global: `--vault PATH` or `VV_VAULT`.
-`VV_ENGINE=rust|python` forces an engine (tests run both). Exit codes: `0` ok ·
-`1` usage/not-found · `3` stale hash or stale plan · `4` dirty journal · `5` not
-UTF-8. Errors are grep-stable: `kind: message — next: <command>`.
+### Read
+
+| command | what it does |
+|---|---|
+| `outline NOTE` | section map: id · level · title · size · sha8 anchor |
+| `read NOTE SEC` | one section, by outline id |
+| `show NOTE [--max-bytes N] [--from SEC]` | budgeted read with a continuation token when the budget runs out |
+| `head NOTE` · `resolve NAME` | frontmatter only · name → path |
+| `search TERMS [--k N] [--w C]` | ranked full-text: a note **named** for the query outranks mere mentions; a `dir/` term filters by path |
+
+### Write
+
+| command | what it does |
+|---|---|
+| `patch NOTE SEC SHA8 <stdin` | replace one section, compare-and-swap on its sha8 — exit 3 = stale, re-outline |
+| `appendsec NOTE SEC TEXT` · `append NOTE TEXT` | append inside a section · at end of note |
+| `set NOTE KEY VALUE` · `unset NOTE KEY` | frontmatter field flip, body untouched |
+| `new PATH [--template T] [--key v ...]` | create from a vault template |
+| `daily-append TEXT` | append to today's daily note |
+
+### Refactor (link-aware, journaled)
+
+| command | what it does |
+|---|---|
+| `rename NOTE NEWNAME` | dry-run: prints every link that will be rewritten + a **plan digest** |
+| `move NOTE FOLDER` | same, for folder moves; bare-name links are left alone |
+| `... --apply` | execute the plan |
+| `... --apply <digest>` | execute **exactly** the previewed plan — exit 3 if anything drifted since review |
+
+### Graph & query
+
+| command | what it does |
+|---|---|
+| `backlinks NOTE` · `links NOTE` | who links here · where this links |
+| `impact NOTE` | blast radius before a refactor |
+| `orphans [FOLDER]` · `deadends` | nothing links in · nothing links out |
+| `board FOLDER [k=v ...]` | frontmatter table with filters |
+| `tags [--counts]` · `props KEY [FOLDER]` | tag census · one field across notes |
+
+### Health
+
+| command | what it does |
+|---|---|
+| `lint [--quick]` | broken links, memory-slug links, table-pipe render breaks |
+| `doctor` | vault / engine / git / journal / metrics status |
+| `doctor --rollback` · `--discard` | resolve a pending journal (restores or drops backups) |
+
+### Global flags, environment, exit codes
+
+|  |  |
+|---|---|
+| `--vault PATH` / `VV_VAULT` | target vault (flag wins) |
+| `VV_ENGINE=rust\|python` | force an engine — the test gate runs both |
+| exit `0 · 1 · 3 · 4 · 5` | ok · usage/not-found · stale hash or plan · dirty journal · not UTF-8 |
+| errors | grep-stable: `kind: message — next: <command>` |
 
 ## Safety model
 
