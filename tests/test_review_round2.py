@@ -191,8 +191,22 @@ finally:
     vv.VAULT, vv._VAULT_REAL = old_vault, old_real
 shutil.rmtree(tv, ignore_errors=True)
 
+# V13: a bare --- (frontmatter fence / hr) is NOT a table delimiter row — a real
+# delimiter always contains a pipe (even single-column: |---|). Without this, the
+# line above a closing --- was classified as a table header, flagging aliased
+# wikilinks inside quoted YAML frontmatter (4 live false positives, 2026-08-26).
+open(f"{SB}/FM QQ.md", "w").write(
+    '---\ntitle: x\nrelated: ["[[FmTgt QQ|alias]]"]\n---\nbody\n\ntext | [[HrTgt QQ|alias]]\n---\n\nafter\n')
+open(f"{SB}/T3.md", "w").write("| h |\n|---|\n| [[OneCol QQ|alias]] |\n")
+for n in ("FmTgt QQ", "HrTgt QQ", "OneCol QQ"):
+    open(f"{SB}/{n}.md", "w").write("x\n")
+r = run("lint", "--quick", "--limit", "5000")
+check("V13a frontmatter alias pipe not flagged", "FmTgt QQ" not in r.stdout, r.stdout[-400:])
+check("V13b hr below pipe-line not a delimiter", "HrTgt QQ" not in r.stdout, r.stdout[-400:])
+check("V13c single-column |---| still flagged", "table-pipe" in r.stdout and "OneCol QQ" in r.stdout, r.stdout[-400:])
+
 if not fails:
     shutil.rmtree(SB, ignore_errors=True)
 shutil.rmtree(_JR, ignore_errors=True)
-print(f"\n{len(fails)} failures: {fails}" if fails else "\nALL PASS (round-2: 27)")
+print(f"\n{len(fails)} failures: {fails}" if fails else "\nALL PASS (round-2: 30)")
 sys.exit(1 if fails else 0)

@@ -1122,9 +1122,14 @@ def cmd_lint(*args):
         # The fix is \| — flag it, since the note renders broken in the app.
         lines, fenced, cmask = masked_lines(text)
         # a line belongs to a table if a delimiter row (|---|---| etc.) is adjacent
-        # within its contiguous block — tables need no leading pipes (review 2026-08-26)
+        # within its contiguous block — tables need no leading pipes (review 2026-08-26).
+        # A real delimiter row always contains a pipe (single-column: |---|); a bare
+        # --- is a frontmatter fence or hr, never a table — and frontmatter is
+        # excluded outright so its quoted alias pipes can't read as cells (2026-08-26)
+        fm_end = fm_bounds(lines)
         delim = re.compile(r"^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{3,}:?\s*)*\|?\s*$")
-        delim_rows = {i for i, l in enumerate(lines) if i not in fenced and "-" in l and delim.match(l.rstrip("\r"))}
+        delim_rows = {i for i, l in enumerate(lines)
+                      if i >= fm_end and i not in fenced and "|" in l and delim.match(l.rstrip("\r"))}
         table_rows = set()
         for d in delim_rows:
             j = d - 1                      # header row above
