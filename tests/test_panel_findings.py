@@ -1,0 +1,153 @@
+#!/usr/bin/env python3
+"""Regression tests for defects reported by the 2026-08-26 multi-model review panel.
+Each test pins one fixed defect so it cannot silently return. Runs on a temp vault."""
+import subprocess, sys, os, shutil, tempfile, glob, json
+
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+VV = os.path.join(REPO, "src", "vv.py")
+VAULT = tempfile.mkdtemp(prefix="vv-panel-")
+OUTSIDE = tempfile.mkdtemp(prefix="vv-outside-")
+
+def run(*args, stdin=None, env_extra=None):
+    env = dict(os.environ, VV_VAULT=VAULT)
+    if env_extra:
+        env.update(env_extra)
+    return subprocess.run([sys.executable, VV, *args], capture_output=True, text=True,
+                          input=stdin, env=env)
+
+fails = []
+def check(name, cond, detail=""):
+    print(("PASS " if cond else "FAIL ") + name + (f"  [{str(detail)[:160]}]" if detail and not cond else ""))
+    if not cond: fails.append(name)
+
+def w(name, text):
+    fp = os.path.join(VAULT, name)
+    os.makedirs(os.path.dirname(fp), exist_ok=True)
+    with open(fp, "w", newline="") as f:
+        f.write(text)
+    return fp
+
+# ---- F1: path containment (writes must stay inside the vault) ----
+victim = os.path.join(OUTSIDE, "victim.md")
+open(victim, "w").write("ORIGINAL OUTSIDE CONTENT\n")
+r = run("append", victim, "appended")
+check("F1a absolute path outside vault refused", r.returncode == 1 and "escapes vault" in r.stderr, r.stderr)
+check("F1b outside file untouched", open(victim).read() == "ORIGINAL OUTSIDE CONTENT\n")
+r = run("append", "../" + os.path.basename(OUTSIDE) + "/victim.md", "x")
+check("F1c parent-relative path refused", r.returncode == 1, r.stderr)
+r = run("new", os.path.join(OUTSIDE, "created.md"))
+check("F1d new outside vault refused", r.returncode == 1 and not os.path.exists(os.path.join(OUTSIDE, "created.md")))
+
+# ---- F2: folder-relative queries must not match sibling prefixes ----
+w("Work/A.md", "---\ntype: t\n---\nbody\n")
+w("Workshop/B.md", "---\ntype: t\n---\nbody\n")
+r = run("props", "type", "Work")
+check("F2 folder boundary exact", "1\tt" in r.stdout, r.stdout)
+
+# ---- F3: multi-line YAML values are refused, not silently orphaned ----
+w("Block.md", "---\ntitle: x\ndesc: |\n  line one\n  line two\nstatus: open\n---\nbody\n")
+before = open(os.path.join(VAULT, "Block.md")).read()
+r = run("set", "Block.md", "desc", "newvalue")
+check("F3a block scalar set refused", r.returncode == 1 and "multi-line" in r.stderr, r.stderr)
+check("F3b file untouched", open(os.path.join(VAULT, "Block.md")).read() == before)
+r = run("set", "Block.md", "status", "done")
+after = open(os.path.join(VAULT, "Block.md")).read()
+check("F3c sibling scalar still settable", r.returncode == 0 and "status: done" in after and "  line two" in after)
+
+# ---- F4: value text is written literally (no substitution-template interpretation) ----
+w("Lit.md", "---\nk: old\n---\nbody\n")
+r = run("set", "Lit.md", "k", r"C:\new\table")
+t = open(os.path.join(VAULT, "Lit.md")).read()
+check("F4 backslash value literal", r"k: C:\new\table" in t and t.count("---") == 2, repr(t))
+
+# ---- F5: H0 holding frontmatter is not patchable ----
+w("Fm.md", "---\ntype: t\n---\npreamble\n\n## S\nbody\n")
+r = run("outline", "Fm.md")
+h0 = [l for l in r.stdout.strip().split("\n") if l.startswith("H0")]
+if h0:
+    r2 = run("patch", "Fm.md", "H0", h0[0].split("\t")[4], stdin="replaced\n")
+    check("F5 patch H0-with-frontmatter refused", r2.returncode == 1 and "frontmatter" in r2.stderr, r2.stderr)
+    check("F5b frontmatter intact", "type: t" in open(os.path.join(VAULT, "Fm.md")).read())
+
+# ---- F6: backlinks/orphans agree with impact on path-qualified links ----
+w("folder/Note.md", "# Note\n")
+w("Ref.md", "See [[folder/Note]].\n")
+r = run("backlinks", "folder/Note.md")
+check("F6a backlinks sees path-form link", "Ref.md" in r.stdout, r.stdout)
+r = run("orphans")
+check("F6b orphans excludes path-linked note", "folder/Note.md" not in r.stdout, r.stdout)
+r = run("impact", "folder/Note.md")
+check("F6c impact agrees", "incoming-link files: 1" in r.stdout, r.stdout)
+
+# ---- F7: wikilink written with .md extension still resolves/rewrites ----
+w("ExtTarget.md", "# ExtTarget\n")
+w("ExtRef.md", "Link [[ExtTarget.md]] here.\n")
+r = run("backlinks", "ExtTarget.md")
+check("F7 .md-suffixed wikilink counted", "ExtRef.md" in r.stdout, r.stdout)
+
+# ---- F8: relative markdown links rename correctly (previously always aborted) ----
+w("RelTarget.md", "# RelTarget\n")
+w("deep/RelRef.md", "Link [x](../RelTarget.md) here.\n")
+r = run("rename", "RelTarget.md", "RelRenamed", "--apply")
+t = open(os.path.join(VAULT, "deep/RelRef.md")).read()
+check("F8a relative md-link rename applies", "verification clean" in r.stdout, r.stdout + r.stderr)
+check("F8b stays relative", "(../RelRenamed.md)" in t, t)
+
+# ---- F9: a note linking to itself renames cleanly, leaving no duplicate ----
+w("Self.md", "# Self\nI link to [[Self]] and [[Self|me]].\n")
+r = run("rename", "Self.md", "SelfNew", "--apply")
+check("F9a self-link rename ok", "verification clean" in r.stdout, r.stdout + r.stderr)
+check("F9b no duplicate left behind", os.path.exists(os.path.join(VAULT, "SelfNew.md")) and not os.path.exists(os.path.join(VAULT, "Self.md")))
+check("F9c self-link rewritten", "[[SelfNew]]" in open(os.path.join(VAULT, "SelfNew.md")).read())
+
+# ---- F10: journal keys cannot collide (path-encoded names) ----
+w("a/b.md", "Link [[JTarget]] one\n")
+w("a%2Fb.md", "Link [[JTarget]] two\n")
+w("JTarget.md", "# JTarget\n")
+orig1 = open(os.path.join(VAULT, "a/b.md")).read()
+orig2 = open(os.path.join(VAULT, "a%2Fb.md")).read()
+r = run("rename", "JTarget.md", "JBoom", "--apply", env_extra={"VV_FAULT_AFTER": "1"})
+check("F10a rollback triggered", r.returncode == 1, r.stdout + r.stderr)
+check("F10b colliding names restored correctly",
+      open(os.path.join(VAULT, "a/b.md")).read() == orig1 and
+      open(os.path.join(VAULT, "a%2Fb.md")).read() == orig2)
+check("F10c source note still present", os.path.exists(os.path.join(VAULT, "JTarget.md")))
+shutil.rmtree(os.path.expanduser("~/.cache/vv/journals"), ignore_errors=True)
+
+# ---- F11: writing through a symlink updates the target, not the link ----
+real = os.path.join(VAULT, "Real.md")
+open(real, "w").write("---\nk: v\n---\nbody\n")
+link = os.path.join(VAULT, "Link.md")
+try:
+    os.symlink(real, link)
+    r = run("set", "Link.md", "k", "changed")
+    check("F11a symlink preserved", os.path.islink(link), "symlink was replaced by a regular file")
+    check("F11b target updated", "k: changed" in open(real).read())
+except OSError as e:
+    print(f"SKIP F11 symlink (unsupported: {e})")
+
+# ---- F12: template selection is deterministic ----
+w("Templates/T-a.md", "---\ntype: a\n---\n")
+w("Templates/sub/T-b.md", "---\ntype: b\n---\n")
+r1 = run("new", "N1", "--template", "T-")
+r2 = run("new", "N2", "--template", "T-")
+c1 = open(os.path.join(VAULT, "N1.md")).read()
+c2 = open(os.path.join(VAULT, "N2.md")).read()
+check("F12 template pick deterministic", c1 == c2, f"{c1!r} vs {c2!r}")
+
+# ---- F14: [[Note.md]] wikilinks are rewritten on rename, style preserved ----
+w("ExtR2.md", "Links [[ExtT.md]] and [[ExtT]] and [[ExtT.md|a]].\n")
+w("ExtT.md", "# ExtT\n")
+r = run("rename", "ExtT.md", "ExtT2", "--apply")
+t = open(os.path.join(VAULT, "ExtR2.md")).read()
+check("F14a all three forms rewritten", t == "Links [[ExtT2.md]] and [[ExtT2]] and [[ExtT2.md|a]].\n", repr(t))
+check("F14b verification ran clean", "verification clean" in r.stdout, r.stdout + r.stderr)
+
+# ---- F13: folder/Name (no extension) resolves to folder/Name.md ----
+r = run("resolve", "folder/Note")
+check("F13 extensionless path resolves", r.stdout.strip() == "folder/Note.md", r.stdout + r.stderr)
+
+shutil.rmtree(VAULT, ignore_errors=True)
+shutil.rmtree(OUTSIDE, ignore_errors=True)
+print(f"\n{len(fails)} failures: {fails}" if fails else "\nALL PANEL-FINDING TESTS PASS")
+sys.exit(1 if fails else 0)

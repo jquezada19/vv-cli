@@ -142,7 +142,7 @@ check("H2 no-trailing-newline append", "last line no newline\nadded\n" == t, rep
 # H3: CRLF file — outline/read work; patch preserves content integrity
 open(f"{SB}/H Crlf.md", "wb").write(b"## A\r\nbody one\r\n\r\n## B\r\nbody two\r\n")
 r = run("outline", "Sandbox/vvtest/H Crlf.md")
-check("H3a CRLF outline parses 3 sections", len(r.stdout.strip().split("\n")) == 3, r.stdout)
+check("H3a CRLF outline parses 2 sections (empty H0 unlisted)", len(r.stdout.strip().split("\n")) == 2, r.stdout)
 lines = r.stdout.strip().split("\n")
 hb = next(l for l in lines if "\tB\t" in l.replace("\r",""))
 r = run("read", "Sandbox/vvtest/H Crlf.md", hb.split("\t")[0])
@@ -152,7 +152,7 @@ check("H3b CRLF read section B", "body two" in r.stdout)
 open(f"{SB}/H Uni.md", "w").write("## Überblick — Résumé 🚀\nunicode body\n\n## Ascii\nplain\n")
 r = run("outline", "Sandbox/vvtest/H Uni.md")
 check("H4a unicode heading listed", "Überblick" in r.stdout)
-hu = r.stdout.strip().split("\n")[1]
+hu = next(l for l in r.stdout.strip().split("\n") if "berblick" in l)
 r = run("patch", "Sandbox/vvtest/H Uni.md", hu.split("\t")[0], hu.split("\t")[4], stdin="## Überblick — Résumé 🚀\nreplaced ünïcode\n")
 check("H4b unicode patch", r.returncode == 0 and "replaced ünïcode" in open(f"{SB}/H Uni.md").read())
 
@@ -164,7 +164,7 @@ check("H5 zero-byte outline", r.returncode == 0 and "(preamble)" in r.stdout, r.
 # H6: patch that INSERTS a new heading — later section ids shift but hashes stay honest
 open(f"{SB}/H Grow.md", "w").write("## One\na\n\n## Two\nb\n")
 r = run("outline", "Sandbox/vvtest/H Grow.md")
-h1 = r.stdout.strip().split("\n")[1]
+h1 = next(l for l in r.stdout.strip().split("\n") if "\tOne\t" in l)
 old_two = next(l for l in r.stdout.strip().split("\n") if "\tTwo\t" in l)
 run("patch", "Sandbox/vvtest/H Grow.md", h1.split("\t")[0], h1.split("\t")[4], stdin="## One\na\n\n## Inserted\nmid\n")
 r = run("outline", "Sandbox/vvtest/H Grow.md")
@@ -177,7 +177,7 @@ check("H6c stale id+hash pair cannot corrupt", "b\n" in open(f"{SB}/H Grow.md").
 # H7: concurrent external modification between outline and patch
 open(f"{SB}/H Race.md", "w").write("## R\noriginal\n")
 r = run("outline", "Sandbox/vvtest/H Race.md")
-hr = r.stdout.strip().split("\n")[1]
+hr = next(l for l in r.stdout.strip().split("\n") if "\tR\t" in l)
 open(f"{SB}/H Race.md", "w").write("## R\nexternally changed\n")
 r = run("patch", "Sandbox/vvtest/H Race.md", hr.split("\t")[0], hr.split("\t")[4], stdin="## R\nagent version\n")
 check("H7 concurrent edit refused", r.returncode == 3 and "externally changed" in open(f"{SB}/H Race.md").read())

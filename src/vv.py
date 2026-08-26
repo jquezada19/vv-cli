@@ -14,7 +14,7 @@ Exit: 0 ok · 1 not-found/usage · 3 stale hash.
 """
 import sys, os, re, json, time, hashlib, glob, subprocess, datetime
 
-VAULT = os.path.expanduser("~/Documents/Obsidian Vault")
+VAULT = os.environ.get("VV_VAULT") or os.path.expanduser("~/Documents/Obsidian Vault")
 VRUST = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "vrust/target/release/vrust")
 METRICS = os.path.expanduser("~/.claude/metrics/vv.jsonl")
 SKIP_DIRS = {".git", ".obsidian", ".claude", ".trash", "graphify-out"}
@@ -47,11 +47,26 @@ def md_files():
             if n.endswith(".md"):
                 yield os.path.join(dirpath, n)
 
+_VAULT_REAL = os.path.realpath(VAULT)
+
+def contain(path):
+    """Resolve `path` and REFUSE anything outside the vault (abs paths, .. escape, symlink escape)."""
+    full = path if os.path.isabs(path) else os.path.join(VAULT, path)
+    real = os.path.realpath(full)
+    if real != _VAULT_REAL and not real.startswith(_VAULT_REAL + os.sep):
+        die(f"error: path escapes vault: {path}")
+    return full
+
 def resolve(ref):
-    """Vault-relative path if it exists, else wikilink-style bare-name resolution."""
-    fp = os.path.join(VAULT, ref)
+    """Vault-relative path if it exists, else wikilink-style bare-name resolution.
+    All paths are contained to the vault (no abs/.. escape)."""
+    fp = contain(ref)
     if os.path.isfile(fp):
         return fp
+    # allow folder/Name (no .md) exact path resolution
+    fp_md = contain(ref + ".md") if not ref.endswith(".md") else fp
+    if os.path.isfile(fp_md):
+        return fp_md
     want = (ref[:-3] if ref.endswith(".md") else ref).lower()
     hits = [p for p in md_files() if os.path.basename(p)[:-3].lower() == want]
     if len(hits) == 1:
@@ -104,8 +119,15 @@ def find_sec(lines, secs, sid):
     die(f"error: no section {sid} (run outline)")
 
 def split_fm(text):
-    m = re.match(r"^---\n(.*?)\n---\n?", text, re.S)
+    m = re.match(r"^---\r?\n(.*?)\r?\n---\r?\n?", text, re.S)
     return (m.group(1), text[m.end():]) if m else (None, text)
+
+def split_fm_full(text):
+    """(fm, body, tail) — tail is the newline (if any) after the closing ---, preserved verbatim."""
+    m = re.match(r"^---\r?\n(.*?)\r?\n---(\r?\n)?", text, re.S)
+    if not m:
+        return None, text, ""
+    return m.group(1), text[m.end():], m.group(2) or ""
 
 def fm_props(fm):
     props = {}
@@ -115,29 +137,62 @@ def fm_props(fm):
                 props[m.group(1)] = m.group(2).strip('"')
     return props
 
+def read_raw(fp):
+    with open(fp, newline="") as f:
+        return f.read()
+
+def eol_of(text):
+    return "\r\n" if "\r\n" in text else "\n"
+
 def atomic_write(fp, content):
-    tmp = fp + ".tmp"
-    with open(tmp, "w") as f:
-        f.write(content)
-    os.replace(tmp, fp)
+    # follow a symlink to its real target so we replace the file, not the link
+    target = os.path.realpath(fp) if os.path.islink(fp) else fp
+    d = os.path.dirname(target) or "."
+    import tempfile as _tf
+    fd, tmp = _tf.mkstemp(dir=d, prefix=".vv-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", newline="") as f:
+            f.write(content)
+        os.replace(tmp, target)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+def block_scalar_key(fm_lines, key):
+    """True if `key` at column 0 has a block/flow value that spans continuation lines
+    (a `>`/`|` scalar, or a following more-indented line). set/unset would orphan it."""
+    for i, l in enumerate(fm_lines):
+        if re.match(rf"^{re.escape(key)}:", l):
+            val = l.split(":", 1)[1].strip()
+            if val in (">", "|", ">-", "|-", ">+", "|+", ""):
+                nxt = fm_lines[i + 1] if i + 1 < len(fm_lines) else ""
+                if nxt[:1] in (" ", "\t") or (val and val[0] in "|>"):
+                    return True
+            return False
+    return False
 
 WIKILINK = re.compile(r"\[\[([^\]|#]+)(?:#[^\]|]*)?(?:\|[^\]]*)?\]\]")
 
 # ---------- commands ----------
 def cmd_outline(ref):
-    lines, secs = parse(open(resolve(ref)).read())
+    lines, secs = parse(read_raw(resolve(ref)))
     for s in secs:
+        if s["start"] == s["end"]:
+            continue  # empty preamble span — nothing addressable, and [] vs [""] must stay distinguishable
         t = sec_text(lines, s)
         out(f"{s['id']}\t{'#'*s['level'] or '-'}\t{s['title']}\t{len(t)}B\t{sha8(t)}")
 
 def cmd_read(ref, sid):
-    lines, secs = parse(open(resolve(ref)).read())
+    lines, secs = parse(read_raw(resolve(ref)))
     s = find_sec(lines, secs, sid)
     out(sec_text(lines, s))
     out(f"--sha8:{sha8(sec_text(lines, s))}")
 
 def cmd_head(ref):
-    fm, _ = split_fm(open(resolve(ref)).read())
+    fm, _ = split_fm(read_raw(resolve(ref)))
     out(fm if fm is not None else "(no frontmatter)")
 
 def cmd_resolve(ref):
@@ -145,55 +200,78 @@ def cmd_resolve(ref):
 
 def cmd_patch(ref, sid, expect):
     fp = resolve(ref)
-    lines, secs = parse(open(fp).read())
+    lines, secs = parse(read_raw(fp))
     s = find_sec(lines, secs, sid)
+    if sid == "H0" and s["end"] > 0 and lines and lines[0].rstrip("\r") == "---":
+        die("error: H0 contains frontmatter — edit it with `set`/`unset`, not `patch` (patch would rewrite YAML as body)")
     cur = sec_text(lines, s)
     if sha8(cur) != expect:
         sys.stderr.write(f"stale: {sid} is {sha8(cur)}, expected {expect} — re-outline\n")
         _log(0); sys.exit(3)
-    body = sys.stdin.read()
+    body = sys.stdin.read().replace("\r\n", "\n")
     if body.endswith("\n"):
         body = body[:-1]
-    atomic_write(fp, "\n".join(lines[:s["start"]] + body.split("\n") + lines[s["end"]:]))
+    body_lines = [] if (body == "" and s["end"] == s["start"]) else body.split("\n")
+    if eol_of("\n".join(lines)) == "\r\n":
+        body_lines = [b + "\r" for b in body_lines]
+        if s["end"] == len(lines) and lines and not lines[-1].endswith("\r") and lines[-1] != "":
+            body_lines[-1] = body_lines[-1].rstrip("\r")
+    atomic_write(fp, "\n".join(lines[:s["start"]] + body_lines + lines[s["end"]:]))
     out(f"patched {sid} in {rel(fp)} ({len(cur)}B -> {len(body)}B)")
 
 def cmd_appendsec(ref, sid, text):
     fp = resolve(ref)
-    lines, secs = parse(open(fp).read())
+    lines, secs = parse(read_raw(fp))
     s = find_sec(lines, secs, sid)
     ins = s["end"]
     while ins > s["start"] and lines[ins - 1].strip() == "":
         ins -= 1
+    if eol_of("\n".join(lines)) == "\r\n":
+        text = text + "\r"
     atomic_write(fp, "\n".join(lines[:ins] + [text] + lines[ins:]))
     out(f"appended to {sid} in {rel(fp)}")
 
 def cmd_append(ref, text):
     fp = resolve(ref)
-    cur = open(fp).read()
-    atomic_write(fp, cur + ("" if cur.endswith("\n") or not cur else "\n") + text + "\n")
+    cur = read_raw(fp)
+    eol = eol_of(cur)
+    atomic_write(fp, cur + ("" if cur.endswith("\n") or not cur else eol) + text + eol)
     out(f"appended to {rel(fp)}")
 
 def cmd_set(ref, key, value):
     fp = resolve(ref)
-    text = open(fp).read()
-    fm, body = split_fm(text)
+    text = read_raw(fp)
+    fm, body, tail = split_fm_full(text)
+    eol = eol_of(text)
     if fm is None:
-        atomic_write(fp, f"---\n{key}: {value}\n---\n{text}")
+        atomic_write(fp, f"---{eol}{key}: {value}{eol}---{eol}{text}")
     else:
-        pat = re.compile(rf"^{re.escape(key)}:.*$", re.M)
-        new_fm = pat.sub(f"{key}: {value}", fm) if pat.search(fm) else fm + f"\n{key}: {value}"
-        atomic_write(fp, f"---\n{new_fm}\n---\n{body}")
+        fm_lines = fm.replace("\r\n", "\n").split("\n")
+        if block_scalar_key(fm_lines, key):
+            die(f"error: '{key}' has a multi-line/block value — edit it directly, not via `set` (would orphan continuation lines)")
+        pat = re.compile(rf"^{re.escape(key)}:")
+        hit = [i for i, l in enumerate(fm_lines) if pat.match(l)]
+        if hit:
+            fm_lines[hit[0]] = f"{key}: {value}"
+        else:
+            fm_lines.append(f"{key}: {value}")
+        atomic_write(fp, "---" + eol + eol.join(fm_lines) + eol + "---" + tail + body)
     out(f"set {key}={value} in {rel(fp)}")
 
 def cmd_unset(ref, key):
     fp = resolve(ref)
-    fm, body = split_fm(open(fp).read())
+    text = read_raw(fp)
+    fm, body, tail = split_fm_full(text)
     if fm is None:
         die(f"error: no frontmatter in {rel(fp)}")
-    new_fm = "\n".join(l for l in fm.splitlines() if not re.match(rf"^{re.escape(key)}:", l))
-    if new_fm == fm:
+    eol = eol_of(text)
+    fm_lines = fm.replace("\r\n", "\n").split("\n")
+    if block_scalar_key(fm_lines, key):
+        die(f"error: '{key}' has a multi-line/block value — remove it directly, not via `unset` (would orphan continuation lines)")
+    kept = [l for l in fm_lines if not re.match(rf"^{re.escape(key)}:", l)]
+    if kept == fm_lines:
         die(f"error: no key {key} in {rel(fp)}")
-    atomic_write(fp, f"---\n{new_fm}\n---\n{body}")
+    atomic_write(fp, "---" + eol + eol.join(kept) + eol + "---" + tail + body)
     out(f"unset {key} in {rel(fp)}")
 
 def cmd_new(*args):
@@ -208,60 +286,87 @@ def cmd_new(*args):
             path = a
     if not path:
         die("usage: new PATH [--template NAME] [--key value ...]")
-    fp = os.path.join(VAULT, path if path.endswith(".md") else path + ".md")
+    fp = contain(path if path.endswith(".md") else path + ".md")
     if os.path.exists(fp):
         die(f"error: exists: {rel(fp)}")
-    os.makedirs(os.path.dirname(fp), exist_ok=True)
+    d = os.path.dirname(fp)
+    if d:
+        os.makedirs(d, exist_ok=True)
     content = ""
     if template:
-        hits = glob.glob(os.path.join(VAULT, "Templates", "**", template + "*.md"), recursive=True)
+        hits = sorted(glob.glob(os.path.join(VAULT, "Templates", "**", template + "*.md"), recursive=True))
         if not hits:
             die(f"error: no template matching '{template}' under Templates/")
-        content = open(hits[0]).read()
+        content = read_raw(hits[0])
     for k, v in kv.items():
         pat = re.compile(rf"^{re.escape(k)}:.*$", re.M)
         if pat.search(content):
-            content = pat.sub(f"{k}: {v}", content, count=1)
+            i = pat.search(content).start()
+            content = content[:i] + f"{k}: {v}" + content[pat.search(content).end():]  # literal, no re.sub template
     if kv and not content.startswith("---"):
         fmb = "\n".join(f"{k}: {v}" for k, v in kv.items())
         content = f"---\n{fmb}\n---\n" + content
     atomic_write(fp, content)
     out(f"created {rel(fp)}")
 
+def _links_to(target_fp):
+    """True-if-p-links-to-target, using the SAME occurrence logic as impact/rename.
+    Matches bare basename (when unambiguous), path-form, and md-links."""
+    tgt_base = os.path.basename(target_fp)[:-3].lower()
+    tgt_rel_noext = rel(target_fp)[:-3].lower()
+    ambiguous = len(basename_index().get(tgt_base, [])) > 1
+    def links_from(p):
+        for _, kind, t in link_targets_in(read_raw(p)):
+            tl = t.lower()
+            if kind == "wiki":
+                tl_noext = tl[:-3] if tl.endswith(".md") else tl
+                if (tl_noext == tgt_base and not ambiguous) or tl_noext == tgt_rel_noext:
+                    return True
+            else:
+                import urllib.parse
+                dec = urllib.parse.unquote(t)
+                cand = os.path.normpath(os.path.join(os.path.dirname(p), dec))
+                if os.path.abspath(cand) == os.path.abspath(target_fp) or \
+                   os.path.normpath(os.path.join(VAULT, dec)) == target_fp:
+                    return True
+        return False
+    return links_from
+
 def cmd_backlinks(ref):
-    target = os.path.basename(resolve(ref))[:-3].lower()
+    fp = resolve(ref)
+    pred = _links_to(fp)
     n = 0
     for p in md_files():
-        try:
-            text = open(p, errors="replace").read()
-        except OSError:
-            continue
-        if any(l.strip().lower() == target for l in WIKILINK.findall(text)):
+        if p != fp and pred(p):
             out(rel(p)); n += 1
     out(f"({n} backlinks)")
 
 def cmd_links(ref):
     fp = resolve(ref)
     seen = []
-    for l in WIKILINK.findall(open(fp).read()):
-        l = l.strip()
-        if l not in seen:
-            seen.append(l)
+    for _, kind, t in link_targets_in(read_raw(fp)):
+        if kind == "wiki" and t not in seen:
+            seen.append(t)
     for l in seen:
         out(l)
     out(f"({len(seen)} links)")
 
 def cmd_orphans(folder=""):
-    root = os.path.join(VAULT, folder) if folder else VAULT
-    linked = set()
-    names = {}
-    for p in md_files():
-        names[os.path.basename(p)[:-3].lower()] = p
-        for l in WIKILINK.findall(open(p, errors="replace").read()):
-            linked.add(l.strip().lower())
+    root = contain(folder) if folder else VAULT
+    files = list(md_files())
+    # a note is linked if ANY note resolves a link to it (path-aware)
+    all_targets = set()
+    for p in files:
+        for _, kind, t in link_targets_in(read_raw(p)):
+            tl = t.lower()
+            all_targets.add(tl[:-3] if tl.endswith(".md") else tl)
     n = 0
-    for name, p in sorted(names.items()):
-        if name not in linked and p.startswith(root):
+    for p in sorted(files):
+        if not (p == root or p.startswith(root + os.sep) or not folder):
+            continue
+        base = os.path.basename(p)[:-3].lower()
+        rel_noext = rel(p)[:-3].lower()
+        if base not in all_targets and rel_noext not in all_targets:
             out(rel(p)); n += 1
     out(f"({n} orphans)")
 
@@ -298,11 +403,11 @@ def cmd_tags(*args):
     out(f"({len(c)} tags)")
 
 def cmd_props(key, folder=""):
-    root = os.path.join(VAULT, folder) if folder else VAULT
+    root = contain(folder) if folder else VAULT
     from collections import Counter
     c = Counter()
     for p in md_files():
-        if not p.startswith(root):
+        if folder and not (p == root or p.startswith(root + os.sep)):
             continue
         fm, _ = split_fm(open(p, errors="replace").read())
         v = fm_props(fm).get(key)
@@ -421,9 +526,10 @@ def occurrences(source_fp, include_bare=True):
         for _, kind, tgt in link_targets_in(text):
             t = tgt.lower()
             if kind == "wiki":
-                if t == src_base and not ambiguous and include_bare:
+                t_noext = t[:-3] if t.endswith(".md") else t  # [[Note.md]] is the same target as [[Note]]
+                if t_noext == src_base and not ambiguous and include_bare:
                     n += 1
-                elif t == src_rel_noext or t + ".md" == rel(source_fp).lower():
+                elif t_noext == src_rel_noext:
                     n += 1
             else:
                 import urllib.parse
@@ -442,7 +548,7 @@ def cmd_show(ref, *args):
     for a in it:
         if a == "--max-bytes": max_bytes = int(next(it))
         elif a == "--from": start = next(it)
-    lines, secs = parse(open(resolve(ref)).read())
+    lines, secs = parse(read_raw(resolve(ref)))
     started = False
     used = 0
     for s in secs:
@@ -480,18 +586,18 @@ def cmd_impact(ref, *args):
         out(f"  {n}\t{rel(p)}")
     dirty = _git(["status", "--porcelain", "--", rel(fp)])
     out(f"git: {'DIRTY — uncommitted changes' if dirty else 'clean'}")
-    fm, _ = split_fm(open(fp).read())
+    fm, _ = split_fm(read_raw(fp))
     props = fm_props(fm)
     out(f"frontmatter: type={props.get('type','-')} status={props.get('status','-')}")
 
 def _journal_start(name, files):
-    ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S-%f")
     jdir = os.path.join(JOURNAL_ROOT, f"{ts}-{name}")
     os.makedirs(jdir)
     manifest = {"op": name, "ts": ts, "files": {}}
-    for fp in files:
-        key = rel(fp).replace("/", "%2F")
-        import shutil as _sh
+    import shutil as _sh
+    for idx, fp in enumerate(files):  # index key — collision-proof (rel-path %2F encoding was not)
+        key = f"f{idx}.bak"
         _sh.copy2(fp, os.path.join(jdir, key))
         manifest["files"][rel(fp)] = key
     with open(os.path.join(jdir, "manifest.json"), "w") as f:
@@ -508,11 +614,13 @@ def _journal_done(jdir):
     import shutil as _sh
     _sh.rmtree(jdir)
 
-def _rewrite_links(text, source_fp, new_rel_noext, rename_base):
+def _rewrite_links(text, source_fp, new_rel_noext, rename_base, linking_fp=None):
     """Rewrite active links to source. new_rel_noext = new vault-relative path w/o .md;
-    rename_base = new bare name (None if unchanged)."""
+    rename_base = new bare name (None if unchanged). linking_fp = the file being rewritten
+    (so relative md-links can be rewritten relatively, matching how occurrences() counts them)."""
     src_base = os.path.basename(source_fp)[:-3]
     src_rel_noext = rel(source_fp)[:-3]
+    new_fp_abs = os.path.join(VAULT, new_rel_noext + ".md")
     lines, fenced = masked_lines(text)
     changed = 0
     for i, l in enumerate(lines):
@@ -527,12 +635,14 @@ def _rewrite_links(text, source_fp, new_rel_noext, rename_base):
                 return m.group(0)
             tgt = m.group(2).strip()
             t = tgt.lower()
-            if t == src_base.lower() and rename_base:
+            ext = ".md" if t.endswith(".md") else ""   # preserve the author's [[Note.md]] style
+            t_noext = t[:-3] if ext else t
+            if t_noext == src_base.lower() and rename_base:
                 changed += 1
-                return m.group(1) + rename_base + m.group(3) + m.group(4)
-            if t == src_rel_noext.lower():
+                return m.group(1) + rename_base + ext + m.group(3) + m.group(4)
+            if t_noext == src_rel_noext.lower():
                 changed += 1
-                return m.group(1) + new_rel_noext + m.group(3) + m.group(4)
+                return m.group(1) + new_rel_noext + ext + m.group(3) + m.group(4)
             return m.group(0)
         def md_sub(m):
             nonlocal changed
@@ -540,7 +650,16 @@ def _rewrite_links(text, source_fp, new_rel_noext, rename_base):
                 return m.group(0)
             import urllib.parse
             dec = urllib.parse.unquote(m.group(2))
-            if os.path.normpath(os.path.join(VAULT, dec)) == source_fp:
+            is_relative = not os.path.isabs(dec) and (dec.startswith("./") or dec.startswith("../")
+                          or (linking_fp and os.path.normpath(os.path.join(os.path.dirname(linking_fp), dec)) == source_fp
+                              and os.path.normpath(os.path.join(VAULT, dec)) != source_fp))
+            matches_root = os.path.normpath(os.path.join(VAULT, dec)) == source_fp
+            matches_rel = linking_fp and os.path.normpath(os.path.join(os.path.dirname(linking_fp), dec)) == source_fp
+            if matches_rel and is_relative and linking_fp:
+                changed += 1
+                newrel = os.path.relpath(new_fp_abs, os.path.dirname(linking_fp))
+                return m.group(1) + urllib.parse.quote(newrel) + m.group(3)
+            if matches_root:
                 changed += 1
                 return m.group(1) + urllib.parse.quote(new_rel_noext + ".md") + m.group(3)
             return m.group(0)
@@ -570,26 +689,37 @@ def _do_relocate(ref, dest_rel_noext, apply_, opname):
     if not apply_:
         out("(dry-run — pass --apply to execute)")
         return
-    jdir = _journal_start(opname, list(hits.keys()) + [fp])
+    # journal every file that will be written, plus the moved file itself (once)
+    journal_targets = list(hits.keys()) + ([fp] if fp not in hits else [])
+    jdir = _journal_start(opname, journal_targets)
+    renamed = False
     try:
         results = {}
         for p in hits:
-            text = open(p).read()
-            new_text, changed = _rewrite_links(text, fp, dest_rel_noext, rename_base)
+            text = read_raw(p)
+            new_text, changed = _rewrite_links(text, fp, dest_rel_noext, rename_base, linking_fp=p)
             if changed != hits[p]:
                 raise RuntimeError(f"span mismatch in {rel(p)}: planned {hits[p]}, rewrote {changed}")
             results[p] = new_text
-        for p, new_text in results.items():
+        fault_after = int(os.environ.get("VV_FAULT_AFTER", "-1"))
+        for wi, (p, new_text) in enumerate(results.items()):
+            if fault_after >= 0 and wi >= fault_after:
+                raise RuntimeError(f"INJECTED FAULT after {wi} writes")
             atomic_write(p, new_text)
-        os.makedirs(os.path.dirname(new_fp), exist_ok=True)
+        d = os.path.dirname(new_fp)
+        if d:
+            os.makedirs(d, exist_ok=True)
         os.rename(fp, new_fp)
-        # post-apply verification: no active link to the OLD identity may remain
+        renamed = True
+        # verification: read each file at its CURRENT location (source is now new_fp)
         old_base = os.path.basename(src_rel)[:-3].lower()
         old_rel_noext = src_rel[:-3].lower()
         stale = 0
         for p in results:
-            for _, kind, tgt in link_targets_in(open(p).read()):
+            cur_path = new_fp if p == fp else p
+            for _, kind, tgt in link_targets_in(read_raw(cur_path)):
                 t = tgt.strip().lower()
+                t = t[:-3] if t.endswith(".md") else t
                 if kind == "wiki" and (t == old_rel_noext or (rename_base and t == old_base)):
                     stale += 1
         if stale:
@@ -597,9 +727,10 @@ def _do_relocate(ref, dest_rel_noext, apply_, opname):
         _journal_done(jdir)
         out(f"applied: {len(results)} files rewritten, note {opname}d, verification clean")
     except Exception as e:
-        _journal_rollback(jdir)
-        if os.path.exists(new_fp) and not os.path.exists(fp):
+        # reverse the rename FIRST (if it happened) so journal-restore never leaves a duplicate
+        if renamed and os.path.exists(new_fp) and not os.path.exists(fp):
             os.rename(new_fp, fp)
+        _journal_rollback(jdir)
         die(f"ROLLED BACK ({e}); originals restored from journal {jdir}")
 
 def cmd_rename(ref, new_name, *args):

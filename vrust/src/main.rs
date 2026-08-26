@@ -8,6 +8,9 @@ use std::path::{Path, PathBuf};
 use std::process::exit;
 
 fn vault() -> PathBuf {
+    if let Ok(v) = env::var("VV_VAULT") {
+        return PathBuf::from(v);
+    }
     let home = env::var("HOME").expect("HOME unset");
     Path::new(&home).join("Documents/Obsidian Vault")
 }
