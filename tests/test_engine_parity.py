@@ -71,6 +71,14 @@ CASES = {
     "indented_fence.md": "   ```\n   [[IndentedHidden]]\n   ```\n[[AfterIndented]]\n",
     "empty.md": "",
     "crlf.md": "[[CrlfOne]]\r\n```\r\n[[CrlfHidden]]\r\n```\r\n[[CrlfTwo]]\r\n",
+    # trailing backslashes are never part of a name: \| escapes the alias pipe in
+    # tables, and a stray [[Note\]] still resolves to Note (backslash is illegal
+    # in note names — both verified against Obsidian's metadataCache 2026-08-26).
+    "escaped_pipe.md": "| [[TableTarget\\|alias]] | x |\n| [[Frag#Sec\\|al]] | y |\n[[TrailBack\\]]\n",
+    # Obsidian does not index links inside <!-- --> HTML comments; %% comments DO index
+    "html_comment.md": "a <!-- [[InComment]] --> [[AfterComment]]\n<!--\n[[InBlockComment]]\n-->\n[[AfterBlock]]\n%% [[InPercent]] %%\n`<!--` [[NotAComment]]\n",
+    "comment_in_fence.md": "```\n<!--\n```\n[[NotSwallowed]]\n",
+    "comment_unclosed.md": "<!-- open forever\n[[Hidden1]]\n[[Hidden2]]\n",
 }
 tmp = tempfile.mkdtemp(prefix="vv-parity-")
 for name, body in CASES.items():

@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 // vrust — PROTOTYPE: Rust vault search/outline, std-only (no crates).
 // Mirrors vnote2.py semantics for an apples-to-apples benchmark:
 //   vrust search <terms...> [--k N] [--w CHARS]
@@ -13,10 +14,6 @@ fn vault() -> PathBuf {
     }
     let home = env::var("HOME").expect("HOME unset");
     Path::new(&home).join("Documents/Obsidian Vault")
-}
-
-fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
-    walk_ex(dir, out, false)
 }
 
 /// `exclude_sandbox` is a SEARCH-relevance choice, never a graph-correctness one:
@@ -35,76 +32,6 @@ fn walk_ex(dir: &Path, out: &mut Vec<PathBuf>, exclude_sandbox: bool) {
                 out.push(p);
             }
         }
-    }
-}
-
-fn sha8(data: &str) -> String {
-    // FNV-1a 64-bit, hex-8 — prototype anchor only (not cryptographic; the
-    // python side uses sha256; for the benchmark only output SIZE matters).
-    let mut h: u64 = 0xcbf29ce484222325;
-    for b in data.as_bytes() {
-        h ^= *b as u64;
-        h = h.wrapping_mul(0x100000001b3);
-    }
-    format!("{:08x}", (h >> 32) as u32)
-}
-
-fn cmd_outline(rel: &str) {
-    let fp = vault().join(rel);
-    let text = match fs::read_to_string(&fp) {
-        Ok(t) => t,
-        Err(_) => {
-            eprintln!("error: no such note: {}", rel);
-            exit(1);
-        }
-    };
-    let lines: Vec<&str> = text.split('\n').collect();
-    let mut fenced = vec![false; lines.len()];
-    let mut fm_end = 0usize;
-    if !lines.is_empty() && lines[0].trim_end_matches('\r') == "---" {
-        for i in 1..lines.len() {
-            if lines[i].trim_end_matches('\r') == "---" {
-                fm_end = i + 1;
-                break;
-            }
-        }
-    }
-    for f in fenced.iter_mut().take(fm_end) {
-        *f = true;
-    }
-    let mut open = false;
-    for (i, l) in lines.iter().enumerate() {
-        if i < fm_end {
-            continue;
-        }
-        if l.starts_with("```") || l.starts_with("~~~") {
-            open = !open;
-            fenced[i] = true;
-        } else if open {
-            fenced[i] = true;
-        }
-    }
-    let mut heads: Vec<(usize, usize, String)> = Vec::new();
-    for (i, l) in lines.iter().enumerate() {
-        if fenced[i] {
-            continue;
-        }
-        let hashes = l.chars().take_while(|c| *c == '#').count();
-        if hashes >= 1 && hashes <= 6 && l.chars().nth(hashes) == Some(' ') {
-            heads.push((i, hashes, l[hashes + 1..].trim().to_string()));
-        }
-    }
-    let first = heads.first().map(|h| h.0).unwrap_or(lines.len());
-    let mut secs: Vec<(String, usize, String, usize, usize)> = Vec::new();
-    secs.push(("H0".into(), 0, "(preamble)".into(), 0, first));
-    for (j, (i, lvl, title)) in heads.iter().enumerate() {
-        let end = heads.get(j + 1).map(|h| h.0).unwrap_or(lines.len());
-        secs.push((format!("H{}", j + 1), *lvl, title.clone(), *i, end));
-    }
-    for (id, lvl, title, start, end) in secs {
-        let body = lines[start..end].join("\n");
-        let marks = if lvl == 0 { "-".into() } else { "#".repeat(lvl) };
-        println!("{}\t{}\t{}\t{}B\t{}", id, marks, title, body.len(), sha8(&body));
     }
 }
 
@@ -167,6 +94,33 @@ fn cmd_search(args: &[String]) {
     println!("({} of {} matches)", shown, hits.len());
 }
 
+
+/// find `pat` in `chars` at or after `start` (char positions, not bytes)
+fn find_seq(chars: &[char], start: usize, pat: &[char]) -> Option<usize> {
+    if chars.len() < pat.len() { return None; }
+    (start..=chars.len() - pat.len()).find(|&i| chars[i..i + pat.len()] == *pat)
+}
+
+/// mask every <!-- --> span from `pos` onward; sets `in_comment` on an unclosed opener
+fn mask_comments(masked: &mut [char], pos: &mut usize, in_comment: &mut bool) {
+    let opener = ['<', '!', '-', '-'];
+    let closer = ['-', '-', '>'];
+    while let Some(s) = find_seq(masked, *pos, &opener) {
+        match find_seq(masked, s + 4, &closer) {
+            Some(e) => {
+                for k in s..e + 3 { masked[k] = '\u{0}'; }
+                *pos = e + 3;
+            }
+            None => {
+                let n = masked.len();
+                for k in s..n { masked[k] = '\u{0}'; }
+                *in_comment = true;
+                break;
+            }
+        }
+    }
+}
+
 /// Emit every active wikilink/markdown-link target in the vault as TSV:
 ///   <rel-path>\t<line-1-based>\t<kind: w|m>\t<target>
 /// "Active" excludes fenced blocks (own-marker close) and inline code spans.
@@ -203,6 +157,7 @@ fn cmd_linkscan(args: &[String]) {
             }
         }
         let mut marker: Option<(char, usize)> = None;
+        let mut in_comment = false;
         for (i, raw) in lines.iter().enumerate() {
             let raw = raw.trim_end_matches('\r'); // CRLF must not defeat fence detection
             let trimmed = raw.trim_start();
@@ -217,25 +172,42 @@ fn cmd_linkscan(args: &[String]) {
             } else {
                 None
             };
+            let mut line_fenced = false;
             if i >= fm_end {
                 match (marker, fence) {
                     (None, Some((c, n, _))) => {
                         marker = Some((c, n));
-                        continue;
+                        line_fenced = true;
                     }
                     (Some((mc, mn)), Some((c, n, rest)))
                         if c == mc && n >= mn && rest.trim().is_empty() =>
                     {
                         marker = None;
-                        continue;
+                        line_fenced = true;
                     }
-                    (Some(_), _) => continue,
+                    (Some(_), _) => line_fenced = true,
                     _ => {}
                 }
             }
-            // mask inline code spans (CommonMark: a run of N backticks closes on a run of exactly N)
+            // mask inline code spans (CommonMark: a run of N backticks closes on a run
+            // of exactly N) — on non-fenced lines only, mirroring vv.py's scans[]
             let chars: Vec<char> = raw.chars().collect();
             let mut masked: Vec<char> = chars.clone();
+            if line_fenced {
+                // fenced lines keep raw text: an open HTML comment may still close here
+                if in_comment {
+                    match find_seq(&masked, 0, &['-', '-', '>']) {
+                        None => continue,
+                        Some(e) => {
+                            for k in 0..e + 3 { masked[k] = '\u{0}'; }
+                            in_comment = false;
+                            let mut pos = e + 3;
+                            mask_comments(&mut masked, &mut pos, &mut in_comment);
+                        }
+                    }
+                }
+                continue;
+            }
             let mut ci = 0usize;
             while ci < chars.len() {
                 if chars[ci] == '`' {
@@ -273,6 +245,24 @@ fn cmd_linkscan(args: &[String]) {
                 }
                 ci += 1;
             }
+            // HTML comments: Obsidian does not index links inside <!-- --> (it DOES
+            // inside its own %% comments) — mirrors html_comment_spans() in vv.py.
+            if in_comment {
+                match find_seq(&masked, 0, &['-', '-', '>']) {
+                    None => {
+                        continue; // whole line inside a comment
+                    }
+                    Some(e) => {
+                        for k in 0..e + 3 { masked[k] = '\u{0}'; }
+                        in_comment = false;
+                        let mut pos = e + 3;
+                        mask_comments(&mut masked, &mut pos, &mut in_comment);
+                    }
+                }
+            } else {
+                let mut pos = 0usize;
+                mask_comments(&mut masked, &mut pos, &mut in_comment);
+            }
             let masked: String = masked.into_iter().collect();
             // [[wikilink]] / ![[embed]]
             let b: Vec<char> = masked.chars().collect();
@@ -283,12 +273,16 @@ fn cmd_linkscan(args: &[String]) {
                         .find(|&k| b[k] == ']' && b[k + 1] == ']')
                     {
                         let inner: String = b[j + 2..end].iter().collect();
-                        let target = inner
+                        let seg = inner
                             .split(|c| c == '|' || c == '#')
                             .next()
                             .unwrap_or("")
-                            .trim()
-                            .to_string();
+                            .trim();
+                        // trailing backslashes are never part of a name: [[Note\|alias]]
+                        // escapes the alias pipe inside tables, and a stray [[Note\]]
+                        // still resolves to Note in Obsidian (backslash is illegal in
+                        // note names). Mirrors wiki_target() in vv.py.
+                        let target = seg.trim_end_matches('\\').trim_end().to_string();
                         if !target.is_empty()
                             && needle.as_ref().map_or(true, |n| target.to_lowercase().contains(n.as_str()))
                         {
@@ -321,11 +315,10 @@ fn cmd_linkscan(args: &[String]) {
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
     match args.first().map(String::as_str) {
-        Some("outline") if args.len() >= 2 => cmd_outline(&args[1]),
         Some("search") => cmd_search(&args[1..]),
         Some("linkscan") => cmd_linkscan(&args[1..]),
         _ => {
-            eprintln!("usage: vrust search <terms...> [--k N] [--w CHARS] | outline <rel-path> | linkscan [--grep NEEDLE]");
+            eprintln!("usage: vrust search <terms...> [--k N] [--w CHARS] | linkscan [--grep NEEDLE]");
             exit(1);
         }
     }

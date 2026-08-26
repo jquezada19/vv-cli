@@ -68,12 +68,30 @@ def resolve(ref):
     if os.path.isfile(fp_md):
         return fp_md
     want = (ref[:-3] if ref.endswith(".md") else ref).lower()
-    hits = [p for p in md_files() if os.path.basename(p)[:-3].lower() == want]
+    all_notes = list(md_files())
+    hits = [p for p in all_notes if os.path.basename(p)[:-3].lower() == want]
     if len(hits) == 1:
         return hits[0]
     if not hits:
-        die(f"error: no note matches '{ref}'")
+        sugg = suggest_names(want, all_notes)
+        extra = ("\ndid you mean: " + " | ".join(sugg)) if sugg else ""
+        die(f"error: no note matches '{ref}'{extra}")
     die("ambiguous: " + " | ".join(os.path.relpath(h, VAULT) for h in sorted(hits)[:5]))
+
+def suggest_names(want, paths, n=3):
+    """Suggestions for a failed name lookup, tiered like rustdoc search:
+    substring match outranks edit-distance similarity. Suggestion only — resolve
+    never auto-picks a fuzzy match, because resolve feeds the write path."""
+    import difflib
+    by_name = {}
+    for p in paths:
+        by_name.setdefault(os.path.basename(p)[:-3], []).append(p)
+    subs = sorted((nm for nm in by_name if want in nm.lower()), key=len)[:n]
+    if len(subs) < n:
+        lower = {nm.lower(): nm for nm in by_name}
+        close = difflib.get_close_matches(want, lower.keys(), n=n, cutoff=0.6)
+        subs += [lower[c] for c in close if lower[c] not in subs]
+    return subs[:n]
 
 def rel(fp):
     return os.path.relpath(fp, VAULT)
@@ -371,52 +389,46 @@ def cmd_new(*args):
     atomic_write(fp, content)
     out(f"created {rel(fp)}")
 
-def link_matches(from_fp, kind, target, tgt_fp, tgt_base, tgt_rel_noext, ambiguous):
+def bare_resolves(from_fp, tgt_fp, idx):
+    """Does a bare [[basename]] written in from_fp resolve to tgt_fp? Obsidian's
+    duplicate-basename rule, probed via metadataCache.getFirstLinkpathDest on the
+    live vault (2026-08-26): (1) a candidate in the SAME FOLDER as the linking note
+    wins; (2) otherwise the shortest vault-relative path wins; (3) an exact length
+    tie is cache-insertion order in the app — unreproducible outside it, so vv uses
+    lexicographic as its deterministic stand-in. Unique basenames trivially win."""
+    base = os.path.basename(tgt_fp)[:-3].lower()
+    cands = idx.get(base, [])
+    if len(cands) <= 1:
+        return True
+    from_dir = os.path.dirname(os.path.abspath(from_fp))
+    same_dir = [c for c in cands if os.path.dirname(os.path.abspath(c)) == from_dir]
+    pool = same_dir or cands
+    return min(pool, key=lambda p: (len(rel(p)), rel(p))) == tgt_fp
+
+def link_matches(from_fp, kind, target, tgt_fp, tgt_base, tgt_rel_noext, idx):
     """THE definition of 'this link resolves to that note'. Used by backlinks,
-    orphans, impact and rename so they can never disagree."""
+    orphans, impact and rename so they can never disagree. idx = basename_index()."""
     t = target.strip().lower()
     if kind == "wiki":
         t_noext = t[:-3] if t.endswith(".md") else t
-        return (t_noext == tgt_base and not ambiguous) or t_noext == tgt_rel_noext
+        return (t_noext == tgt_base and bare_resolves(from_fp, tgt_fp, idx)) \
+            or t_noext == tgt_rel_noext
     import urllib.parse
     dec = urllib.parse.unquote(target.strip())
     cand = os.path.normpath(os.path.join(os.path.dirname(from_fp), dec))
     return os.path.abspath(cand) == os.path.abspath(tgt_fp) or \
         os.path.normpath(os.path.join(VAULT, dec)) == tgt_fp
 
-def _links_to(target_fp):
-    """True-if-p-links-to-target, using the SAME occurrence logic as impact/rename.
-    Matches bare basename (when unambiguous), path-form, and md-links."""
-    tgt_base = os.path.basename(target_fp)[:-3].lower()
-    tgt_rel_noext = rel(target_fp)[:-3].lower()
-    ambiguous = len(basename_index().get(tgt_base, [])) > 1
-    def links_from(p):
-        for _, kind, t in link_targets_in(read_raw(p)):
-            tl = t.lower()
-            if kind == "wiki":
-                tl_noext = tl[:-3] if tl.endswith(".md") else tl
-                if (tl_noext == tgt_base and not ambiguous) or tl_noext == tgt_rel_noext:
-                    return True
-            else:
-                import urllib.parse
-                dec = urllib.parse.unquote(t)
-                cand = os.path.normpath(os.path.join(os.path.dirname(p), dec))
-                if os.path.abspath(cand) == os.path.abspath(target_fp) or \
-                   os.path.normpath(os.path.join(VAULT, dec)) == target_fp:
-                    return True
-        return False
-    return links_from
-
 def cmd_backlinks(ref):
     fp = resolve(ref)
     tgt_base = os.path.basename(fp)[:-3].lower()
     tgt_rel_noext = rel(fp)[:-3].lower()
-    ambiguous = len(basename_index().get(tgt_base, [])) > 1
+    idx = basename_index()
     hits = []
     for p, _i, kind, t in scan_links(needle=tgt_base):
         if p == fp or p in hits:
             continue
-        if link_matches(p, kind, t, fp, tgt_base, tgt_rel_noext, ambiguous):
+        if link_matches(p, kind, t, fp, tgt_base, tgt_rel_noext, idx):
             hits.append(p)
     for p in sorted(hits):
         out(rel(p))
@@ -618,20 +630,73 @@ def strip_inline_code(line):
             masked[k] = "\0"
     return "".join(masked)
 
+def html_comment_spans(scans, fenced):
+    """Character spans inside HTML comments (<!-- -->), per line, computed on
+    inline-code-stripped lines. Obsidian does not index links inside HTML comments
+    but DOES index them inside its own %% comments — both probed via metadataCache
+    2026-08-26 — so only <!-- --> is masked. A comment cannot open on a fenced line
+    (the marker is literal text there), but an already-open comment consumes lines,
+    fenced-looking or not, until -->. Returns {line_idx: [(start, end), ...]}."""
+    spans = {}
+    open_ = False
+    for i, l in enumerate(scans):
+        cur = []
+        pos = 0
+        if open_:
+            end = l.find("-->")
+            if end == -1:
+                spans[i] = [(0, len(l))]
+                continue
+            cur.append((0, end + 3))
+            pos = end + 3
+            open_ = False
+        elif i in fenced:
+            continue
+        while True:
+            s = l.find("<!--", pos)
+            if s == -1:
+                break
+            e = l.find("-->", s + 4)
+            if e == -1:
+                cur.append((s, len(l)))
+                open_ = True
+                break
+            cur.append((s, e + 3))
+            pos = e + 3
+        if cur:
+            spans[i] = cur
+    return spans
+
 LINK_RE = re.compile(r"(!?\[\[)([^\]|#]+)((?:#[^\]|]*)?(?:\|[^\]]*)?)(\]\])")
 MDLINK_RE = re.compile(r"(\]\()([^)\s]+\.md)(\))")
 
+def wiki_target(m):
+    """Target of a LINK_RE match. Two backslash cases, both found 2026-08-26 by the
+    Obsidian oracle test: [[Note\\|alias]] escapes the alias pipe inside tables (the
+    backslash is not part of the name), and [[Note\\]] — a stray trailing backslash —
+    resolves in Obsidian to Note, because backslash is illegal in note names. So all
+    trailing backslashes are stripped. Returns (target, escaped_pipe) so rewriters
+    can re-emit the pipe escape (that one is meaningful; the stray kind is not)."""
+    t = m.group(2).strip()
+    esc = t.endswith("\\") and m.group(3).startswith("|")
+    return t.rstrip("\\").rstrip(), esc
+
 def link_targets_in(text):
-    """Yield (line_idx, kind, target) for active links; fenced lines excluded."""
+    """Yield (line_idx, kind, target) for active links; fenced lines, inline code
+    and HTML comments excluded."""
     lines, fenced = masked_lines(text)
-    for i, l in enumerate(lines):
+    scans = [l if i in fenced else strip_inline_code(l) for i, l in enumerate(lines)]
+    cmask = html_comment_spans(scans, fenced)
+    for i, scan in enumerate(scans):
         if i in fenced:
             continue
-        scan = strip_inline_code(l)
+        spans = cmask.get(i, [])
         for m in LINK_RE.finditer(scan):
-            yield i, "wiki", m.group(2).strip()
+            if not any(a <= m.start() < b for a, b in spans):
+                yield i, "wiki", wiki_target(m)[0]
         for m in MDLINK_RE.finditer(scan):
-            yield i, "md", m.group(2)
+            if not any(a <= m.start() < b for a, b in spans):
+                yield i, "md", m.group(2)
 
 def basename_index():
     """lowercased basename -> [paths]"""
@@ -652,7 +717,7 @@ def occurrences(source_fp, include_bare=True):
         t = tgt.strip().lower()
         if kind == "wiki":
             t_noext = t[:-3] if t.endswith(".md") else t  # [[Note.md]] is the same target as [[Note]]
-            if t_noext == src_base and not ambiguous and include_bare:
+            if t_noext == src_base and include_bare and bare_resolves(p, source_fp, idx):
                 hits[p] = hits.get(p, 0) + 1
             elif t_noext == src_rel_noext:
                 hits[p] = hits.get(p, 0) + 1
@@ -745,27 +810,32 @@ def _rewrite_links(text, source_fp, new_rel_noext, rename_base, linking_fp=None)
     src_rel_noext = rel(source_fp)[:-3]
     new_fp_abs = os.path.join(VAULT, new_rel_noext + ".md")
     lines, fenced = masked_lines(text)
+    cmask = html_comment_spans(
+        [l if i in fenced else strip_inline_code(l) for i, l in enumerate(lines)], fenced)
     changed = 0
     for i, l in enumerate(lines):
         if i in fenced:
             continue
-        spans = code_spans(l)
+        # a link the scanner doesn't count must not be rewritten either:
+        # inline code spans + HTML-comment spans (same masking as link_targets_in)
+        spans = code_spans(l) + cmask.get(i, [])
         def in_span(pos):
             return any(a <= pos < b for a, b in spans)
         def wiki_sub(m):
             nonlocal changed
             if in_span(m.start()):
                 return m.group(0)
-            tgt = m.group(2).strip()
+            tgt, esc = wiki_target(m)
+            pipe_esc = "\\" if esc else ""   # keep [[Note\|alias]] escaped after rewrite
             t = tgt.lower()
             ext = ".md" if t.endswith(".md") else ""   # preserve the author's [[Note.md]] style
             t_noext = t[:-3] if ext else t
             if t_noext == src_base.lower() and rename_base:
                 changed += 1
-                return m.group(1) + rename_base + ext + m.group(3) + m.group(4)
+                return m.group(1) + rename_base + ext + pipe_esc + m.group(3) + m.group(4)
             if t_noext == src_rel_noext.lower():
                 changed += 1
-                return m.group(1) + new_rel_noext + ext + m.group(3) + m.group(4)
+                return m.group(1) + new_rel_noext + ext + pipe_esc + m.group(3) + m.group(4)
             return m.group(0)
         def md_sub(m):
             nonlocal changed
@@ -898,6 +968,20 @@ def cmd_lint(*args):
             last = last[:-3] if last.endswith(".md") else last
             if last not in stems:
                 findings.append(("broken-link", f"{rel(p)}:{i+1}", tgt))
+        # an UNESCAPED alias pipe inside a wikilink on a table row: the table splits
+        # the cell at the pipe, so Obsidian renders NO link at all (oracle 2026-08-26).
+        # The fix is \| — flag it, since the note renders broken in the app.
+        lines, fenced = masked_lines(text)
+        scans = [l if i in fenced else strip_inline_code(l) for i, l in enumerate(lines)]
+        cmask = html_comment_spans(scans, fenced)
+        for i, l in enumerate(lines):
+            if i in fenced or not l.lstrip().startswith("|"):
+                continue
+            for m in LINK_RE.finditer(scans[i]):
+                if any(a <= m.start() < b for a, b in cmask.get(i, [])):
+                    continue
+                if m.group(3).startswith("|") and not m.group(2).rstrip().endswith("\\"):
+                    findings.append(("table-pipe", f"{rel(p)}:{i+1}", m.group(2).strip()))
     # output is context: report every finding's COUNT, but print at most `limit` lines
     from collections import Counter
     by_kind = Counter(f[0] for f in findings)
