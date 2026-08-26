@@ -21,13 +21,28 @@ VV = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "
 def run(*args):
     return subprocess.run([sys.executable, VV, *args], capture_output=True, text=True)
 
+
+# --- suite safety (review 2026-08-26) ---------------------------------------
+# 1. Never delete pre-existing Sandbox content: a non-empty fixture dir is MOVED
+#    aside, not removed. 2. Journals go to a temp root so real pending recovery
+#    journals can't be touched. 3. On failure the fixture dir is KEPT as evidence.
+import tempfile, datetime as _dt
+def fresh_fixture(path):
+    if os.path.isdir(path) and os.listdir(path):
+        os.rename(path, path + ".pre-" + _dt.datetime.now().strftime("%H%M%S"))
+    shutil.rmtree(path, ignore_errors=True)
+    os.makedirs(path, exist_ok=True)
+_JR = tempfile.mkdtemp(prefix="vv-test-journals-")
+os.environ["VV_JOURNAL_ROOT"] = _JR
+# -----------------------------------------------------------------------------
+
 fails = []
 def check(name, cond, detail=""):
     print(("PASS " if cond else "FAIL ") + name + (f"  [{str(detail)[:140]}]" if detail and not cond else ""))
     if not cond: fails.append(name)
 
-shutil.rmtree(SB, ignore_errors=True)
-os.makedirs(f"{SB}/deep/deeper")
+fresh_fixture(SB)
+os.makedirs(f"{SB}/deep/deeper", exist_ok=True)
 
 # O1: escaped alias pipe in a table
 open(f"{SB}/EscTarget QQ.md", "w").write("content\n")
@@ -84,6 +99,8 @@ check("O4a suggestion on typo", r.returncode != 0 and "did you mean" in r.stderr
 r = run("outline", "Definitely Not A Note zzq9")
 check("O4b no false suggestion", r.returncode != 0 and "did you mean" not in r.stderr, r.stderr)
 
-shutil.rmtree(SB, ignore_errors=True)
+if not fails:
+    shutil.rmtree(SB, ignore_errors=True)
+shutil.rmtree(_JR, ignore_errors=True)
 print(f"\n{len(fails)} failures: {fails}" if fails else "\nALL PASS (oracle findings: 17)")
 sys.exit(1 if fails else 0)

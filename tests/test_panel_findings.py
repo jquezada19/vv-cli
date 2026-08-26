@@ -15,6 +15,21 @@ def run(*args, stdin=None, env_extra=None):
     return subprocess.run([sys.executable, VV, *args], capture_output=True, text=True,
                           input=stdin, env=env)
 
+
+# --- suite safety (review 2026-08-26) ---------------------------------------
+# 1. Never delete pre-existing Sandbox content: a non-empty fixture dir is MOVED
+#    aside, not removed. 2. Journals go to a temp root so real pending recovery
+#    journals can't be touched. 3. On failure the fixture dir is KEPT as evidence.
+import tempfile, datetime as _dt
+def fresh_fixture(path):
+    if os.path.isdir(path) and os.listdir(path):
+        os.rename(path, path + ".pre-" + _dt.datetime.now().strftime("%H%M%S"))
+    shutil.rmtree(path, ignore_errors=True)
+    os.makedirs(path, exist_ok=True)
+_JR = tempfile.mkdtemp(prefix="vv-test-journals-")
+os.environ["VV_JOURNAL_ROOT"] = _JR
+# -----------------------------------------------------------------------------
+
 fails = []
 def check(name, cond, detail=""):
     print(("PASS " if cond else "FAIL ") + name + (f"  [{str(detail)[:160]}]" if detail and not cond else ""))
@@ -112,7 +127,7 @@ check("F10b colliding names restored correctly",
       open(os.path.join(VAULT, "a/b.md")).read() == orig1 and
       open(os.path.join(VAULT, "a%2Fb.md")).read() == orig2)
 check("F10c source note still present", os.path.exists(os.path.join(VAULT, "JTarget.md")))
-shutil.rmtree(os.path.expanduser("~/.cache/vv/journals"), ignore_errors=True)
+shutil.rmtree(_JR, ignore_errors=True); os.makedirs(_JR, exist_ok=True)
 
 # ---- F11: writing through a symlink updates the target, not the link ----
 real = os.path.join(VAULT, "Real.md")
@@ -233,7 +248,7 @@ r = run("rename", "FTarget.md", "FRenamed", "--apply", env_extra={"VV_FAULT_AFTE
 check("C6a pre-rename fault aborts", r.returncode == 1 and "ROLLED BACK" in r.stderr, r.stderr[:120])
 check("C6b links restored", open(os.path.join(VAULT, "FLink.md")).read() == before)
 check("C6c note not renamed", os.path.exists(os.path.join(VAULT, "FTarget.md")) and not os.path.exists(os.path.join(VAULT, "FRenamed.md")))
-shutil.rmtree(os.path.expanduser("~/.cache/vv/journals"), ignore_errors=True)
+shutil.rmtree(_JR, ignore_errors=True); os.makedirs(_JR, exist_ok=True)
 
 shutil.rmtree(VAULT, ignore_errors=True)
 shutil.rmtree(OUTSIDE, ignore_errors=True)

@@ -8,13 +8,28 @@ VV = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "
 def run(*args, stdin=None):
     return subprocess.run([sys.executable, VV, *args], capture_output=True, text=True, input=stdin)
 
+
+# --- suite safety (review 2026-08-26) ---------------------------------------
+# 1. Never delete pre-existing Sandbox content: a non-empty fixture dir is MOVED
+#    aside, not removed. 2. Journals go to a temp root so real pending recovery
+#    journals can't be touched. 3. On failure the fixture dir is KEPT as evidence.
+import tempfile, datetime as _dt
+def fresh_fixture(path):
+    if os.path.isdir(path) and os.listdir(path):
+        os.rename(path, path + ".pre-" + _dt.datetime.now().strftime("%H%M%S"))
+    shutil.rmtree(path, ignore_errors=True)
+    os.makedirs(path, exist_ok=True)
+_JR = tempfile.mkdtemp(prefix="vv-test-journals-")
+os.environ["VV_JOURNAL_ROOT"] = _JR
+# -----------------------------------------------------------------------------
+
 fails = []
 def check(name, cond, detail=""):
     print(("PASS " if cond else "FAIL ") + name + (f"  [{str(detail)[:140]}]" if detail and not cond else ""))
     if not cond: fails.append(name)
 
-shutil.rmtree(SB, ignore_errors=True)
-os.makedirs(f"{SB}/sub")
+fresh_fixture(SB)
+os.makedirs(f"{SB}/sub", exist_ok=True)
 
 # corpus: every typed link form pointing at "RN Old Note"
 open(f"{SB}/RN Old Note.md", "w").write("---\ntype: test\n---\n# RN Old Note\ntarget content\n")
@@ -54,7 +69,7 @@ check("R3j fenced untouched", "fenced [[RN Old Note]] must not change" in a)
 check("R3k inline-code untouched", "inline `[[RN Old Note]]` must not change" in a)
 check("R3l second file rewritten", "[[RN New Note]]" in b and "[[Some Other Note]]" in b)
 check("R3m file actually renamed", os.path.exists(f"{SB}/RN New Note.md") and not os.path.exists(f"{SB}/RN Old Note.md"))
-check("R3n no pending journal", not glob.glob(os.path.expanduser("~/.cache/vv/journals/*")))
+check("R3n no pending journal", not glob.glob(os.path.join(_JR, "*", "*")))
 
 # R4: rename onto existing basename refused
 open(f"{SB}/RN Taken.md", "w").write("x\n")
@@ -100,6 +115,8 @@ check("R9c fenced skipped", "Also Missing But Fenced" not in r.stdout)
 r = run("doctor")
 check("R10 doctor clean", r.returncode == 0 and "journals: none pending" in r.stdout, r.stdout)
 
-shutil.rmtree(SB, ignore_errors=True)
+if not fails:
+    shutil.rmtree(SB, ignore_errors=True)
+shutil.rmtree(_JR, ignore_errors=True)
 print(f"\n{len(fails)} failures: {fails}" if fails else "\nALL PASS (v1.5: 27)")
 sys.exit(1 if fails else 0)

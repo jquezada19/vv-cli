@@ -79,6 +79,19 @@ CASES = {
     "html_comment.md": "a <!-- [[InComment]] --> [[AfterComment]]\n<!--\n[[InBlockComment]]\n-->\n[[AfterBlock]]\n%% [[InPercent]] %%\n`<!--` [[NotAComment]]\n",
     "comment_in_fence.md": "```\n<!--\n```\n[[NotSwallowed]]\n",
     "comment_unclosed.md": "<!-- open forever\n[[Hidden1]]\n[[Hidden2]]\n",
+    # round-2 review fixtures (2026-08-26): every case probed against Obsidian
+    "runlen.md": "`a``` [[RunLenX]] ` [[RunLenY]]\n",              # 3-run tail is NOT a 1-tick closer
+    "empty_targets.md": "[[ ]] and [[\\]] and [[Real Target]]\n",  # empty targets skipped
+    "rsqb_alias.md": "[[RSQTarget|a]b]] end\n",                    # alias may contain single ]
+    "glued_mdlink.md": "[[Glued]](x.md) and a]](y.md) and [t](z.md)\n",  # ]] never opens [text](
+    "dbl_backslash.md": "[[Dbl\\\\|alias]] and [[Trail\\]]\n",     # ONE backslash consumed per boundary
+    "comment_overlap.md": "[[A <!-- x --> B]] then [[CleanLink]]\n",
+    "comment_in_alias.md": "[[AliasKept|a <!-- h --> b]] and [[Plain2]]\n",  # comment in ALIAS: link stays
+    # a fence marker inside an OPEN comment is literal; the comment closes at -->
+    # and later links are active (probed against Obsidian 2026-08-26)
+    "comment_owns_fence.md": "<!--\n```\n-->\n[[AfterCmtFence]]\n",
+    "nbsp_fence.md": "\u00a0\u00a0```\n[[NbspNotFenced]]\n",  # NBSP is not fence indent in either engine
+    "triple_backslash.md": "[[Tri\\\\\\|alias]] and [[TrailTwo\\\\]]\n",  # one backslash consumed per boundary
 }
 tmp = tempfile.mkdtemp(prefix="vv-parity-")
 for name, body in CASES.items():

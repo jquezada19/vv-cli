@@ -9,6 +9,21 @@ VV = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "
 def run(*args, stdin=None):
     return subprocess.run([sys.executable, VV, *args], capture_output=True, text=True, input=stdin)
 
+
+# --- suite safety (review 2026-08-26) ---------------------------------------
+# 1. Never delete pre-existing Sandbox content: a non-empty fixture dir is MOVED
+#    aside, not removed. 2. Journals go to a temp root so real pending recovery
+#    journals can't be touched. 3. On failure the fixture dir is KEPT as evidence.
+import tempfile, datetime as _dt
+def fresh_fixture(path):
+    if os.path.isdir(path) and os.listdir(path):
+        os.rename(path, path + ".pre-" + _dt.datetime.now().strftime("%H%M%S"))
+    shutil.rmtree(path, ignore_errors=True)
+    os.makedirs(path, exist_ok=True)
+_JR = tempfile.mkdtemp(prefix="vv-test-journals-")
+os.environ["VV_JOURNAL_ROOT"] = _JR
+# -----------------------------------------------------------------------------
+
 fails = []
 def check(name, cond, detail=""):
     print(("PASS " if cond else "FAIL ") + name + (f"  [{str(detail)[:120]}]" if detail and not cond else ""))
@@ -41,8 +56,7 @@ second duplicate body
 tail after fence
 """
 
-shutil.rmtree(SB, ignore_errors=True)
-os.makedirs(SB)
+fresh_fixture(SB)
 open(f"{SB}/VV Fixture.md", "w").write(FIXTURE)
 open(f"{SB}/VV Target Note.md", "w").write("---\ntype: test\nstatus: done\ntags: [vvtag-alpha]\n---\ntarget body zzqxvv unique\n")
 open(f"{SB}/VV Orphan.md", "w").write("---\ntype: test\n---\nnobody links here zzqxvv\n")
@@ -182,7 +196,9 @@ open(f"{SB}/H Race.md", "w").write("## R\nexternally changed\n")
 r = run("patch", "Sandbox/vvtest/H Race.md", hr.split("\t")[0], hr.split("\t")[4], stdin="## R\nagent version\n")
 check("H7 concurrent edit refused", r.returncode == 3 and "externally changed" in open(f"{SB}/H Race.md").read())
 
-shutil.rmtree(SB, ignore_errors=True)
+if not fails:
+    shutil.rmtree(SB, ignore_errors=True)
+shutil.rmtree(_JR, ignore_errors=True)
 TOTAL = 24 + 11
 print(f"\n{len(fails)} failures: {fails}" if fails else f"\nALL PASS ({TOTAL})")
 sys.exit(1 if fails else 0)

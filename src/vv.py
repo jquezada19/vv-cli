@@ -40,6 +40,20 @@ def out(s=""):
 def die(msg, code=1):
     sys.stderr.write(msg + "\n"); _log(0); sys.exit(code)
 
+
+def use_rust():
+    """Engine selection: VV_ENGINE=rust|python forces a path (tests run the suite
+    under BOTH so the fallback is never the untested one — sqlx's per-backend test
+    matrix, adapted); unset = rust when built. Unknown values refuse loudly."""
+    eng = os.environ.get("VV_ENGINE", "")
+    if eng not in ("", "rust", "python"):
+        die(f"error: unknown VV_ENGINE '{eng}' (rust|python)")
+    if eng == "python":
+        return False
+    if eng == "rust" and not os.path.exists(VRUST):
+        die("error: VV_ENGINE=rust but the engine is not built (cd vrust && cargo build --release)")
+    return os.path.exists(VRUST)
+
 def md_files():
     for dirpath, dirs, names in os.walk(VAULT):
         dirs[:] = [d for d in dirs if not d.startswith(".") and d not in SKIP_DIRS]
@@ -80,15 +94,18 @@ def resolve(ref):
 
 def suggest_names(want, paths, n=3):
     """Suggestions for a failed name lookup, tiered like rustdoc search:
-    substring match outranks edit-distance similarity. Suggestion only — resolve
-    never auto-picks a fuzzy match, because resolve feeds the write path."""
+    substring match outranks edit-distance similarity. A path-qualified miss
+    (Folder/Notte) is compared by its basename. Ties break lexicographically so
+    filesystem iteration order never changes the output. Suggestion only —
+    resolve never auto-picks a fuzzy match, because resolve feeds the write path."""
     import difflib
+    want = want.rsplit("/", 1)[-1]
     by_name = {}
     for p in paths:
         by_name.setdefault(os.path.basename(p)[:-3], []).append(p)
-    subs = sorted((nm for nm in by_name if want in nm.lower()), key=len)[:n]
+    subs = sorted((nm for nm in by_name if want in nm.lower()), key=lambda s: (len(s), s))[:n]
     if len(subs) < n:
-        lower = {nm.lower(): nm for nm in by_name}
+        lower = {nm.lower(): nm for nm in sorted(by_name)}
         close = difflib.get_close_matches(want, lower.keys(), n=n, cutoff=0.6)
         subs += [lower[c] for c in close if lower[c] not in subs]
     return subs[:n]
@@ -120,7 +137,9 @@ def fence_mask(lines, start=0):
     marker = None      # (char, length)
     for i in range(start, len(lines)):
         l = lines[i].rstrip("\r")
-        m = re.match(r"^\s{0,3}(`{3,}|~{3,})(.*)$", l)
+        # indent is ASCII spaces only (CommonMark; also keeps the Rust engine's
+        # byte-counting equivalent — NBSP/tab indent is not fence indent)
+        m = re.match(r"^ {0,3}(`{3,}|~{3,})(.*)$", l)
         if marker is None:
             if m:
                 marker = (m.group(1)[0], len(m.group(1)))
@@ -248,8 +267,6 @@ def splice(lines, start, end, new_lines):
                   for i, m in enumerate(merged)]
     return "\n".join(merged)
 
-WIKILINK = re.compile(r"\[\[([^\]|#]+)(?:#[^\]|]*)?(?:\|[^\]]*)?\]\]")
-
 # ---------- commands ----------
 def cmd_outline(ref):
     lines, secs = parse(read_raw(resolve(ref)))
@@ -273,6 +290,7 @@ def cmd_resolve(ref):
     out(rel(resolve(ref)))
 
 def cmd_patch(ref, sid, expect):
+    _dirty_gate()
     fp = resolve(ref)
     lines, secs = parse(read_raw(fp))
     s = find_sec(lines, secs, sid)
@@ -290,6 +308,7 @@ def cmd_patch(ref, sid, expect):
     out(f"patched {sid} in {rel(fp)} ({len(cur)}B -> {len(body)}B)")
 
 def cmd_appendsec(ref, sid, text):
+    _dirty_gate()
     fp = resolve(ref)
     lines, secs = parse(read_raw(fp))
     s = find_sec(lines, secs, sid)
@@ -300,6 +319,7 @@ def cmd_appendsec(ref, sid, text):
     out(f"appended to {sid} in {rel(fp)}")
 
 def cmd_append(ref, text):
+    _dirty_gate()
     fp = resolve(ref)
     cur = read_raw(fp)
     eol = eol_of(cur)
@@ -307,6 +327,7 @@ def cmd_append(ref, text):
     out(f"appended to {rel(fp)}")
 
 def cmd_set(ref, key, value):
+    _dirty_gate()
     fp = resolve(ref)
     text = read_raw(fp)
     fm, body, tail, bom = split_fm_full(text)
@@ -327,6 +348,7 @@ def cmd_set(ref, key, value):
     out(f"set {key}={value} in {rel(fp)}")
 
 def cmd_unset(ref, key):
+    _dirty_gate()
     fp = resolve(ref)
     text = read_raw(fp)
     fm, body, tail, bom = split_fm_full(text)
@@ -343,6 +365,7 @@ def cmd_unset(ref, key):
     out(f"unset {key} in {rel(fp)}")
 
 def cmd_new(*args):
+    _dirty_gate()
     path, template, kv = None, None, {}
     it = iter(args)
     for a in it:
@@ -411,8 +434,11 @@ def link_matches(from_fp, kind, target, tgt_fp, tgt_base, tgt_rel_noext, idx):
     t = target.strip().lower()
     if kind == "wiki":
         t_noext = t[:-3] if t.endswith(".md") else t
-        return (t_noext == tgt_base and bare_resolves(from_fp, tgt_fp, idx)) \
-            or t_noext == tgt_rel_noext
+        # a token equal to the basename is a BARE link (winner rules apply) even
+        # for a root-level note where basename == rel path — never a path form
+        if t_noext == tgt_base:
+            return bare_resolves(from_fp, tgt_fp, idx)
+        return t_noext == tgt_rel_noext
     import urllib.parse
     dec = urllib.parse.unquote(target.strip())
     cand = os.path.normpath(os.path.join(os.path.dirname(from_fp), dec))
@@ -447,18 +473,35 @@ def cmd_links(ref):
 def cmd_orphans(folder=""):
     root = contain(folder) if folder else VAULT
     files = list(md_files())
-    # a note is linked if ANY note resolves a link to it (path-aware)
-    all_targets = set()
-    for _p, _i, _kind, t in scan_links():
+    idx = basename_index()
+    # a note is linked if ANY note resolves a link to it — using the SAME winner
+    # rules as backlinks: a bare [[Dup]] rescues only the note it resolves to,
+    # never every duplicate (they disagreed before 2026-08-26).
+    import urllib.parse
+    path_targets = set()
+    bare_by_name = {}
+    for p, _i, kind, t in scan_links():
         tl = t.strip().lower()
-        all_targets.add(tl[:-3] if tl.endswith(".md") else tl)
+        if kind == "md":
+            dec = urllib.parse.unquote(tl)
+            dec = dec[:-3] if dec.endswith(".md") else dec
+            path_targets.add(os.path.normpath(os.path.join(os.path.dirname(rel(p)), dec)).lower())
+            path_targets.add(os.path.normpath(dec).lower())
+            continue
+        tl = tl[:-3] if tl.endswith(".md") else tl
+        if "/" in tl:
+            path_targets.add(tl)
+        else:
+            bare_by_name.setdefault(tl, []).append(p)
     n = 0
     for p in sorted(files):
         if not (p == root or p.startswith(root + os.sep) or not folder):
             continue
         base = os.path.basename(p)[:-3].lower()
         rel_noext = rel(p)[:-3].lower()
-        if base not in all_targets and rel_noext not in all_targets:
+        linked = rel_noext in path_targets or \
+            any(src != p and bare_resolves(src, p, idx) for src in bare_by_name.get(base, ()))
+        if not linked:
             out(rel(p)); n += 1
     out(f"({n} orphans)")
 
@@ -510,7 +553,7 @@ def cmd_props(key, folder=""):
     out(f"({sum(c.values())} notes with {key})")
 
 def cmd_search(*args):
-    if os.path.exists(VRUST):
+    if use_rust():
         r = subprocess.run([VRUST, "search", *args], capture_output=True, text=True)
         sys.stdout.write(r.stdout); sys.stderr.write(r.stderr)
         global _out_total
@@ -526,8 +569,8 @@ def cmd_search(*args):
         die("error: no query")
     hits = []
     for p in md_files():
-        if rel(p).startswith("Sandbox/"):
-            continue  # parity with vrust engine's exclusion set
+        if rel(p).startswith("Sandbox/") or (os.sep + "Sandbox" + os.sep) in p:
+            continue  # parity with the rust engine: Sandbox excluded at ANY depth
         try:
             text = open(p, errors="replace").read()
         except OSError:
@@ -545,6 +588,7 @@ def cmd_search(*args):
     out(f"({min(len(hits), k)} of {len(hits)} matches)")
 
 def cmd_daily_append(text):
+    _dirty_gate()
     today = datetime.date.today().isoformat()
     hits = glob.glob(os.path.join(VAULT, "Standups", f"*{today}*.md"))
     if not hits:
@@ -555,14 +599,67 @@ def cmd_daily_append(text):
 
 # ================= v1.5: show / deadends / impact / rename / move / lint / doctor =================
 
-JOURNAL_ROOT = os.path.expanduser("~/.cache/vv/journals")
+# VV_JOURNAL_ROOT: test suites point this at a tempdir so they can never touch
+# (or worse, delete) real pending recovery journals
+JOURNAL_ROOT = os.environ.get("VV_JOURNAL_ROOT") or os.path.expanduser("~/.cache/vv/journals")
 
 def masked_lines(text):
-    """Line indices where wikilinks are inert (fenced blocks). Frontmatter is NOT masked —
-    `related:` links there are real links. Same fence rules as parse()."""
+    """ONE state walk over the note for link scanning: returns (lines, fenced_line_set,
+    comment_spans_per_line). Precedence probed against Obsidian 2026-08-26:
+    an OPEN html comment owns its lines — a fence marker inside it is literal text
+    and the comment still closes at the next --> — while a fence keeps <!-- literal.
+    Obsidian's own %% comments are NOT masked (their links index). Frontmatter is
+    never fenced (`related:` links are real) but may hold comment markers.
+    The closer/opener search runs on inline-code-stripped text (a backticked -->
+    does not close — observable-equivalent to the app). parse()/sections keep the
+    independent fence_mask: section addressing must not shift under comment rules."""
     lines = text.split("\n")
     fm_end = fm_bounds(lines)
-    return lines, fence_mask(lines, fm_end)
+    fenced, cspans = set(), {}
+    marker = None        # (char, length) of an open fence
+    in_comment = False
+    for i, l in enumerate(lines):
+        ls = l.rstrip("\r")
+        cur, pos = [], 0
+        if in_comment:
+            scan = strip_inline_code(ls)
+            end = scan.find("-->")
+            if end == -1:
+                cspans[i] = [(0, len(ls))]
+                continue
+            cur.append((0, end + 3))
+            pos = end + 3
+            in_comment = False
+            # a line where a comment just closed can never open a fence (a fence
+            # needs the line start; the --> prefix disqualifies it)
+        else:
+            m = re.match(r"^ {0,3}(`{3,}|~{3,})(.*)$", ls) if i >= fm_end else None
+            if marker is None:
+                if m:
+                    marker = (m.group(1)[0], len(m.group(1)))
+                    fenced.add(i)
+                    continue
+            else:
+                fenced.add(i)
+                if m and m.group(1)[0] == marker[0] and len(m.group(1)) >= marker[1] \
+                        and not m.group(2).strip():
+                    marker = None
+                continue
+            scan = strip_inline_code(ls)
+        while True:
+            s = scan.find("<!--", pos)
+            if s == -1:
+                break
+            e = scan.find("-->", s + 4)
+            if e == -1:
+                cur.append((s, len(ls)))
+                in_comment = True
+                break
+            cur.append((s, e + 3))
+            pos = e + 3
+        if cur:
+            cspans[i] = cur
+    return lines, fenced, cspans
 
 def scan_links(needle=None):
     """Yield (abs_path, line_idx0, kind, target) for every active link in the vault.
@@ -575,7 +672,7 @@ def scan_links(needle=None):
     `needle` prefilters wiki targets by substring (case-insensitive); markdown links are
     always yielded because percent-encoding hides names from a substring filter.
     """
-    if os.path.exists(VRUST):
+    if use_rust():
         cmd = [VRUST, "linkscan"] + (["--grep", needle] if needle else [])
         r = subprocess.run(cmd, capture_output=True, text=True)
         if r.returncode == 0:
@@ -596,29 +693,36 @@ def scan_links(needle=None):
                 continue
             yield p, i, kind, tgt
 
-CODE_SPAN = re.compile(r"(?<!`)(`+)(?!`).*?(?<!`)\1(?!`)", re.S)
-
 def code_spans(line):
     """(start, end) of inline code spans, CommonMark-style: a run of N backticks is
-    closed by a run of exactly N. Handles ``[[x]]`` as well as `[[x]]`."""
+    closed only by a run of EXACTLY N. A longer run is skipped WHOLE — its tail is
+    never a closer (the old find()-based search accepted one; caught by review
+    2026-08-26). Mirrors the Rust engine's loop shape exactly."""
     spans = []
-    i = 0
-    while i < len(line):
+    i, L = 0, len(line)
+    while i < L:
         if line[i] == "`":
             n = 0
-            while i + n < len(line) and line[i + n] == "`":
+            while i + n < L and line[i + n] == "`":
                 n += 1
-            close = line.find("`" * n, i + n)
-            while close != -1:
-                after = close + n
-                if (after >= len(line) or line[after] != "`"):
-                    break
-                close = line.find("`" * n, after + 1)
-            if close != -1:
+            j = i + n
+            close = None
+            while j < L:
+                if line[j] == "`":
+                    m = 0
+                    while j + m < L and line[j + m] == "`":
+                        m += 1
+                    if m == n:
+                        close = j
+                        break
+                    j += m
+                else:
+                    j += 1
+            if close is not None:
                 spans.append((i, close + n))
                 i = close + n
-                continue
-            i += n
+            else:
+                i += n
             continue
         i += 1
     return spans
@@ -630,72 +734,52 @@ def strip_inline_code(line):
             masked[k] = "\0"
     return "".join(masked)
 
-def html_comment_spans(scans, fenced):
-    """Character spans inside HTML comments (<!-- -->), per line, computed on
-    inline-code-stripped lines. Obsidian does not index links inside HTML comments
-    but DOES index them inside its own %% comments — both probed via metadataCache
-    2026-08-26 — so only <!-- --> is masked. A comment cannot open on a fenced line
-    (the marker is literal text there), but an already-open comment consumes lines,
-    fenced-looking or not, until -->. Returns {line_idx: [(start, end), ...]}."""
-    spans = {}
-    open_ = False
-    for i, l in enumerate(scans):
-        cur = []
-        pos = 0
-        if open_:
-            end = l.find("-->")
-            if end == -1:
-                spans[i] = [(0, len(l))]
-                continue
-            cur.append((0, end + 3))
-            pos = end + 3
-            open_ = False
-        elif i in fenced:
-            continue
-        while True:
-            s = l.find("<!--", pos)
-            if s == -1:
-                break
-            e = l.find("-->", s + 4)
-            if e == -1:
-                cur.append((s, len(l)))
-                open_ = True
-                break
-            cur.append((s, e + 3))
-            pos = e + 3
-        if cur:
-            spans[i] = cur
-    return spans
-
-LINK_RE = re.compile(r"(!?\[\[)([^\]|#]+)((?:#[^\]|]*)?(?:\|[^\]]*)?)(\]\])")
-MDLINK_RE = re.compile(r"(\]\()([^)\s]+\.md)(\))")
+# alias may contain single ] chars (only ]] terminates — probed against Obsidian's
+# metadataCache 2026-08-26: [[Note|a]b]] links Note, display "a]b").
+# md-link: a ] that is itself preceded by ] is a wikilink closer, never [text]( —
+# the lookbehind mirrors the Rust engine's skip-past-]] behavior.
+LINK_RE = re.compile(r"(!?\[\[)([^\]|#]+)((?:#[^\]|]*)?(?:\|(?:\](?!\])|[^\]])*)?)(\]\])")
+MDLINK_RE = re.compile(r"((?<!\])\]\()([^)\s]+\.md)(\))")
 
 def wiki_target(m):
-    """Target of a LINK_RE match. Two backslash cases, both found 2026-08-26 by the
-    Obsidian oracle test: [[Note\\|alias]] escapes the alias pipe inside tables (the
-    backslash is not part of the name), and [[Note\\]] — a stray trailing backslash —
-    resolves in Obsidian to Note, because backslash is illegal in note names. So all
-    trailing backslashes are stripped. Returns (target, escaped_pipe) so rewriters
-    can re-emit the pipe escape (that one is meaningful; the stray kind is not)."""
+    """Target of a LINK_RE match. Backslash semantics probed against Obsidian's
+    metadataCache 2026-08-26: exactly ONE trailing backslash is consumed at a
+    boundary — [[Note\\|alias]] escapes the alias pipe, and a stray [[Note\\]]
+    resolves to Note. A SECOND backslash stays in the target ([[N\\\\|a]] targets
+    'N\\'), which resolves to nothing in the app since backslash is illegal in note
+    names — so it naturally matches no note here either. Returns (target,
+    escaped_pipe) so rewriters can re-emit the pipe escape."""
     t = m.group(2).strip()
     esc = t.endswith("\\") and m.group(3).startswith("|")
-    return t.rstrip("\\").rstrip(), esc
+    if t.endswith("\\"):
+        t = t[:-1].rstrip()
+    return t, esc
 
 def link_targets_in(text):
     """Yield (line_idx, kind, target) for active links; fenced lines, inline code
-    and HTML comments excluded."""
-    lines, fenced = masked_lines(text)
-    scans = [l if i in fenced else strip_inline_code(l) for i, l in enumerate(lines)]
-    cmask = html_comment_spans(scans, fenced)
-    for i, scan in enumerate(scans):
+    and HTML comments excluded. A link that OVERLAPS a comment span at any point
+    (not just its start) is inert — [[A <!-- x --> B]] is not a link. Empty targets
+    ([[ ]], [[\\]]) are skipped, mirroring the Rust engine."""
+    lines, fenced, cmask = masked_lines(text)
+    for i, l in enumerate(lines):
         if i in fenced:
             continue
+        scan = strip_inline_code(l)
         spans = cmask.get(i, [])
+        def target_clear(m):
+            # only the TARGET decides: a comment overlapping the alias leaves the
+            # link real ([[N|a <!-- x --> b]] links N, probed 2026-08-26); one
+            # overlapping the target does not. Same rule as the Rust engine's
+            # NUL-in-target check.
+            a2, b2 = m.start(2), m.end(2)
+            return not any(a < b2 and a2 < b for a, b in spans)
         for m in LINK_RE.finditer(scan):
-            if not any(a <= m.start() < b for a, b in spans):
-                yield i, "wiki", wiki_target(m)[0]
+            t = wiki_target(m)[0]
+            # "\0" in target = it overlaps an inline-code span — same drop in Rust
+            if t and "\0" not in t and target_clear(m):
+                yield i, "wiki", t
         for m in MDLINK_RE.finditer(scan):
-            if not any(a <= m.start() < b for a, b in spans):
+            if "\0" not in m.group(2) and target_clear(m):
                 yield i, "md", m.group(2)
 
 def basename_index():
@@ -717,17 +801,13 @@ def occurrences(source_fp, include_bare=True):
         t = tgt.strip().lower()
         if kind == "wiki":
             t_noext = t[:-3] if t.endswith(".md") else t  # [[Note.md]] is the same target as [[Note]]
-            if t_noext == src_base and include_bare and bare_resolves(p, source_fp, idx):
-                hits[p] = hits.get(p, 0) + 1
+            if t_noext == src_base:   # bare form — winner rules, even for root notes
+                if include_bare and bare_resolves(p, source_fp, idx):
+                    hits[p] = hits.get(p, 0) + 1
             elif t_noext == src_rel_noext:
                 hits[p] = hits.get(p, 0) + 1
-        else:
-            import urllib.parse
-            dec = urllib.parse.unquote(tgt.strip())
-            cand = os.path.normpath(os.path.join(os.path.dirname(p), dec))
-            if os.path.abspath(cand) == os.path.abspath(source_fp) or \
-               os.path.normpath(os.path.join(VAULT, dec)) == source_fp:
-                hits[p] = hits.get(p, 0) + 1
+        elif link_matches(p, kind, tgt, source_fp, src_base, src_rel_noext, idx):
+            hits[p] = hits.get(p, 0) + 1
     return hits, ambiguous
 
 def cmd_show(ref, *args):
@@ -778,25 +858,68 @@ def cmd_impact(ref, *args):
     props = fm_props(fm)
     out(f"frontmatter: type={props.get('type','-')} status={props.get('status','-')}")
 
+def _vault_journal_root():
+    """Journals are scoped per vault (sqlx keeps its migration bookkeeping inside
+    the database it describes — same idea): a leftover journal for another vault
+    must neither block this one nor ever be rolled back into it."""
+    vid = hashlib.sha256(_VAULT_REAL.encode()).hexdigest()[:12]
+    return os.path.join(JOURNAL_ROOT, vid)
+
+def _pending_journals():
+    root = _vault_journal_root()
+    return sorted(glob.glob(os.path.join(root, "*"))) if os.path.isdir(root) else []
+
+def _dirty_gate():
+    """A pending journal means an earlier apply did not finish — no write command
+    runs until it is resolved (sqlx's Dirty-version gate, adapted). Exit 4 matches
+    doctor's unresolved-journal code."""
+    js = _pending_journals()
+    if js:
+        die(f"dirty: pending journal {os.path.basename(js[0])} — resolve with vv doctor "
+            f"(rollback or discard) before writing", 4)
+
 def _journal_start(name, files):
     ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S-%f")
-    jdir = os.path.join(JOURNAL_ROOT, f"{ts}-{name}")
+    jdir = os.path.join(_vault_journal_root(), f"{ts}-{name}")
     os.makedirs(jdir)
-    manifest = {"op": name, "ts": ts, "files": {}}
+    manifest = {"op": name, "ts": ts, "vault": _VAULT_REAL, "files": {}, "sha256": {}}
     import shutil as _sh
     for idx, fp in enumerate(files):  # index key — collision-proof (rel-path %2F encoding was not)
         key = f"f{idx}.bak"
         _sh.copy2(fp, os.path.join(jdir, key))
         manifest["files"][rel(fp)] = key
+        with open(fp, "rb") as f:
+            manifest["sha256"][rel(fp)] = hashlib.sha256(f.read()).hexdigest()
     with open(os.path.join(jdir, "manifest.json"), "w") as f:
         json.dump(manifest, f)
     return jdir
 
-def _journal_rollback(jdir):
+def _journal_rollback(jdir, written=None):
+    """Restore journaled files — but CLASSIFY each first (adapted from sqlx's
+    checksum checks): bytes that are neither the journaled original nor our own
+    write belong to another writer and are left alone, never clobbered.
+    `written` maps rel-path -> sha256 of what THIS process wrote (None = restore
+    unconditionally, the pre-classification behavior). Returns rel-paths left."""
     man = json.load(open(os.path.join(jdir, "manifest.json")))
     import shutil as _sh
+    left = []
     for r_, key in man["files"].items():
-        _sh.copy2(os.path.join(jdir, key), os.path.join(VAULT, r_))
+        live_p = os.path.join(VAULT, r_)
+        try:
+            with open(live_p, "rb") as f:
+                live_h = hashlib.sha256(f.read()).hexdigest()
+        except OSError:
+            live_h = None
+        if live_h is not None and live_h == man.get("sha256", {}).get(r_):
+            continue   # untouched since journaling — nothing to undo
+        if written is not None:
+            if r_ not in written:
+                continue   # we never wrote it; the change is someone else's — leave it
+            if live_h is not None and live_h != written[r_]:
+                left.append(r_)   # our write was overwritten since — do not clobber
+                continue
+        _sh.copy2(os.path.join(jdir, key), live_p)
+    return left
 
 def _journal_done(jdir):
     import shutil as _sh
@@ -809,38 +932,35 @@ def _rewrite_links(text, source_fp, new_rel_noext, rename_base, linking_fp=None)
     src_base = os.path.basename(source_fp)[:-3]
     src_rel_noext = rel(source_fp)[:-3]
     new_fp_abs = os.path.join(VAULT, new_rel_noext + ".md")
-    lines, fenced = masked_lines(text)
-    cmask = html_comment_spans(
-        [l if i in fenced else strip_inline_code(l) for i, l in enumerate(lines)], fenced)
+    lines, fenced, cmask = masked_lines(text)
     changed = 0
     for i, l in enumerate(lines):
         if i in fenced:
             continue
         # a link the scanner doesn't count must not be rewritten either:
-        # inline code spans + HTML-comment spans (same masking as link_targets_in)
+        # inline code spans + HTML-comment spans (same masking as link_targets_in),
+        # judged by link start AND target span — an overlap that only touches the
+        # alias leaves the link real, same as the scanner
         spans = code_spans(l) + cmask.get(i, [])
         def in_span(pos):
             return any(a <= pos < b for a, b in spans)
-        def wiki_sub(m):
-            nonlocal changed
-            if in_span(m.start()):
-                return m.group(0)
+        def blocked(m):
+            a2, b2 = m.start(2), m.end(2)
+            return in_span(m.start()) or any(a < b2 and a2 < b for a, b in spans)
+        def wiki_repl(m):
             tgt, esc = wiki_target(m)
             pipe_esc = "\\" if esc else ""   # keep [[Note\|alias]] escaped after rewrite
             t = tgt.lower()
             ext = ".md" if t.endswith(".md") else ""   # preserve the author's [[Note.md]] style
             t_noext = t[:-3] if ext else t
-            if t_noext == src_base.lower() and rename_base:
-                changed += 1
-                return m.group(1) + rename_base + ext + pipe_esc + m.group(3) + m.group(4)
+            if t_noext == src_base.lower():   # bare form — never treated as a path form
+                if rename_base:
+                    return m.group(1) + rename_base + ext + pipe_esc + m.group(3) + m.group(4)
+                return None   # move keeps bare links: they still resolve by name
             if t_noext == src_rel_noext.lower():
-                changed += 1
                 return m.group(1) + new_rel_noext + ext + pipe_esc + m.group(3) + m.group(4)
-            return m.group(0)
-        def md_sub(m):
-            nonlocal changed
-            if in_span(m.start()):
-                return m.group(0)
+            return None
+        def md_repl(m):
             import urllib.parse
             dec = urllib.parse.unquote(m.group(2))
             is_relative = not os.path.isabs(dec) and (dec.startswith("./") or dec.startswith("../")
@@ -849,22 +969,36 @@ def _rewrite_links(text, source_fp, new_rel_noext, rename_base, linking_fp=None)
             matches_root = os.path.normpath(os.path.join(VAULT, dec)) == source_fp
             matches_rel = linking_fp and os.path.normpath(os.path.join(os.path.dirname(linking_fp), dec)) == source_fp
             if matches_rel and is_relative and linking_fp:
-                changed += 1
                 newrel = os.path.relpath(new_fp_abs, os.path.dirname(linking_fp))
                 return m.group(1) + urllib.parse.quote(newrel) + m.group(3)
             if matches_root:
-                changed += 1
                 return m.group(1) + urllib.parse.quote(new_rel_noext + ".md") + m.group(3)
-            return m.group(0)
-        nl = LINK_RE.sub(wiki_sub, l)
-        nl = MDLINK_RE.sub(md_sub, nl)
-        lines[i] = nl
+            return None
+        # ONE position-stable pass: all matches and spans are located on the ORIGINAL
+        # line, then replacements apply right-to-left so earlier offsets never go
+        # stale (sequential re.sub passes consulted dead coordinates — review
+        # 2026-08-26, mixed active/inert lines made valid renames abort).
+        repls = []
+        for regex, repl in ((LINK_RE, wiki_repl), (MDLINK_RE, md_repl)):
+            for m in regex.finditer(l):
+                if blocked(m):
+                    continue
+                r = repl(m)
+                if r is not None:
+                    repls.append((m.start(), m.end(), r))
+        for a, b, r in sorted(repls, reverse=True):
+            l = l[:a] + r + l[b:]
+        changed += len(repls)
+        lines[i] = l
     return "\n".join(lines), changed
 
 def _do_relocate(ref, dest_rel_noext, apply_, opname):
     fp = resolve(ref)
     src_rel = rel(fp)
-    new_fp = os.path.join(VAULT, dest_rel_noext + ".md")
+    # the destination is a WRITE target and gets the same containment as every
+    # other write path — an absolute dest or ../ escape must never leave the vault
+    new_fp = contain(dest_rel_noext + ".md")
+    dest_rel_noext = rel(new_fp)[:-3]
     if os.path.exists(new_fp):
         die(f"error: target exists: {dest_rel_noext}.md")
     new_base = os.path.basename(dest_rel_noext)
@@ -873,7 +1007,10 @@ def _do_relocate(ref, dest_rel_noext, apply_, opname):
     if rename_base and rename_base.lower() in idx:
         die(f"error: another note already has basename '{new_base}' — bare links would be ambiguous")
     hits, ambiguous = occurrences(fp, include_bare=bool(rename_base))
-    if ambiguous and rename_base:
+    if ambiguous:
+        # rename: bare links can't be rewritten safely. move: bare links aren't
+        # rewritten at all, but relocating one duplicate CHANGES which note the
+        # same-folder/shortest-path tiers resolve them to — silent repointing.
         die(f"error: source basename is ambiguous in vault — resolve duplicate notes first")
     out(f"plan: {opname} {src_rel} -> {dest_rel_noext}.md")
     out(f"files to rewrite: {len(hits)} ({sum(hits.values())} link occurrences)")
@@ -883,9 +1020,11 @@ def _do_relocate(ref, dest_rel_noext, apply_, opname):
         out("(dry-run — pass --apply to execute)")
         return
     # journal every file that will be written, plus the moved file itself (once)
+    _dirty_gate()
     journal_targets = list(hits.keys()) + ([fp] if fp not in hits else [])
     jdir = _journal_start(opname, journal_targets)
     renamed = False
+    written = {}   # rel-path -> sha256 of what WE wrote (rollback classifies with it)
     try:
         results = {}
         for p in hits:
@@ -895,10 +1034,14 @@ def _do_relocate(ref, dest_rel_noext, apply_, opname):
                 raise RuntimeError(f"span mismatch in {rel(p)}: planned {hits[p]}, rewrote {changed}")
             results[p] = new_text
         fault_after = int(os.environ.get("VV_FAULT_AFTER", "-1"))
+        # VV_FAULT_KIND=exit injects SystemExit instead — pins the BaseException
+        # rollback path (a real read_raw exit-5 mid-apply takes it too)
+        fault_exc = SystemExit if os.environ.get("VV_FAULT_KIND") == "exit" else RuntimeError
         for wi, (p, new_text) in enumerate(results.items()):
             if 0 <= fault_after <= wi:
-                raise RuntimeError(f"INJECTED FAULT after {wi} writes")
+                raise fault_exc(f"INJECTED FAULT after {wi} writes")
             atomic_write(p, new_text)
+            written[rel(p)] = hashlib.sha256(new_text.encode()).hexdigest()
         if fault_after == len(results):
             raise RuntimeError(f"INJECTED FAULT after {len(results)} writes (pre-rename)")
         d = os.path.dirname(new_fp)
@@ -921,12 +1064,18 @@ def _do_relocate(ref, dest_rel_noext, apply_, opname):
             raise RuntimeError(f"verification failed: {stale} stale links remain")
         _journal_done(jdir)
         out(f"applied: {len(results)} files rewritten, note {opname}d, verification clean")
-    except Exception as e:
-        # reverse the rename FIRST (if it happened) so journal-restore never leaves a duplicate
+    except BaseException as e:
+        # BaseException, not Exception: read_raw exits via SystemExit on a non-UTF-8
+        # file and Ctrl-C raises KeyboardInterrupt — both must roll back too.
+        # Reverse the rename FIRST (if it happened) so journal-restore never leaves a duplicate.
         if renamed and os.path.exists(new_fp) and not os.path.exists(fp):
             os.rename(new_fp, fp)
-        _journal_rollback(jdir)
-        die(f"ROLLED BACK ({e}); originals restored from journal {jdir}")
+        left = _journal_rollback(jdir, written)
+        if left:
+            die(f"ROLLED BACK ({e}); NOT restored (changed by another writer, journal kept "
+                f"at {jdir}): {', '.join(left)}")
+        _journal_done(jdir)   # clean rollback = nothing pending; don't trip the dirty gate
+        die(f"ROLLED BACK ({e}); originals restored")
 
 def cmd_rename(ref, new_name, *args):
     fp = resolve(ref)
@@ -971,16 +1120,29 @@ def cmd_lint(*args):
         # an UNESCAPED alias pipe inside a wikilink on a table row: the table splits
         # the cell at the pipe, so Obsidian renders NO link at all (oracle 2026-08-26).
         # The fix is \| — flag it, since the note renders broken in the app.
-        lines, fenced = masked_lines(text)
-        scans = [l if i in fenced else strip_inline_code(l) for i, l in enumerate(lines)]
-        cmask = html_comment_spans(scans, fenced)
+        lines, fenced, cmask = masked_lines(text)
+        # a line belongs to a table if a delimiter row (|---|---| etc.) is adjacent
+        # within its contiguous block — tables need no leading pipes (review 2026-08-26)
+        delim = re.compile(r"^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{3,}:?\s*)*\|?\s*$")
+        delim_rows = {i for i, l in enumerate(lines) if i not in fenced and "-" in l and delim.match(l.rstrip("\r"))}
+        table_rows = set()
+        for d in delim_rows:
+            j = d - 1                      # header row above
+            if j >= 0 and "|" in lines[j]:
+                table_rows.add(j)
+            j = d + 1                      # body rows below, until a line with no pipe
+            while j < len(lines) and "|" in lines[j] and j not in delim_rows:
+                table_rows.add(j); j += 1
         for i, l in enumerate(lines):
-            if i in fenced or not l.lstrip().startswith("|"):
+            if i in fenced or i not in table_rows:
                 continue
-            for m in LINK_RE.finditer(scans[i]):
-                if any(a <= m.start() < b for a, b in cmask.get(i, [])):
+            for m in LINK_RE.finditer(strip_inline_code(l)):
+                a2, b2 = m.start(2), m.end(2)
+                if any(a < b2 and a2 < b for a, b in cmask.get(i, [])):
                     continue
-                if m.group(3).startswith("|") and not m.group(2).rstrip().endswith("\\"):
+                # unescaped pipe anywhere in the link ([[N|a]] AND [[N#S|a]]) — an
+                # escaped \| is fine, and \\| is an escaped backslash + escaped pipe
+                if re.search(r"(?<!\\)\|", m.group(2) + m.group(3)):
                     findings.append(("table-pipe", f"{rel(p)}:{i+1}", m.group(2).strip()))
     # output is context: report every finding's COUNT, but print at most `limit` lines
     from collections import Counter
@@ -992,13 +1154,29 @@ def cmd_lint(*args):
     more = f" — {len(findings) - shown} more, raise with --limit N" if len(findings) > shown else ""
     out(f"({len(findings)} findings: {summary or 'none'}; showing {shown}{more})")
 
-def cmd_doctor():
+def cmd_doctor(*args):
+    js = _pending_journals()
+    if "--rollback" in args or "--discard" in args:
+        if not js:
+            die("error: no pending journal for this vault")
+        jdir = js[0]
+        if "--discard" in args:
+            _journal_done(jdir)
+            out(f"discarded journal {os.path.basename(jdir)} (no files restored)")
+        else:
+            left = _journal_rollback(jdir)   # no `written` info after a crash: restore
+            if left:
+                die(f"rollback incomplete — left alone (bytes match neither original nor "
+                    f"journal): {', '.join(left)}; journal kept at {jdir}")
+            _journal_done(jdir)
+            out(f"rolled back journal {os.path.basename(jdir)}; originals restored")
+        _log(_out_total); return
     out(f"vault: {VAULT} ({'ok' if os.path.isdir(VAULT) else 'MISSING'})")
     out(f"engine: {'vrust ok' if os.path.exists(VRUST) else 'vrust MISSING (python fallback)'}")
     dirty = _git(["status", "--porcelain"])
     out(f"git: {'clean' if not dirty else f'{len(dirty.splitlines())} dirty paths'}")
-    js = sorted(glob.glob(os.path.join(JOURNAL_ROOT, "*"))) if os.path.isdir(JOURNAL_ROOT) else []
-    out(f"journals: {'none pending' if not js else 'UNRESOLVED: ' + ', '.join(os.path.basename(j) for j in js)}")
+    out(f"journals: {'none pending' if not js else 'UNRESOLVED (writes blocked): '
+        + ', '.join(os.path.basename(j) for j in js) + ' — vv doctor --rollback | --discard'}")
     try:
         with open(METRICS, "a"):
             pass

@@ -22,6 +22,10 @@ ITER = int(os.environ.get("STRESS_ITER", "120"))
 rng = random.Random(SEED)
 
 VAULT = tempfile.mkdtemp(prefix="vv-stress-vault-")
+# journals also go to a temp root — this suite must never touch (or delete)
+# real pending recovery journals (review 2026-08-26)
+_JR = tempfile.mkdtemp(prefix="vv-stress-journals-")
+os.environ["VV_JOURNAL_ROOT"] = _JR
 
 def run(*args, stdin=None, env_extra=None):
     env = dict(os.environ, VV_VAULT=VAULT)
@@ -220,7 +224,7 @@ for k in range(max(1, n_hit_files)):
         open(os.path.join(VAULT, "GTarget.md")).read() == tgt_orig
     check(f"P6 fault@{k} rollback byte-identical", r.returncode == 1 and restored and still_there,
           f"rc={r.returncode} restored={restored} tgt={still_there}")
-shutil.rmtree(os.path.expanduser("~/.cache/vv/journals"), ignore_errors=True)
+shutil.rmtree(_JR, ignore_errors=True); os.makedirs(_JR, exist_ok=True)
 
 # ---------- perf under stress ----------
 big = "\n".join(f"## S{i}\n" + ("x" * 100 + "\n") * 10 for i in range(1000))
@@ -232,6 +236,7 @@ check("PERF section read < 1500ms", t_read < 1500, f"{t_read:.0f}ms")
 print(f"perf: outline(1000 sections, {len(big)//1024}KB)={t_out:.0f}ms  read=H500 {t_read:.0f}ms")
 
 shutil.rmtree(VAULT, ignore_errors=True)
+shutil.rmtree(_JR, ignore_errors=True)
 print(f"\nseed={SEED} iters={ITER}")
 print(f"{len(fails)} failures" if fails else "ALL STRESS PASS")
 sys.exit(1 if fails else 0)

@@ -27,8 +27,13 @@ fi
 echo "unit + integration:"
 run "v1 commands"        python3 tests/test_vv.py
 run "v1.5 commands"      python3 tests/test_vv15.py
+# same suites forced onto the python fallback — the engine nobody exercises is
+# the one that drifts (sqlx runs its scenarios per-backend for the same reason)
+run "v1 (python engine)"   env VV_ENGINE=python python3 tests/test_vv.py
+run "v1.5 (python engine)" env VV_ENGINE=python python3 tests/test_vv15.py
 run "review regressions" python3 tests/test_panel_findings.py
 run "oracle findings"    python3 tests/test_oracle_findings.py
+run "round-2 review"     python3 tests/test_review_round2.py
 run "engine parity"      python3 tests/test_engine_parity.py
 
 echo "property/fuzz:"

@@ -54,6 +54,7 @@ fn cmd_search(args: &[String]) {
     let root = vault();
     let mut files = Vec::new();
     walk_ex(&root, &mut files, true); // search excludes Sandbox
+    files.sort();
     let mut hits: Vec<(usize, String, String)> = Vec::new();
     for fp in &files {
         let text = match fs::read_to_string(fp) {
@@ -137,6 +138,7 @@ fn cmd_linkscan(args: &[String]) {
     let root = vault();
     let mut files = Vec::new();
     walk_ex(&root, &mut files, false); // graph sees everything
+    files.sort();
     let mut buf = String::with_capacity(1 << 20);
     for fp in &files {
         let text = match fs::read_to_string(fp) {
@@ -160,54 +162,48 @@ fn cmd_linkscan(args: &[String]) {
         let mut in_comment = false;
         for (i, raw) in lines.iter().enumerate() {
             let raw = raw.trim_end_matches('\r'); // CRLF must not defeat fence detection
-            let trimmed = raw.trim_start();
-            let indent = raw.len() - trimmed.len();
-            // CommonMark: a fence closes only on its own char AND a run >= the opener's
-            let fence: Option<(char, usize, &str)> = if indent <= 3
-                && (trimmed.starts_with("```") || trimmed.starts_with("~~~"))
-            {
-                let c = trimmed.chars().next().unwrap();
-                let n = trimmed.chars().take_while(|&x| x == c).count();
-                Some((c, n, &trimmed[n..]))
-            } else {
-                None
-            };
-            let mut line_fenced = false;
-            if i >= fm_end {
-                match (marker, fence) {
-                    (None, Some((c, n, _))) => {
-                        marker = Some((c, n));
-                        line_fenced = true;
+            // an OPEN comment owns the line — no fence transitions until --> (probed
+            // against Obsidian 2026-08-26: a ``` inside a comment is literal text)
+            if !in_comment {
+                // fence indent = ASCII spaces only (parity with vv.py's `^ {0,3}`;
+                // NBSP/tab is not fence indent, and byte-vs-char counting can't drift)
+                let indent = raw.chars().take_while(|&c| c == ' ').count();
+                let trimmed = &raw[indent..];
+                // CommonMark: a fence closes only on its own char AND a run >= the opener's
+                let fence: Option<(char, usize, &str)> = if indent <= 3
+                    && (trimmed.starts_with("```") || trimmed.starts_with("~~~"))
+                {
+                    let c = trimmed.chars().next().unwrap();
+                    let n = trimmed.chars().take_while(|&x| x == c).count();
+                    Some((c, n, &trimmed[n..]))
+                } else {
+                    None
+                };
+                let mut line_fenced = false;
+                if i >= fm_end {
+                    match (marker, fence) {
+                        (None, Some((c, n, _))) => {
+                            marker = Some((c, n));
+                            line_fenced = true;
+                        }
+                        (Some((mc, mn)), Some((c, n, rest)))
+                            if c == mc && n >= mn && rest.trim().is_empty() =>
+                        {
+                            marker = None;
+                            line_fenced = true;
+                        }
+                        (Some(_), _) => line_fenced = true,
+                        _ => {}
                     }
-                    (Some((mc, mn)), Some((c, n, rest)))
-                        if c == mc && n >= mn && rest.trim().is_empty() =>
-                    {
-                        marker = None;
-                        line_fenced = true;
-                    }
-                    (Some(_), _) => line_fenced = true,
-                    _ => {}
+                }
+                if line_fenced {
+                    continue;
                 }
             }
             // mask inline code spans (CommonMark: a run of N backticks closes on a run
-            // of exactly N) — on non-fenced lines only, mirroring vv.py's scans[]
+            // of exactly N)
             let chars: Vec<char> = raw.chars().collect();
             let mut masked: Vec<char> = chars.clone();
-            if line_fenced {
-                // fenced lines keep raw text: an open HTML comment may still close here
-                if in_comment {
-                    match find_seq(&masked, 0, &['-', '-', '>']) {
-                        None => continue,
-                        Some(e) => {
-                            for k in 0..e + 3 { masked[k] = '\u{0}'; }
-                            in_comment = false;
-                            let mut pos = e + 3;
-                            mask_comments(&mut masked, &mut pos, &mut in_comment);
-                        }
-                    }
-                }
-                continue;
-            }
             let mut ci = 0usize;
             while ci < chars.len() {
                 if chars[ci] == '`' {
@@ -278,12 +274,19 @@ fn cmd_linkscan(args: &[String]) {
                             .next()
                             .unwrap_or("")
                             .trim();
-                        // trailing backslashes are never part of a name: [[Note\|alias]]
-                        // escapes the alias pipe inside tables, and a stray [[Note\]]
-                        // still resolves to Note in Obsidian (backslash is illegal in
-                        // note names). Mirrors wiki_target() in vv.py.
-                        let target = seg.trim_end_matches('\\').trim_end().to_string();
-                        if !target.is_empty()
+                        // exactly ONE trailing backslash is consumed at a boundary:
+                        // [[Note\|alias]] escapes the alias pipe, [[Note\]] resolves to
+                        // Note; a second backslash stays in the target and resolves to
+                        // nothing (probed against Obsidian 2026-08-26). Mirrors
+                        // wiki_target() in vv.py.
+                        let target = seg
+                            .strip_suffix('\\')
+                            .map(str::trim_end)
+                            .unwrap_or(seg)
+                            .to_string();
+                        // a target overlapping a masked region (inline code / HTML
+                        // comment) is not a link — the NUL bytes are the evidence
+                        if !target.is_empty() && !target.contains('\u{0}')
                             && needle.as_ref().map_or(true, |n| target.to_lowercase().contains(n.as_str()))
                         {
                             buf.push_str(&format!("{}\t{}\tw\t{}\n", rel, i + 1, target));
@@ -293,11 +296,14 @@ fn cmd_linkscan(args: &[String]) {
                     }
                 }
                 // ](path.md)
-                if b[j] == ']' && b[j + 1] == '(' {
+                // a ] preceded by ] is a wikilink closer, never [text]( —
+                // mirrors MDLINK_RE's (?<!\]) lookbehind in vv.py
+                if b[j] == ']' && b[j + 1] == '(' && (j == 0 || b[j - 1] != ']') {
                     if let Some(end) = (j + 2..b.len()).find(|&k| b[k] == ')') {
                         let inner: String = b[j + 2..end].iter().collect();
                         if inner.ends_with(".md")
                             && !inner.contains(char::is_whitespace)
+                            && !inner.contains('\u{0}')
                         {
                             buf.push_str(&format!("{}\t{}\tm\t{}\n", rel, i + 1, inner));
                         }
