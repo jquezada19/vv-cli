@@ -59,6 +59,33 @@ def main():
             n += 1
             if (a.stdout, a.stderr, a.returncode) != (b.stdout, b.stderr, b.returncode):
                 fails.append(("errpath", args, a.returncode, b.returncode))
+        # Absolute Unicode-size pin (2026-08-27): parity alone let both engines
+        # agree on the same WRONG size (chars labeled B). The constant below is
+        # hand-computed, independent of either engine: the section text is
+        # "## Emoji\n\ncafe\u0301... " -> 23 chars; multibyte extras are
+        # e-acute +1, rocket emoji +3, i-diaeresis +1 = 28 UTF-8 bytes.
+        uni = "## Emoji\n\ncaf\u00e9 \U0001f680 na\u00efve\n"
+        open(os.path.join(tv, "uni-size.md"), "w", newline="").write(uni)
+        for label, cmd in (("rust", [VR]), ("python", [sys.executable, VV])):
+            r = subprocess.run(cmd + ["outline", "uni-size.md"],
+                               capture_output=True, text=True, env=env)
+            n += 1
+            if "\t28B\t" not in r.stdout:
+                fails.append(("uni-size-pin", label, r.stdout.strip()[:80], "expected 28B"))
+        # and the patch report's size labels, via a same-content round-trip
+        sha = subprocess.run([VR, "outline", "uni-size.md"], capture_output=True,
+                             text=True, env=env).stdout.split("\t")[4].strip()
+        for label, cmd in (("rust", [VR]), ("python", [sys.executable, VV])):
+            r = subprocess.run(cmd + ["patch", "uni-size.md", "H1", sha],
+                               input=uni.rstrip("\n") + "\n", capture_output=True,
+                               text=True, env=env)
+            n += 1
+            # 27, not 28: patch strips the ONE trailing newline the caller's
+            # framing adds (documented in cmd_patch), so the new body is the
+            # 28-byte section minus its terminator.
+            if "(28B -> 27B)" not in r.stdout:
+                fails.append(("uni-patch-pin", label, (r.stdout + r.stderr).strip()[:80],
+                              "expected (28B -> 27B)"))
         if fails:
             for f in fails[:8]:
                 print("FAIL", f)
