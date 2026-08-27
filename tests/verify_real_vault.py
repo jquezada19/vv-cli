@@ -71,6 +71,13 @@ for fp in vv.md_files():
             bad_rt.append(f"{vv.rel(fp)}#{s['id']}")
 el = time.perf_counter() - t0
 print(f"scanned {n_notes} notes / {n_secs} sections in {el:.1f}s ({el/max(n_notes,1)*1000:.2f}ms per note)")
+
+# Floor: a missing, empty, or wrongly-pointed vault otherwise scans nothing,
+# every check passes vacuously, and the gate prints REAL-VAULT VERIFICATION
+# PASS. A corpus check that cannot fail on an empty corpus is not a check.
+FLOOR = int(os.environ.get("VV_VERIFY_MIN_NOTES", "50"))
+check(f"corpus floor (>= {FLOOR} notes scanned)", n_notes >= FLOOR,
+      f"scanned only {n_notes} notes from {vv.VAULT} — vault missing or empty?")
 check("structure: sections partition every note", not bad_struct, f"{len(bad_struct)}: {bad_struct[:3]}")
 check("round-trip: every section byte-identical", not bad_rt, f"{len(bad_rt)}: {bad_rt[:3]}")
 check("parser: no crashes", not parse_err, f"{len(parse_err)}: {parse_err[:2]}")
