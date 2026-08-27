@@ -11,6 +11,18 @@ scans (search, link scan). Both lexers are held to identical output by a parity
 suite and to *correct* output by a hand-authored expected-vector corpus, so a
 shared bug can't certify itself.
 
+## Entry points
+
+Since 2026-08-27 the default entry is the **native binary** (`vv` on PATH →
+`vrust/target/release/vrust`): the four read commands, all graph commands, the
+frontmatter/query commands, and the common writes (`set`/`unset`/`append`/
+`appendsec`/`patch`) are answered natively in 3-26 ms; every other command —
+and any input the native path is unsure about — execs `python3 src/vv.py`
+with the original argv, so error text, suggestions, and exit codes are the
+Python implementation's, byte-for-byte. `python3 src/vv.py` remains a fully
+supported entry forever. Parity between the two is pinned by six differential
+suites (~300 checks) in the test gate.
+
 ## Benchmarks
 
 Why use this over `grep`/`cat` or the official `obsidian` CLI? Measured on a real

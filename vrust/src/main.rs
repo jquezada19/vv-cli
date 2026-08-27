@@ -371,7 +371,7 @@ fn exec_python(argv: &[String]) -> ! {
     // fall through to the Python implementation — the semantic authority for
     // every command the native path doesn't (or declines to) handle.
     let vv = std::env::var("VV_PY_ENTRY").unwrap_or_else(|_| {
-        let me = env::current_exe().ok()
+        let me = env::current_exe().ok().and_then(|p| std::fs::canonicalize(p).ok())
             .and_then(|p| p.ancestors().nth(4).map(|a| a.to_path_buf()));  // exe -> release -> target -> vrust -> REPO
         me.map(|r| r.join("src/vv.py").to_string_lossy().into_owned())
             .unwrap_or_else(|| "vv.py".into())

@@ -88,3 +88,19 @@ remains python3 src/vv.py until the 2026-09-02 checkpoint decision.
   safe direction: python answers, slower.
 - `impact`, `rename`, `move`, `doctor`, `lint`, `index`, `new`, `daily-append`,
   `patch` remain python (fallback) this phase.
+
+
+## Status: rewrite DECLARED DONE (2026-08-27)
+
+The native entry is the default (`vv` on PATH symlinks the binary; the python
+invocation stays valid forever as the escape hatch and fallback target).
+Everything in daily use answers natively in 3-26 ms; what stays python —
+rename/move (journal), doctor, lint, index, new, daily-append — is crash-safety
+machinery or low-frequency, and porting it would only grow the
+every-change-lands-twice liability the parity suites currently hold in check.
+Do not port further commands without a measured need.
+
+**Cache convergence: evaluated, declined.** Python's SQLite index stays because
+python-only commands depend on it (`lint --quick` is 87 ms indexed vs 1,766
+live; `index` reports it). The two caches never read each other and each is
+disposable. Revisit only if lint is ever ported.
