@@ -41,8 +41,9 @@ This is not theoretical. Reproduced on the real vault 2026-08-27: truncating one
 record's `L` rows made `backlinks` drop a link that the Python engine still
 found. Raised by an adversarial review of a proposal to drop the write's
 `fsync`; the proposal's safety argument ("any corruption fails to parse and
-rebuilds") was wrong, and the reproduction is now `tests/test_cache_integrity.py`, and the exhaustive
-sweep over the same failure space is `tests/test_torture_cache.py`.
+rebuilds") was wrong, and the reproduction is now `tests/test_cache_integrity.py`, and the broader sweep over the same failure space is `tests/test_torture_cache.py`
+— exhaustive over truncation offsets, sampled for bit flips and record
+deletions.
 
 The footer records the body's **length** and a **checksum**, and both are
 load-bearing — each was confirmed by disabling it and watching the suite fail:
