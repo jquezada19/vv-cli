@@ -216,9 +216,36 @@ def sha8(t):
     return hashlib.sha256(t.encode()).hexdigest()[:8]
 
 def find_sec(lines, secs, sid):
+    """Resolve a section by id, and forgive the four ways agents actually ask.
+
+    A replay of 50 real sessions (2026-08-26) found section addressing was
+    guessed wrong four distinct ways -- `--section H9`, `Note#Heading`, the
+    heading TITLE instead of the id, and the outline's display label
+    `(preamble)`. Every one was correctly refused, which is the tool being right
+    and unhelpful at the same time: four different wrong guesses is an
+    affordance problem, not four careless callers.
+
+    Ids stay canonical and win outright; a title match is accepted only when it
+    is UNAMBIGUOUS, because duplicate headings are common in these notes and
+    silently picking the first would be worse than refusing.
+    """
     for s in secs:
         if s["id"] == sid:
             return s
+    want = (sid or "").strip()
+    if want.startswith("#"):
+        want = want.lstrip("#").strip()          # `#Heading` / `##Heading`
+    if want.lower() in ("(preamble)", "preamble"):
+        for s in secs:
+            if s["title"] == "(preamble)" or s["id"] == "H0":
+                return s
+    matches = [s for s in secs if s["title"].strip().lower() == want.lower()]
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        ids = ", ".join(m["id"] for m in matches)
+        die(f"ambiguous: {len(matches)} sections are titled {want!r} ({ids}) — "
+            f"next: pass the id from vv outline NOTE")
     die(f"not-found: no section {sid} — next: vv outline NOTE")
 
 def split_fm(text):

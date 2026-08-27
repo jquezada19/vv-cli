@@ -210,6 +210,27 @@ else:
     check("daily-append appends", _r.returncode == 0 and "appended line" in open(_p).read())
     shutil.rmtree(_tv, ignore_errors=True)
 
+# --- forgiving section addressing (2026-08-26) -----------------------------
+# A replay of 50 real sessions found section addressing guessed wrong four
+# distinct ways: `--section H9`, `Note#Heading`, the heading TITLE, and the
+# outline's display label `(preamble)`. All were correctly refused -- the tool
+# right and unhelpful at once. Ids stay canonical; the natural forms resolve;
+# an AMBIGUOUS title still refuses rather than silently taking the first.
+_r = run("read", REL_FIX, "Alpha")
+check("read accepts a heading title", _r.returncode == 0 and "replaced body" in _r.stdout,
+      (_r.stdout + _r.stderr)[:80])
+_r = run("read", REL_FIX, "#Alpha")
+check("read accepts a leading #", _r.returncode == 0 and "replaced body" in _r.stdout)
+_r = run("read", REL_FIX, "(preamble)")
+check("read accepts the outline's (preamble) label",
+      _r.returncode == 0 and "Preamble text" in _r.stdout, (_r.stdout + _r.stderr)[:80])
+_r = run("read", REL_FIX, "Duplicate")
+check("ambiguous heading title refuses, naming the ids",
+      _r.returncode == 1 and "ambiguous" in _r.stderr and "H" in _r.stderr, _r.stderr[:90])
+_r = run("read", REL_FIX, "No Such Heading")
+check("an unknown section still says not-found",
+      _r.returncode == 1 and "not-found" in _r.stderr)
+
 r = run("unset", REL_FIX, "status")
 t = open(f"{SB}/VV Fixture.md").read()
 check("T11 unset", "status:" not in t and "type: test" in t)
