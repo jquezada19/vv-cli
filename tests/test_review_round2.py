@@ -322,8 +322,33 @@ r = run("tags", "--counts", env=dict(ienv, VV_NO_INDEX="1"))
 check("V21f VV_NO_INDEX still answers", r.returncode == 0 and "gamma" in r.stdout, r.stdout)
 shutil.rmtree(tv, ignore_errors=True); shutil.rmtree(ir, ignore_errors=True)
 
+# V22: lint --quick served from the index (pipes computed at parse time).
+#      (a) indexed and live output identical; (b) a broken link ADDED after the
+#      index was built is reported on the next run (freshness through the lint
+#      path); (c) a table-pipe introduced by an edit is reported (the pipes
+#      table is refreshed by the incremental reparse, not only by --rebuild).
+tv = tempfile.mkdtemp(prefix="vv-r2l-"); ir = tempfile.mkdtemp(prefix="vv-r2l-idx-")
+os.makedirs(f"{tv}/vault")
+open(f"{tv}/vault/Good.md", "w").write("---\ntype: note\n---\nlink [[Other]]\n")
+open(f"{tv}/vault/Other.md", "w").write("---\ntype: note\n---\nx\n")
+lenv = {"VV_VAULT": f"{tv}/vault", "VV_INDEX_ROOT": ir}
+r = run("index", "--rebuild", env=lenv)
+a = run("lint", "--quick", env=lenv); b = run("lint", "--quick", env=dict(lenv, VV_NO_INDEX="1"))
+check("V22a lint parity indexed vs live", a.stdout == b.stdout, a.stdout + "|VS|" + b.stdout)
+open(f"{tv}/vault/Good.md", "a").write("now [[Missing Note]]\n")
+r = run("lint", "--quick", env=lenv)
+check("V22b broken link added after build is fresh",
+      "broken-link" in r.stdout and "Missing Note" in r.stdout, r.stdout + r.stderr)
+open(f"{tv}/vault/Good.md", "a").write("\n| h | h2 |\n|---|---|\n| [[Other|alias]] | y |\n")
+r = run("lint", "--quick", env=lenv)
+check("V22c table-pipe from an incremental reparse is reported",
+      "table-pipe" in r.stdout, r.stdout + r.stderr)
+a = run("lint", "--quick", env=lenv); b = run("lint", "--quick", env=dict(lenv, VV_NO_INDEX="1"))
+check("V22d parity again after reparse", a.stdout == b.stdout, a.stdout + "|VS|" + b.stdout)
+shutil.rmtree(tv, ignore_errors=True); shutil.rmtree(ir, ignore_errors=True)
+
 if not fails:
     shutil.rmtree(SB, ignore_errors=True)
 shutil.rmtree(_JR, ignore_errors=True)
-print(f"\n{len(fails)} failures: {fails}" if fails else "\nALL PASS (round-2: 59)")
+print(f"\n{len(fails)} failures: {fails}" if fails else "\nALL PASS (round-2: 63)")
 sys.exit(1 if fails else 0)
