@@ -44,14 +44,18 @@ def _log(out_bytes, exit_code=0, kind=None):
 
 _out_total = 0
 def out(s=""):
+    # Encoded bytes, not characters: cf_bytes comes from os.path.getsize, so
+    # counting len(s) here would divide characters by bytes in the savings math.
     global _out_total
-    _out_total += len(s) + 1
+    _out_total += len(s.encode("utf-8")) + 1
     print(s)
 
 def die(msg, code=1):
     sys.stderr.write(msg + "\n")
     first = msg.split("\n", 1)[0].split(" ", 1)[0]
-    _log(0, code, first[:-1] if first.endswith(":") else None)
+    # Error text enters the caller's context too — bill it, don't log a zero.
+    _log(_out_total + len(msg.encode("utf-8")) + 1, code,
+         first[:-1] if first.endswith(":") else None)
     sys.exit(code)
 
 
@@ -85,10 +89,23 @@ def contain(path):
         die(f"escape: path leaves the vault: {path}")
     return full
 
+_cf_seen = set()
+
 def _cf(fp):
-    """Tally the counterfactual cost (whole-file bytes) of a resolved note."""
+    """Tally the counterfactual cost (whole-file bytes) of a resolved note.
+
+    Once per note per invocation: a command that resolves the same path twice
+    (move resolves in the wrapper and again in _do_relocate) would otherwise
+    double-bill the baseline and flatter vv's savings. Chains across separate
+    invocations still bill each one — the report treats this as a MODELLED
+    workload figure, not an observed counterfactual.
+    """
     global _cf_bytes
     try:
+        real = os.path.realpath(fp)
+        if real in _cf_seen:
+            return fp
+        _cf_seen.add(real)
         _cf_bytes += os.path.getsize(fp)
     except OSError:
         pass
@@ -583,7 +600,7 @@ def cmd_search(*args):
         r = subprocess.run([VRUST, "search", *args], capture_output=True, text=True)
         sys.stdout.write(r.stdout); sys.stderr.write(r.stderr)
         global _out_total
-        _out_total += len(r.stdout)
+        _out_total += len(r.stdout.encode("utf-8"))
         _log(_out_total, r.returncode); sys.exit(r.returncode)
     k, w, terms = 5, 500, []
     it = iter(args)
