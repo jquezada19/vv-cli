@@ -119,8 +119,87 @@ check("R9c fenced skipped", "Also Missing But Fenced" not in r.stdout)
 r = run("doctor")
 check("R10 doctor clean", r.returncode == 0 and "journals: none pending" in r.stdout, r.stdout)
 
+# --- R11-R14: HARD-CRASH recovery (2026-08-26) -----------------------------
+# Every existing fault injector raises a catchable exception, so `except
+# BaseException` always tidied up and the crash-recovery path was never
+# exercised. A review seat traced the real hole: the journal persisted only
+# source paths, backups and original hashes, so a kill between os.rename() and
+# _journal_done left recovery blind. It restored the backup at the source, knew
+# nothing of the destination, deleted the journal and exited 0 -- leaving BOTH
+# notes and reporting success. VV_FAULT_KILL_AFTER_RENAME uses os._exit to
+# bypass the handlers, which is the only way to test this.
+import tempfile as _tf
+_cv = _tf.mkdtemp(prefix="vv-crash-")
+_cj = _tf.mkdtemp(prefix="vv-crashj-")
+os.makedirs(os.path.join(_cv, "Notes"))
+_T = os.path.join(_cv, "Notes", "Target.md")
+_R = os.path.join(_cv, "Notes", "Renamed.md")
+_L = os.path.join(_cv, "Notes", "L0.md")
+
+
+def _cvv(*a, **kw):
+    env = dict(os.environ, VV_NO_METRICS="1", VV_JOURNAL_ROOT=_cj, **kw.get("env", {}))
+    return subprocess.run([sys.executable, VV, "--vault", _cv, *a],
+                          capture_output=True, text=True, env=env)
+
+
+def _reset_crash_vault():
+    open(_T, "w").write("---\ntype: t\n---\nbody\n")
+    open(_L, "w").write("---\ntype: t\n---\nsee [[Target]]\n")
+    if os.path.exists(_R):
+        os.remove(_R)
+
+
+_reset_crash_vault()
+_k = _cvv("rename", "Notes/Target.md", "Renamed", "--apply",
+          env={"VV_FAULT_KILL_AFTER_RENAME": "1"})
+check("R11 hard kill leaves no handler to run (rc 137)", _k.returncode == 137, _k.returncode)
+check("R11b the rename did land before the kill",
+      os.path.exists(_R) and not os.path.exists(_T))
+
+_rb = _cvv("doctor", "--rollback")
+check("R12 doctor --rollback recovers a crashed rename", _rb.returncode == 0,
+      (_rb.stdout + _rb.stderr)[:120])
+check("R12b NO duplicate left behind (the defect)",
+      os.path.exists(_T) and not os.path.exists(_R),
+      f"old={os.path.exists(_T)} new={os.path.exists(_R)}")
+check("R12c links restored to the original target", "[[Target]]" in open(_L).read())
+
+# A post-crash edit by another writer (Obsidian saving a buffer) must NOT be
+# clobbered by recovery. Before the fix, recovery had no `written` hashes on
+# disk and restored unconditionally.
+_reset_crash_vault()
+_cvv("rename", "Notes/Target.md", "Renamed", "--apply",
+     env={"VV_FAULT_KILL_AFTER_RENAME": "1"})
+open(_L, "w").write("---\ntype: t\n---\nsee [[Renamed]] plus a human edit\n")
+_rb2 = _cvv("doctor", "--rollback")
+check("R13 post-crash external edit is NOT clobbered",
+      "human edit" in open(_L).read(), open(_L).read()[:80])
+check("R13b and recovery says so loudly (conflict, exit 1)",
+      _rb2.returncode == 1 and "conflict" in (_rb2.stdout + _rb2.stderr), _rb2.returncode)
+
+# The journal must record what it needs BEFORE the step it describes.
+import json as _json, glob as _glob
+# R13 ends in a conflict, which deliberately KEEPS its journal — so the dirty
+# gate would block this run before a new journal could exist.
+_cvv("doctor", "--discard")
+_reset_crash_vault()
+_cvv("rename", "Notes/Target.md", "Renamed", "--apply",
+     env={"VV_FAULT_KILL_AFTER_RENAME": "1"})
+# journals nest under a per-vault key, so this is two levels deep
+_mf = _glob.glob(os.path.join(_cj, "*", "*", "manifest.json"))
+_man = _json.load(open(_mf[0])) if _mf else {}
+check("R14 journal persists the rename endpoints",
+      _man.get("src") == "Notes/Target.md" and _man.get("dest") == "Notes/Renamed.md", _man)
+check("R14b journal persists the phase reached", _man.get("phase") == "renamed", _man.get("phase"))
+check("R14c journal persists what THIS process wrote (for classification)",
+      os.path.exists(os.path.join(os.path.dirname(_mf[0]), "written.jsonl")) if _mf else False)
+_cvv("doctor", "--discard")
+shutil.rmtree(_cv, ignore_errors=True)
+shutil.rmtree(_cj, ignore_errors=True)
+
 if not fails:
     shutil.rmtree(SB, ignore_errors=True)
 shutil.rmtree(_JR, ignore_errors=True)
-print(f"\n{len(fails)} failures: {fails}" if fails else "\nALL PASS (v1.5: 27)")
+print(f"\n{len(fails)} failures: {fails}" if fails else "\nALL PASS (v1.5: 37)")
 sys.exit(1 if fails else 0)

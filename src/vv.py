@@ -1053,11 +1053,73 @@ def _dirty_gate():
         die(f"dirty: pending journal {os.path.basename(js[0])} — resolve with vv doctor "
             f"(rollback or discard) before writing", 4)
 
-def _journal_start(name, files):
+def _journal_write_manifest(jdir, manifest):
+    """Replace the manifest atomically: a torn manifest is an unrecoverable
+    journal, which is strictly worse than the crash it exists to survive."""
+    tmp = os.path.join(jdir, "manifest.json.tmp")
+    with open(tmp, "w") as f:
+        json.dump(manifest, f)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, os.path.join(jdir, "manifest.json"))
+
+
+def _journal_phase(jdir, phase, **fields):
+    """Persist transaction PHASE (and any endpoints) before the step it describes.
+
+    Everything but the file backups used to live in process memory, so a hard
+    crash left recovery blind: it could not know a rename had happened, nor what
+    THIS process had written. See _journal_rollback for what that cost.
+    """
+    mpath = os.path.join(jdir, "manifest.json")
+    try:
+        man = json.load(open(mpath))
+    except (OSError, ValueError):
+        return
+    man["phase"] = phase
+    man.update(fields)
+    _journal_write_manifest(jdir, man)
+
+
+def _journal_written(jdir, rel_path, sha):
+    """Append what we just wrote, so recovery after a crash can CLASSIFY.
+
+    Append-only and flushed per line: a partial last line is discarded on read,
+    which is the correct failure mode -- an unrecorded write is treated as
+    someone else's bytes and left alone rather than clobbered.
+    """
+    try:
+        with open(os.path.join(jdir, "written.jsonl"), "a") as f:
+            f.write(json.dumps({"rel": rel_path, "sha256": sha}) + "\n")
+            f.flush()
+            os.fsync(f.fileno())
+    except OSError:
+        pass
+
+
+def _journal_written_map(jdir):
+    out_ = {}
+    try:
+        for line in open(os.path.join(jdir, "written.jsonl")):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue          # torn final line from a crash mid-append
+            out_[rec["rel"]] = rec["sha256"]
+    except OSError:
+        return None               # no record at all -> caller decides
+    return out_
+
+
+def _journal_start(name, files, src=None, dest=None):
     ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S-%f")
     jdir = os.path.join(_vault_journal_root(), f"{ts}-{name}")
     os.makedirs(jdir)
-    manifest = {"op": name, "ts": ts, "vault": _VAULT_REAL, "files": {}, "sha256": {}}
+    manifest = {"op": name, "ts": ts, "vault": _VAULT_REAL, "files": {}, "sha256": {},
+                "phase": "prepare", "src": src, "dest": dest}
     import shutil as _sh
     for idx, fp in enumerate(files):  # index key — collision-proof (rel-path %2F encoding was not)
         key = f"f{idx}.bak"
@@ -1065,8 +1127,7 @@ def _journal_start(name, files):
         manifest["files"][rel(fp)] = key
         with open(fp, "rb") as f:
             manifest["sha256"][rel(fp)] = hashlib.sha256(f.read()).hexdigest()
-    with open(os.path.join(jdir, "manifest.json"), "w") as f:
-        json.dump(manifest, f)
+    _journal_write_manifest(jdir, manifest)
     return jdir
 
 def _journal_rollback(jdir, written=None):
@@ -1078,6 +1139,26 @@ def _journal_rollback(jdir, written=None):
     man = json.load(open(os.path.join(jdir, "manifest.json")))
     import shutil as _sh
     left = []
+
+    # A hard crash between os.rename() and _journal_done left the note at BOTH
+    # ends: recovery restored the backup at the source path but knew nothing of
+    # the destination, then deleted the journal and exited successfully. The
+    # endpoints are now durable, so reverse the move FIRST -- before restoring
+    # any backup -- exactly as the in-process handler does.
+    src_r, dest_r = man.get("src"), man.get("dest")
+    if src_r and dest_r:
+        src_p, dest_p = os.path.join(VAULT, src_r), os.path.join(VAULT, dest_r)
+        if os.path.exists(dest_p) and not os.path.exists(src_p):
+            try:
+                os.rename(dest_p, src_p)
+            except OSError:
+                left.append(dest_r)
+
+    # After a crash the caller has no in-memory `written` map, and passing None
+    # meant "restore unconditionally" -- which would clobber an edit Obsidian
+    # made AFTER the crash. The per-write record on disk restores classification.
+    if written is None:
+        written = _journal_written_map(jdir)
     for r_, key in man["files"].items():
         live_p = os.path.join(VAULT, r_)
         try:
@@ -1218,7 +1299,10 @@ def _do_relocate(ref, dest_rel_noext, apply_, opname, expect_plan=None):
     # journal every file that will be written, plus the moved file itself (once)
     _dirty_gate()
     journal_targets = list(hits.keys()) + ([fp] if fp not in hits else [])
-    jdir = _journal_start(opname, journal_targets)
+    # src/dest are recorded IN the journal so a hard crash mid-rename is
+    # recoverable: without them, recovery cannot know the note moved.
+    jdir = _journal_start(opname, journal_targets,
+                          src=src_rel, dest=rel(new_fp))
     renamed = False
     written = {}   # rel-path -> sha256 of what WE wrote (rollback classifies with it)
     try:
@@ -1237,14 +1321,26 @@ def _do_relocate(ref, dest_rel_noext, apply_, opname, expect_plan=None):
             if 0 <= fault_after <= wi:
                 raise fault_exc(f"INJECTED FAULT after {wi} writes")
             atomic_write(p, new_text)
-            written[rel(p)] = hashlib.sha256(new_text.encode()).hexdigest()
+            _sha = hashlib.sha256(new_text.encode()).hexdigest()
+            written[rel(p)] = _sha
+            _journal_written(jdir, rel(p), _sha)   # durable: survives a hard kill
         if fault_after == len(results):
             raise RuntimeError(f"INJECTED FAULT after {len(results)} writes (pre-rename)")
         d = os.path.dirname(new_fp)
         if d:
             os.makedirs(d, exist_ok=True)
+        # Phase is persisted BEFORE the rename, so a kill during it is still
+        # recoverable: recovery reverses dest->src on the durable endpoints.
+        _journal_phase(jdir, "renaming")
         os.rename(fp, new_fp)
         renamed = True
+        _journal_phase(jdir, "renamed")
+        if os.environ.get("VV_FAULT_KILL_AFTER_RENAME"):
+            # Hard kill: os._exit bypasses `except BaseException`, finally blocks
+            # and atexit, which is the whole point -- the existing injectors raise
+            # catchable exceptions, so the in-process handler always tidied up and
+            # the crash-recovery path was never exercised (review seat 2026-08-26).
+            os._exit(137)
         # verification: read each file at its CURRENT location (source is now new_fp)
         old_base = os.path.basename(src_rel)[:-3].lower()
         old_rel_noext = src_rel[:-3].lower()
