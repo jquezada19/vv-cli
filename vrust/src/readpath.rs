@@ -418,9 +418,9 @@ pub fn run(cmd: &str, args: &[String], vault: &Path) -> Outcome {
                     s.id,
                     hashes,
                     s.title,
-                    t.chars().count(),
+                    t.len(), // UTF-8 bytes — chars() under-reported multibyte sections (2026-08-27)
                     sha8(&t)
-                )); // python len() = CHARS
+                ));
             }
             let n = emit(&buf);
             log_metrics("outline", t0, n, cf);

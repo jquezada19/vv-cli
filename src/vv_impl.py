@@ -403,7 +403,11 @@ def cmd_outline(ref):
         if s["start"] == s["end"]:
             continue  # empty preamble span — nothing addressable, and [] vs [""] must stay distinguishable
         t = sec_text(lines, s)
-        out(f"{s['id']}\t{'#'*s['level'] or '-'}\t{s['title']}\t{len(t)}B\t{sha8(t)}")
+        # len(t.encode()): the B suffix is a UTF-8 byte count — len(t) is CHARS and
+        # under-reported multibyte sections until 2026-08-27 (both engines agreed
+        # on the same wrong number, so parity could not catch it; the Unicode
+        # expected-vectors now do).
+        out(f"{s['id']}\t{'#'*s['level'] or '-'}\t{s['title']}\t{len(t.encode('utf-8'))}B\t{sha8(t)}")
 
 def cmd_read(ref, sid):
     lines, secs = parse(read_raw(resolve(ref)))
@@ -434,7 +438,7 @@ def cmd_patch(ref, sid, expect):
         body = body[:-1]   # strip the one newline the caller's shell/`read` framing adds
     body_lines = [] if (body == "" and s["end"] == s["start"]) else body.split("\n")
     atomic_write(fp, splice(lines, s["start"], s["end"], body_lines))
-    out(f"patched {sid} in {rel(fp)} ({len(cur)}B -> {len(body)}B)")
+    out(f"patched {sid} in {rel(fp)} ({len(cur.encode('utf-8'))}B -> {len(body.encode('utf-8'))}B)")
 
 def cmd_appendsec(ref, sid, text):
     _dirty_gate()

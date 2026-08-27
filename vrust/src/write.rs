@@ -674,8 +674,8 @@ fn cmd_patch(vault: &Path, args: &[String]) -> Outcome {
         "patched {} in {} ({}B -> {}B)\n",
         s.id,
         rel,
-        cur.chars().count(),
-        body.chars().count()
+        cur.len(), // UTF-8 bytes, matching python's encode() count
+        body.len()
     ));
     crate::readpath::log_metrics("patch", t0, n, cf);
     Outcome::Done(0)
