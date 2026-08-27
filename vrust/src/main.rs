@@ -7,15 +7,16 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::exit;
-mod readpath;
 mod cache;
 mod graph;
-mod write;
 mod query;
+mod readpath;
+mod write;
 
 fn vault() -> PathBuf {
     if let Ok(v) = env::var("VV_VAULT") {
-        if !v.is_empty() {        // python: `or` — empty means default (Codex parity audit)
+        if !v.is_empty() {
+            // python: `or` — empty means default (Codex parity audit)
             return PathBuf::from(v);
         }
     }
@@ -34,7 +35,10 @@ pub fn walk_ex(dir: &Path, out: &mut Vec<PathBuf>, exclude_sandbox: bool) {
             // a symlinked directory is never descended (Codex parity audit 2026-08-27)
             let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
             if is_dir {
-                if name.starts_with('.') || name == "graphify-out" || (exclude_sandbox && name == "Sandbox") {
+                if name.starts_with('.')
+                    || name == "graphify-out"
+                    || (exclude_sandbox && name == "Sandbox")
+                {
                     continue;
                 }
                 walk_ex(&p, out, exclude_sandbox);
@@ -45,18 +49,30 @@ pub fn walk_ex(dir: &Path, out: &mut Vec<PathBuf>, exclude_sandbox: bool) {
     }
 }
 
-
-fn score_one(fp: &std::path::PathBuf, root: &std::path::PathBuf,
-             path_terms: &[&String], body_terms: &[&String], w: usize)
-             -> Option<(usize, String, String)> {
-    let rel = fp.strip_prefix(root).unwrap_or(fp).to_string_lossy().to_string();
+fn score_one(
+    fp: &std::path::PathBuf,
+    root: &std::path::PathBuf,
+    path_terms: &[&String],
+    body_terms: &[&String],
+    w: usize,
+) -> Option<(usize, String, String)> {
+    let rel = fp
+        .strip_prefix(root)
+        .unwrap_or(fp)
+        .to_string_lossy()
+        .to_string();
     let rl = rel.to_lowercase();
     if !path_terms.iter().all(|t| rl.contains(t.as_str())) {
         return None;
     }
     let text = fs::read_to_string(fp).ok()?;
     let low = text.to_lowercase();
-    let base = rl.rsplit('/').next().unwrap_or(&rl).trim_end_matches(".md").to_string();
+    let base = rl
+        .rsplit('/')
+        .next()
+        .unwrap_or(&rl)
+        .trim_end_matches(".md")
+        .to_string();
     let mut score = 0usize;
     let mut first_pos: Option<usize> = None;
     for t in body_terms {
@@ -80,7 +96,11 @@ fn score_one(fp: &std::path::PathBuf, root: &std::path::PathBuf,
     // compares only the `==` path+score headers, never the snippet body.
     // `low.find` returns a BYTE offset, so convert it to a char index first.
     let start = first_pos.map_or(0, |bp| low[..bp].chars().count().saturating_sub(w / 4));
-    let snip: String = text.chars().skip(start).take(w).collect::<String>()
+    let snip: String = text
+        .chars()
+        .skip(start)
+        .take(w)
+        .collect::<String>()
         .replace('\n', " ¶ ");
     Some((score, rel, snip))
 }
@@ -115,7 +135,10 @@ fn cmd_search(args: &[String], orig: &[String]) -> ! {
     // 2026-08-27: ~72% of wall). Chunk the file list across threads; scoring is
     // pure per-file, and the final sort restores the deterministic order, so
     // output is byte-identical to the sequential form (engine-parity-tested).
-    let nthreads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).min(8);
+    let nthreads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .min(8);
     let chunk = files.len().div_ceil(nthreads).max(1);
     let mut hits: Vec<(usize, String, String)> = std::thread::scope(|s| {
         let mut handles = Vec::new();
@@ -133,10 +156,17 @@ fn cmd_search(args: &[String], orig: &[String]) -> ! {
                 local
             }));
         }
-        handles.into_iter().flat_map(|h| h.join().unwrap_or_default()).collect()
+        handles
+            .into_iter()
+            .flat_map(|h| h.join().unwrap_or_default())
+            .collect()
     });
     #[allow(unreachable_code)]
-    hits.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.len().cmp(&b.1.len())).then(a.1.cmp(&b.1)));
+    hits.sort_by(|a, b| {
+        b.0.cmp(&a.0)
+            .then(a.1.len().cmp(&b.1.len()))
+            .then(a.1.cmp(&b.1))
+    });
     // Zero hits is python's to answer, not ours. python emits a phrase hint
     // ("matched as ONE phrase ... retry unquoted") that this engine does not
     // implement; printing a bare "(0 of 0 matches)" here silently un-ships that
@@ -163,10 +193,11 @@ fn cmd_search(args: &[String], orig: &[String]) -> ! {
     exit(0);
 }
 
-
 /// find `pat` in `chars` at or after `start` (char positions, not bytes)
 fn find_seq(chars: &[char], start: usize, pat: &[char]) -> Option<usize> {
-    if chars.len() < pat.len() { return None; }
+    if chars.len() < pat.len() {
+        return None;
+    }
     (start..=chars.len() - pat.len()).find(|&i| chars[i..i + pat.len()] == *pat)
 }
 
@@ -177,12 +208,16 @@ fn mask_comments(masked: &mut [char], pos: &mut usize, in_comment: &mut bool) {
     while let Some(s) = find_seq(masked, *pos, &opener) {
         match find_seq(masked, s + 4, &closer) {
             Some(e) => {
-                for k in s..e + 3 { masked[k] = '\u{0}'; }
+                for k in s..e + 3 {
+                    masked[k] = '\u{0}';
+                }
                 *pos = e + 3;
             }
             None => {
                 let n = masked.len();
-                for k in s..n { masked[k] = '\u{0}'; }
+                for k in s..n {
+                    masked[k] = '\u{0}';
+                }
                 *in_comment = true;
                 break;
             }
@@ -213,12 +248,21 @@ fn cmd_linkscan(args: &[String]) {
             Ok(t) => t,
             Err(_) => continue,
         };
-        let rel = fp.strip_prefix(&root).unwrap_or(fp).to_string_lossy().to_string();
+        let rel = fp
+            .strip_prefix(&root)
+            .unwrap_or(fp)
+            .to_string_lossy()
+            .to_string();
         let lines: Vec<&str> = text.split('\n').collect();
 
         // frontmatter bounds (BOM tolerant) — used only to start fence scanning after it
         let mut fm_end = 0usize;
-        if !lines.is_empty() && lines[0].trim_start_matches('\u{feff}').trim_end_matches('\r') == "---" {
+        if !lines.is_empty()
+            && lines[0]
+                .trim_start_matches('\u{feff}')
+                .trim_end_matches('\r')
+                == "---"
+        {
             for i in 1..lines.len() {
                 if lines[i].trim_end_matches('\r') == "---" {
                     fm_end = i + 1;
@@ -230,31 +274,28 @@ fn cmd_linkscan(args: &[String]) {
         let mut in_comment = false;
         for (i, raw) in lines.iter().enumerate() {
             let raw = raw.trim_end_matches('\r'); // CRLF must not defeat fence detection
-            // an OPEN comment owns the line — no fence transitions until --> (probed
-            // against Obsidian 2026-08-26: a ``` inside a comment is literal text)
+                                                  // an OPEN comment owns the line — no fence transitions until --> (probed
+                                                  // against Obsidian 2026-08-26: a ``` inside a comment is literal text)
             if !in_comment {
                 // fence indent = ASCII spaces only (parity with vv.py's `^ {0,3}`;
                 // NBSP/tab is not fence indent, and byte-vs-char counting can't drift)
                 let indent = raw.chars().take_while(|&c| c == ' ').count();
                 let trimmed = &raw[indent..];
                 // CommonMark: a fence closes only on its own char AND a run >= the opener's
-                let fence: Option<(char, usize, &str)> = if indent <= 3
-                    && (trimmed.starts_with("```") || trimmed.starts_with("~~~"))
-                {
-                    let c = trimmed.chars().next().unwrap();
-                    let n = trimmed.chars().take_while(|&x| x == c).count();
-                    Some((c, n, &trimmed[n..]))
-                } else {
-                    None
-                };
+                let fence: Option<(char, usize, &str)> =
+                    if indent <= 3 && (trimmed.starts_with("```") || trimmed.starts_with("~~~")) {
+                        let c = trimmed.chars().next().unwrap();
+                        let n = trimmed.chars().take_while(|&x| x == c).count();
+                        Some((c, n, &trimmed[n..]))
+                    } else {
+                        None
+                    };
                 let mut line_fenced = false;
                 if i >= fm_end {
                     match (marker, fence) {
                         // CommonMark: a backtick fence's info string may not
                         // contain backticks — ```code``` is an inline span
-                        (None, Some((c, n, rest)))
-                            if c == '~' || !rest.contains('`') =>
-                        {
+                        (None, Some((c, n, rest))) if c == '~' || !rest.contains('`') => {
                             marker = Some((c, n));
                             line_fenced = true;
                         }
@@ -322,7 +363,9 @@ fn cmd_linkscan(args: &[String]) {
                         continue; // whole line inside a comment
                     }
                     Some(e) => {
-                        for k in 0..e + 3 { masked[k] = '\u{0}'; }
+                        for k in 0..e + 3 {
+                            masked[k] = '\u{0}';
+                        }
                         in_comment = false;
                         let mut pos = e + 3;
                         mask_comments(&mut masked, &mut pos, &mut in_comment);
@@ -338,8 +381,8 @@ fn cmd_linkscan(args: &[String]) {
             let mut j = 0usize;
             while j + 1 < b.len() {
                 if b[j] == '[' && b[j + 1] == '[' {
-                    if let Some(end) = (j + 2..b.len().saturating_sub(1))
-                        .find(|&k| b[k] == ']' && b[k + 1] == ']')
+                    if let Some(end) =
+                        (j + 2..b.len().saturating_sub(1)).find(|&k| b[k] == ']' && b[k + 1] == ']')
                     {
                         let inner: String = b[j + 2..end].iter().collect();
                         let seg = inner
@@ -359,8 +402,11 @@ fn cmd_linkscan(args: &[String]) {
                             .to_string();
                         // a target overlapping a masked region (inline code / HTML
                         // comment) is not a link — the NUL bytes are the evidence
-                        if !target.is_empty() && !target.contains('\u{0}')
-                            && needle.as_ref().map_or(true, |n| target.to_lowercase().contains(n.as_str()))
+                        if !target.is_empty()
+                            && !target.contains('\u{0}')
+                            && needle
+                                .as_ref()
+                                .map_or(true, |n| target.to_lowercase().contains(n.as_str()))
                         {
                             buf.push_str(&format!("{}\t{}\tw\t{}\n", rel, i + 1, target));
                         }
@@ -395,13 +441,18 @@ fn exec_python(argv: &[String]) -> ! {
     // fall through to the Python implementation — the semantic authority for
     // every command the native path doesn't (or declines to) handle.
     let vv = std::env::var("VV_PY_ENTRY").unwrap_or_else(|_| {
-        let me = env::current_exe().ok().and_then(|p| std::fs::canonicalize(p).ok())
-            .and_then(|p| p.ancestors().nth(4).map(|a| a.to_path_buf()));  // exe -> release -> target -> vrust -> REPO
+        let me = env::current_exe()
+            .ok()
+            .and_then(|p| std::fs::canonicalize(p).ok())
+            .and_then(|p| p.ancestors().nth(4).map(|a| a.to_path_buf())); // exe -> release -> target -> vrust -> REPO
         me.map(|r| r.join("src/vv.py").to_string_lossy().into_owned())
             .unwrap_or_else(|| "vv.py".into())
     });
-    let err = std::process::Command::new("python3").arg(&vv).args(argv)
-        .status().map(|s| exit(s.code().unwrap_or(1)));
+    let err = std::process::Command::new("python3")
+        .arg(&vv)
+        .args(argv)
+        .status()
+        .map(|s| exit(s.code().unwrap_or(1)));
     eprintln!("run: could not exec python3 {}: {:?}", vv, err.err());
     exit(1);
 }
@@ -413,26 +464,31 @@ fn main() {
     if let Some(i) = args.iter().position(|a| a == "--vault") {
         if i + 1 < args.len() {
             let mut v = args[i + 1].clone();
-            if let Some(rest) = v.strip_prefix("~/") {   // expanduser, like python
-                if let Ok(h) = env::var("HOME") { v = format!("{}/{}", h, rest); }
+            if let Some(rest) = v.strip_prefix("~/") {
+                // expanduser, like python
+                if let Ok(h) = env::var("HOME") {
+                    v = format!("{}/{}", h, rest);
+                }
             }
             std::env::set_var("VV_VAULT", &v);
             args.drain(i..=i + 1);
         }
     }
     if let Some(cmd) = args.first().map(String::as_str) {
-        let handler: Option<fn(&str, &[String], &std::path::Path) -> readpath::Outcome> =
-            match cmd {
-                "outline" | "read" | "head" | "resolve" => Some(readpath::run),
-                // links reads ONE note (7.9 ms native); backlinks/orphans/deadends scan the
-                // corpus natively (~148 ms) while python answers from its SQLite index
-                // (48-84 ms) — those route to python until graph.rs grows the vvidx cache
-                // (measured 2026-08-27, E5). impact was never ported.
-                "links" | "backlinks" | "orphans" | "deadends" => Some(graph::run),  // vvidx cache landed (phase 2)
-                "set" | "unset" | "append" | "appendsec" | "new" | "daily-append" | "patch" => Some(write::run),
-                "board" | "tags" | "props" | "show" => Some(query::run),
-                _ => None,
-            };
+        let handler: Option<fn(&str, &[String], &std::path::Path) -> readpath::Outcome> = match cmd
+        {
+            "outline" | "read" | "head" | "resolve" => Some(readpath::run),
+            // links reads ONE note (7.9 ms native); backlinks/orphans/deadends scan the
+            // corpus natively (~148 ms) while python answers from its SQLite index
+            // (48-84 ms) — those route to python until graph.rs grows the vvidx cache
+            // (measured 2026-08-27, E5). impact was never ported.
+            "links" | "backlinks" | "orphans" | "deadends" => Some(graph::run), // vvidx cache landed (phase 2)
+            "set" | "unset" | "append" | "appendsec" | "new" | "daily-append" | "patch" => {
+                Some(write::run)
+            }
+            "board" | "tags" | "props" | "show" => Some(query::run),
+            _ => None,
+        };
         if let Some(h) = handler {
             match h(cmd, &args[1..], &vault()) {
                 readpath::Outcome::Done(c) => exit(c),
@@ -443,9 +499,11 @@ fn main() {
     match args.first().map(String::as_str) {
         Some("search") => cmd_search(&args[1..], &orig),
         Some("linkscan") => cmd_linkscan(&args[1..]),
-        Some(_) => exec_python(&orig),   // every other vv command is python's
+        Some(_) => exec_python(&orig), // every other vv command is python's
         None => {
-            eprintln!("usage: vrust search <terms...> [--k N] [--w CHARS] | linkscan [--grep NEEDLE]");
+            eprintln!(
+                "usage: vrust search <terms...> [--k N] [--w CHARS] | linkscan [--grep NEEDLE]"
+            );
             exit(1);
         }
     }

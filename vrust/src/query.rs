@@ -114,9 +114,8 @@ fn scan_fm_parallel(files: &[PathBuf]) -> Result<Vec<HashMap<String, String>>, (
     let out: Vec<Result<HashMap<String, String>, ()>> = std::thread::scope(|s| {
         let mut handles = Vec::new();
         for part in files.chunks(chunk) {
-            handles.push(s.spawn(move || {
-                part.iter().map(|fp| read_fm_props(fp)).collect::<Vec<_>>()
-            }));
+            handles
+                .push(s.spawn(move || part.iter().map(|fp| read_fm_props(fp)).collect::<Vec<_>>()));
         }
         handles
             .into_iter()
@@ -210,7 +209,11 @@ struct OrderedCounter {
 
 impl OrderedCounter {
     fn new() -> Self {
-        OrderedCounter { keys: Vec::new(), idx: HashMap::new(), counts: Vec::new() }
+        OrderedCounter {
+            keys: Vec::new(),
+            idx: HashMap::new(),
+            counts: Vec::new(),
+        }
     }
     fn add(&mut self, k: &str) {
         if let Some(&i) = self.idx.get(k) {
@@ -230,8 +233,12 @@ impl OrderedCounter {
     /// most_common(limit): stable sort by count desc; ties keep insertion order
     /// (Vec::sort_by is a stable timsort, matching CPython's sorted()/nlargest).
     fn most_common(&self, limit: Option<usize>) -> Vec<(String, i64)> {
-        let mut items: Vec<(String, i64)> =
-            self.keys.iter().cloned().zip(self.counts.iter().cloned()).collect();
+        let mut items: Vec<(String, i64)> = self
+            .keys
+            .iter()
+            .cloned()
+            .zip(self.counts.iter().cloned())
+            .collect();
         items.sort_by(|a, b| b.1.cmp(&a.1));
         match limit {
             Some(n) => items.into_iter().take(n).collect(),

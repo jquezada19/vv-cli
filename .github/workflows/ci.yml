@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    name: gate (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: vrust
+
+      # The suites need a vault. Generate a small fixture one so the gate is
+      # reproducible and independent of any real vault.
+      - name: Build fixture vault
+        run: python3 .github/workflows/fixture_vault.py "$RUNNER_TEMP/fixture-vault"
+
+      - name: Run the gate
+        env:
+          VV_VAULT: ${{ runner.temp }}/fixture-vault
+          VV_TEST_SEARCH_TERMS: tenant check
+          VV_NO_METRICS: '1'
+        run: ./run_tests.sh
+
+  fmt-clippy:
+    name: rustfmt + clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: vrust
+      - run: cargo fmt --manifest-path vrust/Cargo.toml --check
+      # Advisory, not blocking: there is a real backlog of clippy lints in the
+      # engine (style and indexing patterns, no correctness findings). Fixing
+      # them is a change to a parity-pinned implementation, so it lands as its
+      # own reviewed PR rather than riding along with repo scaffolding. Flip
+      # continue-on-error off once the backlog is clear.
+      - run: cargo clippy --manifest-path vrust/Cargo.toml --all-targets -- -D warnings
+        continue-on-error: true

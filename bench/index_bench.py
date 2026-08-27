@@ -14,20 +14,33 @@ _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
 import sweepguard as _sg
 _sg.mark_bench("index-bench")   # tag this run's vv rows as benchmark traffic
 
-VV = os.path.expanduser("~/Desktop/Git/vv-cli/src/vv.py")
-SINK = os.path.expanduser("~/.claude/metrics/vv-index-bench.jsonl")
+VV = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src", "vv.py")
+SINK = os.path.join(os.path.expanduser(os.environ.get("VV_METRICS_DIR", "~/.claude/metrics")),
+                    "vv-index-bench.jsonl")
 REPS = 7
+# The graph cases need a well-linked hub note and a term that actually occurs in
+# the vault under test, so they are supplied by the environment rather than
+# baked in. Fail-closed, like the rest of this harness: a case pointed at a note
+# that does not exist would VOID the run anyway, so refuse up front instead.
+HUB    = os.environ.get("VV_BENCH_HUB")     # a hub note with many backlinks
+TERM   = os.environ.get("VV_BENCH_TERM")    # a term that occurs in several notes
+FOLDER = os.environ.get("VV_BENCH_FOLDER", "Knowledge")
+BOARD  = os.environ.get("VV_BENCH_BOARD",  "Work Items")
+if not HUB or not TERM:
+    sys.exit("set VV_BENCH_HUB (a well-linked note) and VV_BENCH_TERM "
+             "(a term present in your vault) before running the index bench")
+
 CASES = {
-    "backlinks":  ["backlinks", "Hub Note"],
-    "orphans":    ["orphans", "Knowledge"],
+    "backlinks":  ["backlinks", HUB],
+    "orphans":    ["orphans", FOLDER],
     "tags":       ["tags", "--counts"],
     "props":      ["props", "status", "Work Items"],
-    "board":      ["board", "Work Items/In Flight", "status=in-progress"],
-    "resolve":    ["resolve", "Hub Note"],
-    "impact":     ["impact", "Hub Note"],
+    "board":      ["board", BOARD, "status=in-progress"],
+    "resolve":    ["resolve", HUB],
+    "impact":     ["impact", HUB],
     # controls the index must NOT change:
-    "search":     ["search", "hubterm", "--k", "5"],
-    "outline":    ["outline", "Hub Note"],
+    "search":     ["search", TERM, "--k", "5"],
+    "outline":    ["outline", HUB],
 }
 
 def main():

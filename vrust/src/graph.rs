@@ -76,7 +76,10 @@ pub fn active_links(text: &str) -> Vec<(char, String)> {
     let lines: Vec<&str> = text.split('\n').collect();
     let mut fm_end = 0usize;
     if !lines.is_empty()
-        && lines[0].trim_start_matches('\u{feff}').trim_end_matches('\r') == "---"
+        && lines[0]
+            .trim_start_matches('\u{feff}')
+            .trim_end_matches('\r')
+            == "---"
     {
         for i in 1..lines.len() {
             if lines[i].trim_end_matches('\r') == "---" {
@@ -92,15 +95,14 @@ pub fn active_links(text: &str) -> Vec<(char, String)> {
         if !in_comment {
             let indent = raw.chars().take_while(|&c| c == ' ').count();
             let trimmed = &raw[indent..];
-            let fence: Option<(char, usize, &str)> = if indent <= 3
-                && (trimmed.starts_with("```") || trimmed.starts_with("~~~"))
-            {
-                let c = trimmed.chars().next().unwrap();
-                let n = trimmed.chars().take_while(|&x| x == c).count();
-                Some((c, n, &trimmed[n..]))
-            } else {
-                None
-            };
+            let fence: Option<(char, usize, &str)> =
+                if indent <= 3 && (trimmed.starts_with("```") || trimmed.starts_with("~~~")) {
+                    let c = trimmed.chars().next().unwrap();
+                    let n = trimmed.chars().take_while(|&x| x == c).count();
+                    Some((c, n, &trimmed[n..]))
+                } else {
+                    None
+                };
             let mut line_fenced = false;
             if i >= fm_end {
                 match (marker, fence) {
@@ -183,8 +185,8 @@ pub fn active_links(text: &str) -> Vec<(char, String)> {
         let mut j = 0usize;
         while j + 1 < b.len() {
             if b[j] == '[' && b[j + 1] == '[' {
-                if let Some(end) = (j + 2..b.len().saturating_sub(1))
-                    .find(|&k| b[k] == ']' && b[k + 1] == ']')
+                if let Some(end) =
+                    (j + 2..b.len().saturating_sub(1)).find(|&k| b[k] == ']' && b[k + 1] == ']')
                 {
                     let inner: String = b[j + 2..end].iter().collect();
                     let seg = inner
@@ -410,7 +412,10 @@ fn cmd_backlinks(ref_: &str, vault: &Path, t0: Instant) -> Outcome {
         None => return Outcome::Fallback,
     };
     let tgt_rel = rel_string(&fp, vault);
-    let tgt_rel_noext = tgt_rel.strip_suffix(".md").unwrap_or(&tgt_rel).to_lowercase();
+    let tgt_rel_noext = tgt_rel
+        .strip_suffix(".md")
+        .unwrap_or(&tgt_rel)
+        .to_lowercase();
 
     let mut files = Vec::new();
     crate::walk_ex(vault, &mut files, false);
@@ -427,7 +432,16 @@ fn cmd_backlinks(ref_: &str, vault: &Path, t0: Instant) -> Outcome {
                 if *kind == 'w' && !target.to_lowercase().contains(tgt_base.as_str()) {
                     continue;
                 }
-                if link_matches(&p, *kind, target, &fp, &tgt_base, &tgt_rel_noext, &idx, vault) {
+                if link_matches(
+                    &p,
+                    *kind,
+                    target,
+                    &fp,
+                    &tgt_base,
+                    &tgt_rel_noext,
+                    &idx,
+                    vault,
+                ) {
                     hits.insert(rp.clone());
                     break;
                 }
@@ -451,7 +465,16 @@ fn cmd_backlinks(ref_: &str, vault: &Path, t0: Instant) -> Outcome {
                 if kind == 'w' && !target.to_lowercase().contains(tgt_base.as_str()) {
                     continue; // needle filter: scan_links(needle=tgt_base)
                 }
-                if link_matches(p, kind, &target, &fp, &tgt_base, &tgt_rel_noext, &idx, vault) {
+                if link_matches(
+                    p,
+                    kind,
+                    &target,
+                    &fp,
+                    &tgt_base,
+                    &tgt_rel_noext,
+                    &idx,
+                    vault,
+                ) {
                     hits.insert(rp.clone());
                     break;
                 }
@@ -529,9 +552,14 @@ fn cmd_orphans(folder: &str, vault: &Path, t0: Instant) -> Outcome {
     let live_iter: Vec<(PathBuf, Vec<(char, String)>)> = if cachemap.is_some() {
         cached_rows
     } else {
-        files.iter().filter_map(|p| {
-            fs::read_to_string(p).ok().map(|text| (p.clone(), active_links(&text)))
-        }).collect()
+        files
+            .iter()
+            .filter_map(|p| {
+                fs::read_to_string(p)
+                    .ok()
+                    .map(|text| (p.clone(), active_links(&text)))
+            })
+            .collect()
     };
     for (p, file_links) in &live_iter {
         for (kind, target) in file_links {
@@ -606,8 +634,8 @@ fn cmd_deadends(vault: &Path, t0: Instant) -> Outcome {
     for rp in &rels {
         let empty = if let Some(cm) = &cachemap {
             match cm.get(rp) {
-                Some(fl) => fl.links.is_empty(),   // deadends counts lossy-lexed links
-                None => return Outcome::Fallback,  // cache/walk disagree: refuse to guess
+                Some(fl) => fl.links.is_empty(), // deadends counts lossy-lexed links
+                None => return Outcome::Fallback, // cache/walk disagree: refuse to guess
             }
         } else {
             let bytes = match fs::read(vault.join(rp)) {

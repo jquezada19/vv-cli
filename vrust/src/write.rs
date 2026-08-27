@@ -13,8 +13,8 @@
 use crate::readpath::{self, Outcome};
 use std::fs;
 use std::io::Write;
-use std::path::{Path, PathBuf};
 use std::os::unix::fs::MetadataExt;
+use std::path::{Path, PathBuf};
 
 const BOM: char = '\u{feff}';
 
@@ -61,7 +61,11 @@ fn read_raw(fp: &Path) -> Option<String> {
 }
 
 fn eol_of(text: &str) -> &'static str {
-    if text.contains("\r\n") { "\r\n" } else { "\n" }
+    if text.contains("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    }
 }
 
 /// Atomic write with optional CAS on the pre-read signature. Returns false on
@@ -90,7 +94,11 @@ fn atomic_write(fp: &Path, content: &str, expect_sig: Option<Sig>) -> bool {
             .map(|d| d.subsec_nanos())
             .unwrap_or(0);
         tmp = dir.join(format!(".vv-{}-{}-{}.tmp", pid, nanos, attempt));
-        match fs::OpenOptions::new().write(true).create_new(true).open(&tmp) {
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)
+        {
             Ok(f) => break f,
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                 attempt += 1;
@@ -123,7 +131,11 @@ fn atomic_write(fp: &Path, content: &str, expect_sig: Option<Sig>) -> bool {
 // ---------- split_fm_full (fm, body, tail, bom) ----------
 
 fn split_fm_full(text: &str) -> (Option<String>, String, String, String) {
-    let bom = if text.starts_with(BOM) { BOM.to_string() } else { String::new() };
+    let bom = if text.starts_with(BOM) {
+        BOM.to_string()
+    } else {
+        String::new()
+    };
     let t = &text[bom.len()..];
     let rest = if let Some(r) = t.strip_prefix("---\r\n") {
         r
@@ -149,7 +161,12 @@ fn split_fm_full(text: &str) -> (Option<String>, String, String, String) {
                 } else {
                     ("", post)
                 };
-                return (Some(rest[..fm_end].to_string()), body.to_string(), tail.to_string(), bom);
+                return (
+                    Some(rest[..fm_end].to_string()),
+                    body.to_string(),
+                    tail.to_string(),
+                    bom,
+                );
             }
         }
         i += 1;
@@ -169,8 +186,8 @@ fn block_scalar_key(fm_lines: &[String], key: &str) -> bool {
                     let nxt = fm_lines.get(i + 1).map(|s| s.as_str()).unwrap_or("");
                     let nxt_first = nxt.chars().next();
                     let indented = matches!(nxt_first, Some(' ') | Some('\t'));
-                    let block_marker = !val.is_empty()
-                        && (val.starts_with('|') || val.starts_with('>'));
+                    let block_marker =
+                        !val.is_empty() && (val.starts_with('|') || val.starts_with('>'));
                     if indented || block_marker {
                         return true;
                     }
@@ -307,7 +324,8 @@ fn splice(lines: &[&str], start: usize, end: usize, new_lines: &[String]) -> Str
             body.pop();
         }
     }
-    let mut merged: Vec<String> = Vec::with_capacity(start + body.len() + (lines.len() - end.min(lines.len())));
+    let mut merged: Vec<String> =
+        Vec::with_capacity(start + body.len() + (lines.len() - end.min(lines.len())));
     merged.extend(lines[..start].iter().map(|s| s.to_string()));
     merged.extend(body);
     merged.extend(lines[end.min(lines.len())..].iter().map(|s| s.to_string()));
@@ -366,7 +384,16 @@ fn cmd_set(vault: &Path, args: &[String]) -> Outcome {
     let eol = eol_of(&text);
     let new_content = match fm {
         None => {
-            format!("{}---{}{}: {}{}---{}{}", bom, eol, key, value, eol, eol, &text[bom.len()..])
+            format!(
+                "{}---{}{}: {}{}---{}{}",
+                bom,
+                eol,
+                key,
+                value,
+                eol,
+                eol,
+                &text[bom.len()..]
+            )
         }
         Some(fm_s) => {
             let fm_norm = fm_s.replace("\r\n", "\n");
@@ -386,7 +413,15 @@ fn cmd_set(vault: &Path, args: &[String]) -> Outcome {
             if !found {
                 fm_lines.push(format!("{}: {}", key, value));
             }
-            format!("{}---{}{}{}---{}{}", bom, eol, fm_lines.join(eol), eol, tail, body)
+            format!(
+                "{}---{}{}{}---{}{}",
+                bom,
+                eol,
+                fm_lines.join(eol),
+                eol,
+                tail,
+                body
+            )
         }
     };
     if !atomic_write(&fp, &new_content, Some(sig)) {
@@ -432,12 +467,23 @@ fn cmd_unset(vault: &Path, args: &[String]) -> Outcome {
         return Outcome::Fallback;
     }
     let prefix = format!("{}:", key);
-    let kept: Vec<&String> = fm_lines.iter().filter(|l| !l.starts_with(&prefix)).collect();
+    let kept: Vec<&String> = fm_lines
+        .iter()
+        .filter(|l| !l.starts_with(&prefix))
+        .collect();
     if kept.len() == fm_lines.len() {
         return Outcome::Fallback; // python: die "no key"
     }
     let kept_owned: Vec<String> = kept.into_iter().cloned().collect();
-    let new_content = format!("{}---{}{}{}---{}{}", bom, eol, kept_owned.join(eol), eol, tail, body);
+    let new_content = format!(
+        "{}---{}{}{}---{}{}",
+        bom,
+        eol,
+        kept_owned.join(eol),
+        eol,
+        tail,
+        body
+    );
     if !atomic_write(&fp, &new_content, Some(sig)) {
         return Outcome::Fallback;
     }
@@ -470,7 +516,11 @@ fn cmd_append(vault: &Path, args: &[String]) -> Outcome {
         None => return Outcome::Fallback,
     };
     let eol = eol_of(&cur);
-    let sep = if cur.ends_with('\n') || cur.is_empty() { "" } else { eol };
+    let sep = if cur.ends_with('\n') || cur.is_empty() {
+        ""
+    } else {
+        eol
+    };
     let new_content = format!("{}{}{}{}", cur, sep, text_arg, eol);
     if !atomic_write(&fp, &new_content, Some(sig)) {
         return Outcome::Fallback;
@@ -522,7 +572,6 @@ fn cmd_appendsec(vault: &Path, args: &[String]) -> Outcome {
     Outcome::Done(0)
 }
 
-
 // ---------- patch (phase 2) ----------
 // STDIN ORDERING IS THE WHOLE TRICK (mirrors python exactly): every check that
 // can Fallback runs BEFORE stdin is consumed — python re-reads stdin itself on
@@ -533,18 +582,26 @@ fn cmd_appendsec(vault: &Path, args: &[String]) -> Outcome {
 fn exec_python_with_stdin(vault: &Path, args: &[String], body: &[u8]) -> Outcome {
     use std::process::{Command, Stdio};
     let vv = std::env::var("VV_PY_ENTRY").unwrap_or_else(|_| {
-        std::env::current_exe().ok().and_then(|p| std::fs::canonicalize(p).ok())
+        std::env::current_exe()
+            .ok()
+            .and_then(|p| std::fs::canonicalize(p).ok())
             .and_then(|p| p.ancestors().nth(4).map(|a| a.to_path_buf()))
             .map(|r| r.join("src/vv.py").to_string_lossy().into_owned())
             .unwrap_or_else(|| "vv.py".into())
     });
     let mut argv: Vec<String> = vec!["patch".into()];
     argv.extend(args.iter().cloned());
-    let child = Command::new("python3").arg(&vv)
-        .arg("--vault").arg(vault)
+    let child = Command::new("python3")
+        .arg(&vv)
+        .arg("--vault")
+        .arg(vault)
         .args(&argv)
-        .stdin(Stdio::piped()).spawn();
-    let mut child = match child { Ok(c) => c, Err(_) => return Outcome::Done(1) };
+        .stdin(Stdio::piped())
+        .spawn();
+    let mut child = match child {
+        Ok(c) => c,
+        Err(_) => return Outcome::Done(1),
+    };
     if let Some(mut si) = child.stdin.take() {
         let _ = si.write_all(body);
     }
@@ -560,7 +617,7 @@ fn cmd_patch(vault: &Path, args: &[String]) -> Outcome {
         return Outcome::Fallback;
     }
     if has_pending_journal(vault) {
-        return Outcome::Fallback;   // python emits the canonical exit-4 text
+        return Outcome::Fallback; // python emits the canonical exit-4 text
     }
     let (ref_, sid, expect) = (&args[0], &args[1], &args[2]);
     let fp = match crate::readpath::resolve(vault, ref_) {
@@ -568,20 +625,25 @@ fn cmd_patch(vault: &Path, args: &[String]) -> Outcome {
         None => return Outcome::Fallback,
     };
     let cf = fs::metadata(&fp).map(|m| m.len()).unwrap_or(0);
-    let bytes = match fs::read(&fp) { Ok(b) => b, Err(_) => return Outcome::Fallback };
-    let text = match String::from_utf8(bytes) { Ok(t) => t, Err(_) => return Outcome::Fallback };
+    let bytes = match fs::read(&fp) {
+        Ok(b) => b,
+        Err(_) => return Outcome::Fallback,
+    };
+    let text = match String::from_utf8(bytes) {
+        Ok(t) => t,
+        Err(_) => return Outcome::Fallback,
+    };
     let (lines, secs) = crate::readpath::parse(&text);
     let s = match crate::readpath::find_sec(&secs, sid) {
         Some(s) => s,
         None => return Outcome::Fallback,
     };
-    if sid == "H0" && s.end > 0 && !lines.is_empty()
-        && lines[0].trim_end_matches('\r') == "---" {
-        return Outcome::Fallback;   // python's "refused: H0 contains frontmatter" text
+    if sid == "H0" && s.end > 0 && !lines.is_empty() && lines[0].trim_end_matches('\r') == "---" {
+        return Outcome::Fallback; // python's "refused: H0 contains frontmatter" text
     }
     let cur = crate::readpath::sec_text(&lines, s);
     if crate::readpath::sha8(&cur) != *expect {
-        return Outcome::Fallback;   // stale: python re-checks and emits exit 3 — stdin UNTOUCHED so far
+        return Outcome::Fallback; // stale: python re-checks and emits exit 3 — stdin UNTOUCHED so far
     }
     // ---- point of no return: consume stdin ----
     let mut raw = Vec::new();
@@ -605,10 +667,18 @@ fn cmd_patch(vault: &Path, args: &[String]) -> Outcome {
     if !atomic_write(&fp, &new_text, None) {
         return exec_python_with_stdin(vault, args, &raw);
     }
-    let rel = fp.strip_prefix(vault).unwrap_or(&fp).to_string_lossy().into_owned();
+    let rel = fp
+        .strip_prefix(vault)
+        .unwrap_or(&fp)
+        .to_string_lossy()
+        .into_owned();
     let n = crate::readpath::emit(&format!(
         "patched {} in {} ({}B -> {}B)\n",
-        s.id, rel, cur.chars().count(), body.chars().count()));
+        s.id,
+        rel,
+        cur.chars().count(),
+        body.chars().count()
+    ));
     crate::readpath::log_metrics("patch", t0, n, cf);
     Outcome::Done(0)
 }

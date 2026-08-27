@@ -14,8 +14,9 @@ O5  links inside <!-- --> HTML comments are not indexed by Obsidian: vv neither
     counts nor rewrites them; %% comment links ARE indexed and stay real.
 """
 import subprocess, sys, os, shutil
+_VAULT = os.environ.get("VV_VAULT") or os.path.expanduser("~/Documents/Obsidian Vault")
 
-SB = os.path.expanduser("~/Documents/Obsidian Vault/Sandbox/vvoracle")
+SB = os.path.join(_VAULT, "Sandbox/vvoracle")
 VV = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src", "vv.py")
 
 def run(*args):

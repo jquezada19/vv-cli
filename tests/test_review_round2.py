@@ -18,9 +18,10 @@ V8  an interrupted apply (SystemExit — e.g. a non-UTF-8 file read mid-apply)
     still rolls back.
 """
 import subprocess, sys, os, shutil
+_VAULT = os.environ.get("VV_VAULT") or os.path.expanduser("~/Documents/Obsidian Vault")
 
-SB = os.path.expanduser("~/Documents/Obsidian Vault/Sandbox/vvround2")
-OUTSIDE = os.path.expanduser("~/Documents/Obsidian Vault/Sandbox")  # parent of SB
+SB = os.path.join(_VAULT, "Sandbox/vvround2")
+OUTSIDE = os.path.join(_VAULT, "Sandbox")  # parent of SB
 VV = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src", "vv.py")
 
 def run(*args, env=None):
