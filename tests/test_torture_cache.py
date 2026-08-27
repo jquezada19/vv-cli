@@ -135,6 +135,19 @@ def main():
         body_lines = orig[:end + 1].split(b"\n")
         print(f"cache {len(orig)} bytes; vault {len(names)} notes")
 
+        # Verify the mirror against the footer the ENGINE itself stamped, before
+        # using it to forge anything. Without this, a cache-blind engine and a
+        # drifted mirror both surfaced as "the mirror drifted" — right verdict,
+        # wrong cause.
+        stamped = orig[end + 1:].rstrip(b"\n").split(b"\t")
+        if len(stamped) != 3 or int(stamped[1]) != len(orig[:end + 1]) \
+                or int(stamped[2], 16) != _fnv(orig[:end + 1]):
+            print("FAIL mirror: _fnv in this file does not reproduce the footer "
+                  f"the engine stamped ({stamped[2:3]}); it has drifted from "
+                  "fnv1a64 in vrust/src/cache.rs — re-sync it. Nothing below "
+                  "this line would be evidence about the cache.")
+            return 1
+
         # --- Derive the cache-consuming probes; this IS the blindness control.
         victim = None
         for li, l in enumerate(body_lines):
@@ -199,12 +212,11 @@ def main():
               + (", ".join(" ".join(p) for p in candidates if p not in consumers) or "none"))
         print(f"(e) control (re-stamped damage served): {'yes' if consumers else 'NO'}"
               f"   [forged footer {'accepted' if accepted else 'REJECTED'}]")
-        if not consumers and not accepted:
-            print("FAIL control: the forged footer was rejected -> _fnv in this "
-                  "file has drifted from fnv1a64 in vrust/src/cache.rs; re-sync "
-                  "the mirror. This is NOT evidence about the cache being used.")
-            return 1
         if not consumers:
+            # The mirror was proven correct above, so a rejected footer here
+            # means the engine rewrote the cache without serving it, and an
+            # accepted-but-inert one means it never read it. Either way the
+            # cache is not being consulted in a way this suite can observe.
             print("FAIL control: a checksum-valid corruption was accepted and "
                   "changed nothing -> the cache is not consulted and this suite "
                   "proves nothing")

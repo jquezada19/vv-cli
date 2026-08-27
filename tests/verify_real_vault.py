@@ -43,7 +43,7 @@ def patch_result(text, s, stdin_body):
     return "\n".join(lines[:s["start"]] + bl + lines[s["end"]:])
 
 bad_struct, bad_rt, unreadable, parse_err = [], [], [], []
-n_notes = n_secs = 0
+n_notes = n_secs = n_real = 0
 t0 = time.perf_counter()
 for fp in vv.md_files():
     try:
@@ -61,6 +61,8 @@ for fp in vv.md_files():
     except Exception as e:
         parse_err.append(f"{vv.rel(fp)}: {e!r}"[:100]); continue
     n_notes += 1
+    if not vv.rel(fp).startswith("Sandbox/"):
+        n_real += 1
     for i, s in enumerate(secs):
         if s["start"] == s["end"]:
             continue
@@ -81,8 +83,14 @@ print(f"scanned {n_notes} notes / {n_secs} sections in {el:.1f}s ({el/max(n_note
 # MISSING, EMPTY, or wrongly-pointed vault — which scans 0 — not detecting
 # partial degradation, which it cannot do: 60 notes of an expected 5,000 pass.
 FLOOR = int(os.environ.get("VV_VERIFY_MIN_NOTES", "5"))
-check(f"corpus floor (>= {FLOOR} notes scanned)", n_notes >= FLOOR,
-      f"scanned only {n_notes} notes from {vv.VAULT} — vault missing or empty?")
+# Counted OUTSIDE Sandbox/ on purpose: earlier suites in the gate create
+# Sandbox/vvtest/ fixtures, and counting those masked this floor exactly when it
+# mattered — an empty vault run through the full gate cleared it on suite
+# residue and failed later with a confusing error about a CRLF note the user
+# never wrote.
+check(f"corpus floor (>= {FLOOR} notes outside Sandbox/)", n_real >= FLOOR,
+      f"scanned only {n_real} non-Sandbox notes from {vv.VAULT} "
+      f"({n_notes} total incl. test fixtures) — vault missing or empty?")
 check(f"section floor (>= {FLOOR} sections parsed)", n_secs >= FLOOR,
       f"parsed only {n_secs} sections from {n_notes} notes — outline parsing dead?")
 check("structure: sections partition every note", not bad_struct, f"{len(bad_struct)}: {bad_struct[:3]}")
