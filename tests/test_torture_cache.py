@@ -140,6 +140,11 @@ def main():
         # drifted mirror both surfaced as "the mirror drifted" — right verdict,
         # wrong cause.
         stamped = orig[end + 1:].rstrip(b"\n").split(b"\t")
+        # Only ONE length can be checked here — the engine stamps exactly one
+        # footer, for the full body — so this proves the mirror agrees at that
+        # length, not at the forged body's (different) length. The residual is
+        # handled where it matters, in the diagnosis below, rather than by a
+        # check that would look thorough and prove nothing.
         if len(stamped) != 3 or int(stamped[1]) != len(orig[:end + 1]) \
                 or int(stamped[2], 16) != _fnv(orig[:end + 1]):
             print("FAIL mirror: _fnv in this file does not reproduce the footer "
@@ -212,14 +217,23 @@ def main():
               + (", ".join(" ".join(p) for p in candidates if p not in consumers) or "none"))
         print(f"(e) control (re-stamped damage served): {'yes' if consumers else 'NO'}"
               f"   [forged footer {'accepted' if accepted else 'REJECTED'}]")
-        if not consumers:
-            # The mirror was proven correct above, so a rejected footer here
-            # means the engine rewrote the cache without serving it, and an
-            # accepted-but-inert one means it never read it. Either way the
-            # cache is not being consulted in a way this suite can observe.
+        if not consumers and accepted:
             print("FAIL control: a checksum-valid corruption was accepted and "
                   "changed nothing -> the cache is not consulted and this suite "
                   "proves nothing")
+            return 1
+        if not consumers:
+            # Footer rejected. The mirror agrees with the engine at the stamped
+            # body's length, so this is EITHER a mirror that drifts with length
+            # (correct there, wrong for the shorter forged body) OR an engine
+            # that rewrites the cache without ever serving it. Both are real and
+            # this harness cannot separate them — say so instead of picking one,
+            # which is how the previous version pointed readers at the wrong file.
+            print("FAIL control: the forged footer was REJECTED while _fnv "
+                  "matches the engine-stamped footer. Either _fnv drifts with "
+                  "buffer length (check the chunks_exact remainder against "
+                  "fnv1a64 in vrust/src/cache.rs) or the engine rewrites the "
+                  "cache without consulting it. This suite cannot tell which.")
             return 1
         # Baseline: with an intact cache, NO probe may satisfy the consumer
         # predicate. Without this, an unrelated native/oracle parity bug would

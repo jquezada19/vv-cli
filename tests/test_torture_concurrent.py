@@ -1,22 +1,32 @@
 #!/usr/bin/env python3
 """Torture: concurrent readers and writers must never yield a wrong answer.
 
-Readers and writers are interleaved in the submit order, and the control
-measures how much engine work actually happened at once: total child CPU time
-divided by the storm's wall time. Anything that serializes execution — a
-one-worker pool, a lock, an engine-level file lock — drives that to ~1.0 and
-fails the run.
+Readers and writers are interleaved in the submit order and run on a worker
+pool. That structure is asserted; the runtime concurrency it produces is NOT
+measured, and the reason is worth recording so nobody rebuilds this.
 
-This is the third instrument tried here, and the reason for the change is worth
-keeping. Timing each operation in the parent counted a thread's WAIT as
-execution, so a fully serialized storm scored 100%. Counting children at spawn
-counted a process blocked on a mutex as running, so a global lock scored higher
-than the honest run. CPU time cannot be faked either way: a blocked process
-burns none.
+Five instruments were tried and every one was defeated by review:
 
-Its remaining limit, stated rather than claimed away: this proves engine
-processes did work simultaneously, not that their vault accesses interleaved at
-the byte level. Observing that would need instrumentation inside the engine.
+  1. no control — the pool queued 240 readers ahead of 60 writers (15/240).
+  2. each read vs the UNION HULL of writer spans — a serial storm scored 44/48.
+  3. pairwise intersection of parent-side spans — a global mutex scored 240/240,
+     because a thread's WAIT counts as execution.
+  4. children spawned-and-not-yet-reaped — the same mutex scored 297, HIGHER
+     than the honest 249: a blocked child is still spawned.
+  5. child CPU time / wall vs an in-run serial baseline — defeated twice (a
+     20ms non-CPU prep outside the mutex collapsed the baseline, so the floor
+     became unreachable; and RUSAGE_CHILDREN is process-wide, so six unrelated
+     spinner children scored 6.10 against an honest 3.04 with one engine
+     running at a time). It also reddened a HEALTHY tree when load arrived
+     after the baseline sample — failing in both directions.
+
+The common cause: from the parent, a process that is waiting is
+indistinguishable from one that is working, and any aggregate can be inflated by
+work that is not ours. Proving read-during-write requires the engine to report
+when it touches the vault. Until it does, this suite asserts what it can check —
+the pool has more than one worker and the job order alternates — and makes no
+claim about runtime interleaving. A number that cannot be trusted in either
+direction is worse than an honest gap.
 
 What this suite does NOT cover, stated because a guard that cannot fail is
 worse than an absent one: the native engine writes no journal for `set` (only
@@ -24,7 +34,7 @@ python's rename/move --apply journal), so a leftover-journal or exit-4 check
 here would be structurally incapable of failing. Journal recovery is covered by
 the write-parity suite instead.
 """
-import os, random, resource, shutil, subprocess, sys, tempfile, threading, time
+import os, random, shutil, subprocess, sys, tempfile, threading
 from concurrent.futures import ThreadPoolExecutor
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -36,30 +46,6 @@ rng = random.Random(int(os.environ.get("SEED", "77")))
 
 JR = tempfile.mkdtemp(prefix="vv-conc-journals-")
 HOME = tempfile.mkdtemp(prefix="vv-conc-home-")
-
-
-# Concurrency is measured as child CPU time divided by wall time — the average
-# number of engine processes doing work at once. Every parent-side proxy tried
-# before this was defeated: timing spans counted a thread's wait as execution,
-# and counting at spawn counted a child blocked on a mutex as running. CPU time
-# cannot be faked that way, because a blocked process burns none. Measured on
-# this machine: 10.0 honest, 0.9 under a global mutex, 0.9 at one worker.
-# The floor is CALIBRATED IN-RUN rather than fixed, because achievable
-# parallelism depends on the runner's core count: a fixed 1.5 that is generous
-# here (14 cores) could redden a healthy 2-core CI box. The suite measures its
-# own serial baseline, then requires the storm to beat it by this factor.
-PARALLELISM_MARGIN = float(os.environ.get("TORTURE_PARALLELISM_MARGIN", "1.4"))
-
-
-def _parallelism(fn):
-    """Average engine processes doing work at once: child CPU time / wall."""
-    r0 = resource.getrusage(resource.RUSAGE_CHILDREN)
-    t0 = time.monotonic()
-    fn()
-    wall = time.monotonic() - t0
-    r1 = resource.getrusage(resource.RUSAGE_CHILDREN)
-    cpu = (r1.ru_utime - r0.ru_utime) + (r1.ru_stime - r0.ru_stime)
-    return (cpu / wall) if wall > 0 else 0.0
 
 
 def run(cmd, vault, py=False):
@@ -208,23 +194,11 @@ def main():
         jobs = []
         for i in range(300):
             jobs.append((writer, i) if i % 5 == 4 else (reader, i))
-        # Serial baseline on this machine, this run: the same work with no
-        # concurrency at all. On any box this lands near 1.0, which is exactly
-        # what a serialized storm would also produce.
-        serial = _parallelism(lambda: [run(READS[i % len(READS)], vault)
-                                       for i in range(8)])
-        floor = serial * PARALLELISM_MARGIN
-
-        _r0 = resource.getrusage(resource.RUSAGE_CHILDREN)
-        _t0 = time.monotonic()
         with ThreadPoolExecutor(max_workers=WORKERS) as ex:
             futs = [ex.submit(fn, i) for fn, i in jobs]
             for f in futs:
                 f.result()
-        _wall = time.monotonic() - _t0
-        _r1 = resource.getrusage(resource.RUSAGE_CHILDREN)
-        _cpu = ((_r1.ru_utime - _r0.ru_utime) + (_r1.ru_stime - _r0.ru_stime))
-        parallelism = (_cpu / _wall) if _wall > 0 else 0.0
+
 
         # Post-storm: every read verb must agree with the python oracle on the
         # final state.
@@ -246,20 +220,24 @@ def main():
         # process? Counted at spawn time, so any serialization below this harness
         # drives it to 0. Two earlier versions of this control measured
         # parent-side spans and passed a fully serialized storm at ~100%.
-        if (os.cpu_count() or 1) < 2:
-            print("  NOTE: single-core host — the parallelism control cannot "
-                  "distinguish concurrency from serialization here, so it is "
-                  "not asserted on this run")
-        elif parallelism < floor:
-            errs.append(("control-parallelism",
-                         f"engine parallelism {parallelism:.2f} < {floor:.2f} "
-                         f"(serial baseline {serial:.2f} x {PARALLELISM_MARGIN}); "
-                         f"the storm was not concurrent"))
+        # Concurrency is asserted STRUCTURALLY — see the docstring for why no
+        # runtime measurement is made. These check the configuration that
+        # produces concurrency, which is the part this harness can actually
+        # establish; they are not a claim about what the engine did at runtime.
+        if WORKERS < 2:
+            errs.append(("control-structure",
+                         f"TORTURE_WORKERS={WORKERS}: a single worker cannot "
+                         f"produce a concurrent storm"))
+        kinds = [k for k, _ in jobs]
+        runs = sum(1 for a, b in zip(kinds, kinds[1:]) if a is not b)
+        if runs < len(jobs) // 10:
+            errs.append(("control-structure",
+                         f"only {runs} reader/writer alternations in {len(jobs)} "
+                         f"jobs; the storm is batched, not interleaved"))
 
         print(f"{len(jobs)} ops ({nreads[0]} read / {nwrites[0]} write, "
               f"{WORKERS} workers)")
-        print(f"  engine parallelism (child cpu / wall): {parallelism:.2f}"
-              f"   serial baseline {serial:.2f}   floor {floor:.2f}")
+        print(f"  reader/writer alternations in the submit order: {runs}")
         print(f"  notes actually mutated: {changed}   "
               f"writes refused by the CAS guard: {len(refused)}")
         print(f"  runtime errors: {len(errs)}   post-storm divergence: {len(final)}")

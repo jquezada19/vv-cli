@@ -17,7 +17,8 @@ export VV_NO_METRICS=1
 # suites then report a cache or engine defect for what is an interpreter
 # problem — so say it once, here, instead.
 if ! python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 12) else 1)'; then
-  echo "  FAIL python3 is $(python3 -c 'import sys; print(".".join(map(str, sys.version_info[:3])))') — this project needs 3.12+"
+  _pyver=$(python3 -c 'import sys; print(".".join(map(str, sys.version_info[:3])))' 2>/dev/null || echo "missing or not runnable")
+  echo "  FAIL python3 is ${_pyver} — this project needs 3.12+"
   exit 1
 fi
 
@@ -35,11 +36,18 @@ run() {  # run <label> <cmd...>
   fi
 }
 
+if [ ! -d vrust ]; then
+  # Not optional: without it every native suite SKIPs and the gate goes green on
+  # a tree that cannot have been tested.
+  echo "  FAIL vrust/ is missing — the native engine is part of this repo"
+  exit 1
+fi
 if [ -d vrust ]; then
   # A failed build must fail the gate. Otherwise a stale target/release/vrust
   # from an earlier build stays on disk and every native suite silently tests
   # the OLD binary while the gate reports green.
-  if (cd vrust && cargo build --release >/dev/null 2>&1); then
+  _build_log=$(mktemp)
+  if (cd vrust && cargo build --release >"$_build_log" 2>&1); then
     echo "  ok   rust engine built"
   else
     # ALWAYS fail. With a stale binary present the native suites would silently
@@ -51,7 +59,11 @@ if [ -d vrust ]; then
     else
       echo "  FAIL rust engine build failed"
     fi
+    # Show why. A bare "build failed" is unactionable for a contributor whose
+    # only view of this is a CI log.
+    tail -20 "$_build_log" | sed 's/^/         /'
   fi
+  rm -f "$_build_log"
 fi
 
 echo "unit + integration:"

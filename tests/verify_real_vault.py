@@ -43,7 +43,7 @@ def patch_result(text, s, stdin_body):
     return "\n".join(lines[:s["start"]] + bl + lines[s["end"]:])
 
 bad_struct, bad_rt, unreadable, parse_err = [], [], [], []
-n_notes = n_secs = n_real = 0
+n_notes = n_secs = n_real = n_real_secs = 0
 t0 = time.perf_counter()
 for fp in vv.md_files():
     try:
@@ -63,6 +63,7 @@ for fp in vv.md_files():
     n_notes += 1
     if not vv.rel(fp).startswith("Sandbox/"):
         n_real += 1
+        n_real_secs += len([x for x in secs if x["start"] != x["end"]])
     for i, s in enumerate(secs):
         if s["start"] == s["end"]:
             continue
@@ -91,8 +92,9 @@ FLOOR = int(os.environ.get("VV_VERIFY_MIN_NOTES", "5"))
 check(f"corpus floor (>= {FLOOR} notes outside Sandbox/)", n_real >= FLOOR,
       f"scanned only {n_real} non-Sandbox notes from {vv.VAULT} "
       f"({n_notes} total incl. test fixtures) — vault missing or empty?")
-check(f"section floor (>= {FLOOR} sections parsed)", n_secs >= FLOOR,
-      f"parsed only {n_secs} sections from {n_notes} notes — outline parsing dead?")
+check(f"section floor (>= {FLOOR} sections outside Sandbox/)", n_real_secs >= FLOOR,
+      f"parsed only {n_real_secs} non-Sandbox sections from {n_real} notes "
+      f"({n_secs} total incl. test fixtures) — outline parsing dead?")
 check("structure: sections partition every note", not bad_struct, f"{len(bad_struct)}: {bad_struct[:3]}")
 check("round-trip: every section byte-identical", not bad_rt, f"{len(bad_rt)}: {bad_rt[:3]}")
 check("parser: no crashes", not parse_err, f"{len(parse_err)}: {parse_err[:2]}")
