@@ -7,10 +7,13 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::exit;
+mod readpath;
 
 fn vault() -> PathBuf {
     if let Ok(v) = env::var("VV_VAULT") {
-        return PathBuf::from(v);
+        if !v.is_empty() {        // python: `or` — empty means default (Codex parity audit)
+            return PathBuf::from(v);
+        }
     }
     let home = env::var("HOME").expect("HOME unset");
     Path::new(&home).join("Documents/Obsidian Vault")
@@ -18,12 +21,15 @@ fn vault() -> PathBuf {
 
 /// `exclude_sandbox` is a SEARCH-relevance choice, never a graph-correctness one:
 /// link/graph scans must see every note the Python side sees.
-fn walk_ex(dir: &Path, out: &mut Vec<PathBuf>, exclude_sandbox: bool) {
+pub fn walk_ex(dir: &Path, out: &mut Vec<PathBuf>, exclude_sandbox: bool) {
     if let Ok(rd) = fs::read_dir(dir) {
         for e in rd.flatten() {
             let p = e.path();
             let name = e.file_name().to_string_lossy().to_string();
-            if p.is_dir() {
+            // file_type() does NOT follow symlinks — parity with os.walk(followlinks=False):
+            // a symlinked directory is never descended (Codex parity audit 2026-08-27)
+            let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
+            if is_dir {
                 if name.starts_with('.') || name == "graphify-out" || (exclude_sandbox && name == "Sandbox") {
                     continue;
                 }
@@ -357,11 +363,47 @@ fn cmd_linkscan(args: &[String]) {
     print!("{}", buf);
 }
 
+fn exec_python(argv: &[String]) -> ! {
+    // fall through to the Python implementation — the semantic authority for
+    // every command the native path doesn't (or declines to) handle.
+    let vv = std::env::var("VV_PY_ENTRY").unwrap_or_else(|_| {
+        let me = env::current_exe().ok()
+            .and_then(|p| p.ancestors().nth(4).map(|a| a.to_path_buf()));  // exe -> release -> target -> vrust -> REPO
+        me.map(|r| r.join("src/vv.py").to_string_lossy().into_owned())
+            .unwrap_or_else(|| "vv.py".into())
+    });
+    let err = std::process::Command::new("python3").arg(&vv).args(argv)
+        .status().map(|s| exit(s.code().unwrap_or(1)));
+    eprintln!("run: could not exec python3 {}: {:?}", vv, err.err());
+    exit(1);
+}
+
 fn main() {
-    let args: Vec<String> = env::args().skip(1).collect();
+    let mut args: Vec<String> = env::args().skip(1).collect();
+    let orig: Vec<String> = args.clone();
+    // --vault PATH before dispatch, mirroring vv.py
+    if let Some(i) = args.iter().position(|a| a == "--vault") {
+        if i + 1 < args.len() {
+            let mut v = args[i + 1].clone();
+            if let Some(rest) = v.strip_prefix("~/") {   // expanduser, like python
+                if let Ok(h) = env::var("HOME") { v = format!("{}/{}", h, rest); }
+            }
+            std::env::set_var("VV_VAULT", &v);
+            args.drain(i..=i + 1);
+        }
+    }
+    if let Some(cmd) = args.first().map(String::as_str) {
+        if matches!(cmd, "outline" | "read" | "head" | "resolve") {
+            match readpath::run(cmd, &args[1..], &vault()) {
+                readpath::Outcome::Done(c) => exit(c),
+                readpath::Outcome::Fallback => exec_python(&orig),
+            }
+        }
+    }
     match args.first().map(String::as_str) {
         Some("search") => cmd_search(&args[1..]),
         Some("linkscan") => cmd_linkscan(&args[1..]),
+        Some(_) if std::env::var_os("VV_NATIVE_ENTRY").is_some() => exec_python(&orig),
         _ => {
             eprintln!("usage: vrust search <terms...> [--k N] [--w CHARS] | linkscan [--grep NEEDLE]");
             exit(1);

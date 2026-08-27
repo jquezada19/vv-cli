@@ -1,0 +1,73 @@
+#!/usr/bin/env python3
+"""Native read path (E2, 2026-08-27): the vrust binary serves outline/read/
+head/resolve itself and MUST be byte-identical (stdout+stderr+exit) to the
+Python implementation; anything it can't handle execs Python, so error grammar
+is Python-canonical by construction. Fixtures are specification pins for the
+grammar corners the corpus may not contain (panel-prescribed 2026-08-27)."""
+import os, subprocess, sys, tempfile, shutil
+
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+VR = os.path.join(REPO, "vrust/target/release/vrust")
+VV = os.path.join(REPO, "src/vv.py")
+
+FIXTURES = {
+ "bom-crlf.md": "﻿---\r\ntype: note\r\n---\r\n# H\r\nbody\r\n",
+ "bom-lf.md": "﻿---\ntype: x\n---\n# A\nb\n",
+ "no-trailing-nl.md": "# Top\nbody with no final newline",
+ "heading-at-0.md": "# First line is heading\nx\n",
+ "empty.md": "",
+ "only-fm.md": "---\na: 1\n---\n",
+ "unterminated-fm.md": "---\nnever closed\n# Real Heading\n",
+ "heading-in-fence.md": "pre\n```\n# not a heading\n```\n# real\n",
+ "tilde-fence.md": "~~~\n# masked\n~~~\n## ok\n",
+ "nested-fence.md": "````\n```\n# still masked\n```\n````\n# free\n",
+ "inline-triplet.md": "```code``` inline\n# heading after inline span\n",
+ "dup-headings.md": "# Same\na\n# Same\nb\n",
+ "seven-hashes.md": "####### not a heading\n###### yes heading\n",
+ "hash-no-space.md": "#nospace\n# spaced\n",
+ "unicode-title.md": "# Émojis \U0001f9ed and ünïcode\ncontent\n",
+ "crlf-body.md": "# One\r\nline\r\n## Two\r\nmore\r\n",
+ "indented-fence.md": "   ```\n# masked by 3-space fence\n   ```\n# ok\n",
+ "empty-sections.md": "# A\n# B\n# C\n",
+ "fm-dash-body.md": "---\nk: v\n---\ntext\n---\nmore\n",
+}
+
+def main():
+    if not os.path.exists(VR):
+        print("SKIP: vrust binary not built"); return 0
+    tv = tempfile.mkdtemp(prefix="vv-native-")
+    fails = []
+    try:
+        for name, content in FIXTURES.items():
+            open(os.path.join(tv, name), "w", newline="").write(content)
+        env = dict(os.environ, VV_NO_METRICS="1", VV_VAULT=tv)
+        n = 0
+        for name in sorted(FIXTURES):
+            for args in (["outline", name], ["head", name], ["read", name, "H0"],
+                         ["read", name, "H1"], ["read", name, "(preamble)"],
+                         ["resolve", name[:-3]]):
+                a = subprocess.run([VR] + args, capture_output=True, env=env)
+                b = subprocess.run([sys.executable, VV] + args, capture_output=True, env=env)
+                n += 1
+                if (a.stdout, a.stderr, a.returncode) != (b.stdout, b.stderr, b.returncode):
+                    fails.append((name, args, a.returncode, b.returncode))
+        # error-path fallbacks must be python-canonical too
+        for args in (["resolve", "No Such Note Qq"], ["read", "empty.md", "H7"],
+                     ["outline", "definitely missing"]):
+            a = subprocess.run([VR] + args, capture_output=True, env=env)
+            b = subprocess.run([sys.executable, VV] + args, capture_output=True, env=env)
+            n += 1
+            if (a.stdout, a.stderr, a.returncode) != (b.stdout, b.stderr, b.returncode):
+                fails.append(("errpath", args, a.returncode, b.returncode))
+        if fails:
+            for f in fails[:8]:
+                print("FAIL", f)
+            print(f"\n{len(fails)} of {n} DIVERGED")
+            return 1
+        print(f"ALL PASS (native-readpath: {n})")
+        return 0
+    finally:
+        shutil.rmtree(tv, ignore_errors=True)
+
+if __name__ == "__main__":
+    sys.exit(main())
