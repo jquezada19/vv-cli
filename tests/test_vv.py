@@ -294,10 +294,23 @@ check("T21 missing note exit 1", run("outline", "Sandbox/vvtest/none.md").return
 check("T22 unknown cmd exit 1", run("frobnicate").returncode == 1)
 
 # --- telemetry ---
+# Hermetic: run one op with HOME pointed at a temp dir and the gate's
+# VV_NO_METRICS suppression lifted, then read the row it wrote there. The old
+# version read the developer machine's real ~/.claude/metrics/vv.jsonl, which
+# passed vacuously off historical rows and failed on any fresh machine (CI,
+# 2026-08-27) — under the gate's VV_NO_METRICS=1 it had never tested anything.
 import json
-mpath = os.path.expanduser("~/.claude/metrics/vv.jsonl")
-last = json.loads(open(mpath).readlines()[-1]) if os.path.exists(mpath) else {}
-check("T23 telemetry logged", last.get("op") in {"frobnicate", "outline", "search"} or "op" in last, last)
+with tempfile.TemporaryDirectory() as _mh:
+    os.makedirs(os.path.join(_mh, ".claude", "metrics"))  # writer is silent-if-absent by contract
+    _env = {k: v for k, v in os.environ.items() if k not in ("VV_NO_METRICS", "VV_JOURNAL_ROOT")}
+    _env["HOME"] = _mh
+    _env["VV_VAULT"] = _VAULT  # HOME override must not break default-vault resolution
+    subprocess.run([sys.executable, VV, "outline", "Sandbox/vvtest/VV Created.md"],
+                   capture_output=True, text=True, env=_env)
+    _mpath = os.path.join(_mh, ".claude", "metrics", "vv.jsonl")
+    _rows = open(_mpath).readlines() if os.path.exists(_mpath) else []
+    last = json.loads(_rows[-1]) if _rows else {}
+check("T23 telemetry logged", last.get("op") == "outline" and "ms" in last and "out_bytes" in last, last)
 
 # ================= hardening (spec promotion gate) =================
 

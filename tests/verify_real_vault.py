@@ -31,16 +31,19 @@ print(f"vault: {vv.VAULT}")
 
 # ---- 1 & 2: structure + in-process round-trip over every note ----
 def patch_result(text, s, stdin_body):
+    # Mirror cmd_patch exactly: normalize stdin the way the CLI does, then apply
+    # through the product's own splice(). This harness used to keep a third
+    # hand-rolled copy of the CRLF splice math, and it drifted (an extra \r on
+    # CRLF files whose last section reaches EOF — found by CI 2026-08-27, the
+    # real CLI was correct). Two implementations of one semantics is the repo's
+    # accepted risk; three was a bug factory. The end-to-end pass below still
+    # exercises the real CLI in subprocesses, so this stays an honest check.
     lines, secs = vv.parse(text)
     body = stdin_body.replace("\r\n", "\n")
     if body.endswith("\n"):
         body = body[:-1]
     bl = [] if (body == "" and s["end"] == s["start"]) else body.split("\n")
-    if vv.eol_of("\n".join(lines)) == "\r\n":
-        bl = [b + "\r" for b in bl]
-        if s["end"] == len(lines) and lines and not lines[-1].endswith("\r") and lines[-1] != "":
-            bl[-1] = bl[-1].rstrip("\r")
-    return "\n".join(lines[:s["start"]] + bl + lines[s["end"]:])
+    return vv.splice(lines, s["start"], s["end"], bl)
 
 bad_struct, bad_rt, unreadable, parse_err = [], [], [], []
 n_notes = n_secs = 0
