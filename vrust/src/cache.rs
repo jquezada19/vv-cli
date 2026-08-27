@@ -12,13 +12,20 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-const VERSION: &str = "2";
+const VERSION: &str = "3";
 const SLOP_NS: u128 = 2_000_000_000;
 
 pub struct FileLinks {
     pub utf8_ok: bool,
     pub links: Vec<(char, String)>,   // (kind w/m, raw target) — lossy-lexed
     sha: String,                      // content identity, computed at lex time
+}
+
+impl FileLinks {
+    /// Experiment arm C builds these from SQL rows (sha unused on that path).
+    pub fn new(utf8_ok: bool, links: Vec<(char, String)>) -> Self {
+        FileLinks { utf8_ok, links, sha: String::new() }
+    }
 }
 
 struct Row { mtime: u128, size: u64, ino: u64, sha: String }
@@ -28,6 +35,24 @@ fn cache_path(vault: &Path) -> Option<PathBuf> {
     let key = &sha256_hex(real.to_string_lossy().as_bytes())[..16];
     let home = std::env::var_os("HOME")?;
     Some(PathBuf::from(home).join(".cache/vv/index").join(format!("{}.vvidx", key)))
+}
+
+/// Integrity checksum over the cache body. Guards against a TORN WRITE, not an
+/// adversary, so it is not cryptographic — but it IS on every read, so it runs
+/// 8 bytes at a time. Byte-at-a-time FNV-1a measured 1.75 ms over this vault's
+/// 1.2 MB body; that cost is charged to every invocation, not just writes.
+fn fnv1a64(b: &[u8]) -> u64 {
+    let mut h: u64 = 0x9e3779b97f4a7c15 ^ (b.len() as u64);
+    let mut it = b.chunks_exact(8);
+    for w in &mut it {
+        let v = u64::from_le_bytes(w.try_into().unwrap());
+        h ^= v.wrapping_mul(0xff51afd7ed558ccd);
+        h = h.rotate_left(31).wrapping_mul(0xc4ceb9fe1a85ec53);
+    }
+    for &x in it.remainder() {
+        h = (h ^ x as u64).wrapping_mul(0x100000001b3);
+    }
+    h
 }
 
 fn esc(s: &str) -> String {
@@ -49,6 +74,18 @@ fn unesc(s: &str) -> String {
         } else { out.push(c); }
     }
     out
+}
+
+/// Split off and check the integrity footer; returns the body, or None if the
+/// file is truncated/torn (caller rebuilds).
+fn verify(t: &str) -> Option<usize> {
+    let end = t.rfind("\nvvidx-end\t")?;
+    let body = &t[..end + 1];
+    let f: Vec<&str> = t[end + 1..].trim_end_matches('\n').split('\t').collect();
+    if f.len() != 3 || f[0] != "vvidx-end" { return None; }
+    if f[1].parse::<usize>().ok()? != body.len() { return None; }
+    if u64::from_str_radix(f[2], 16).ok()? != fnv1a64(body.as_bytes()) { return None; }
+    Some(end + 1)   // body is t[..this]; no copy
 }
 
 fn stat_walk(vault: &Path) -> HashMap<String, (u128, u64, u64)> {
@@ -74,16 +111,43 @@ fn lex_file(vault: &Path, rp: &str) -> Option<FileLinks> {
     Some(FileLinks { utf8_ok, links: crate::graph::active_links(&text), sha })
 }
 
+/// ARM D: targeted TSV read — same needle filter sqlq pushes into SQL, done
+/// during the line scan so non-candidate L rows are never unescaped/allocated.
+/// Returns (candidates, utf8_ok map) or None (caller live-scans).
+pub fn backlink_candidates(vault: &Path, needle: &str)
+    -> Option<(Vec<(String, char, String)>, HashMap<String, bool>)> {
+    let full = links_map(vault)?;          // freshness + sync, identical rules
+    let m = std::time::Instant::now();
+    let mut u8ok = HashMap::new();
+    let mut out = Vec::new();
+    for (rp, fl) in &full {
+        u8ok.insert(rp.clone(), fl.utf8_ok);
+        for (k, t) in &fl.links {
+            if *k == 'w' && !t.to_lowercase().contains(needle) { continue; }
+            out.push((rp.clone(), *k, t.clone()));
+        }
+    }
+    if std::env::var_os("VV_PROF").is_some() {
+        eprintln!("PROF\ttsv:candidates\t{}", out.len());
+    }
+    prof("tsv:targeted", m);
+    Some((out, u8ok))
+}
+
 /// Fresh link map for the vault, or None (caller live-scans).
 pub fn links_map(vault: &Path) -> Option<HashMap<String, FileLinks>> {
+    let mut __m = std::time::Instant::now();
     let cp = cache_path(vault)?;
     let disk = stat_walk(vault);
+    prof("stat_walk", __m); __m = std::time::Instant::now();
     let mut rows: HashMap<String, Row> = HashMap::new();
     let mut links: HashMap<String, FileLinks> = HashMap::new();
     let mut stamp: u128 = 0;
-    if let Ok(t) = fs::read_to_string(&cp) {
+    if let Some((t, blen)) = fs::read_to_string(&cp).ok()
+            .and_then(|t| { let b = verify(&t)?; Some((t, b)) }) {
+        prof("cache_read", __m); __m = std::time::Instant::now();
         let mut ok = false;
-        for (i, line) in t.lines().enumerate() {
+        for (i, line) in t[..blen].lines().enumerate() {
             let f: Vec<&str> = line.split('\t').collect();
             if i == 0 {
                 if f.len() == 3 && f[0] == "vvidx" && f[1] == VERSION {
@@ -114,6 +178,7 @@ pub fn links_map(vault: &Path) -> Option<HashMap<String, FileLinks>> {
     } else {
         return rebuild(vault, &cp, &disk);
     }
+    prof("tsv_parse", __m); __m = std::time::Instant::now();
     // diff: equality on the triple; racily-clean re-hash near the stamp
     let mut changed: Vec<String> = Vec::new();
     for (rp, st) in &disk {
@@ -130,7 +195,9 @@ pub fn links_map(vault: &Path) -> Option<HashMap<String, FileLinks>> {
         }
     }
     let gone: Vec<String> = rows.keys().filter(|k| !disk.contains_key(*k)).cloned().collect();
+    prof("diff", __m); __m = std::time::Instant::now();
     if changed.is_empty() && gone.is_empty() {
+        prof("nchanged=0", __m);
         return Some(links);
     }
     for rp in &gone { links.remove(rp); rows.remove(rp); }
@@ -138,7 +205,12 @@ pub fn links_map(vault: &Path) -> Option<HashMap<String, FileLinks>> {
         let fl = lex_file(vault, rp)?;
         links.insert(rp.clone(), fl);
     }
+    if std::env::var_os("VV_PROF").is_some() {
+        eprintln!("PROF\tnchanged\t{}", changed.len());
+    }
+    prof("lex_changed", __m); __m = std::time::Instant::now();
     write_cache(&cp, &disk, &links, vault)?;
+    prof("cache_write", __m);
     Some(links)
 }
 
@@ -154,25 +226,51 @@ fn rebuild(vault: &Path, cp: &Path, disk: &HashMap<String, (u128, u64, u64)>)
 
 fn write_cache(cp: &Path, disk: &HashMap<String, (u128, u64, u64)>,
                links: &HashMap<String, FileLinks>, _vault: &Path) -> Option<()> {
+    let __w = std::time::Instant::now();
     fs::create_dir_all(cp.parent()?).ok()?;
     let now: u128 = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH).ok()?.as_nanos();
-    let mut buf = format!("vvidx\t{}\t{}\n", VERSION, now);
+    use std::fmt::Write as _;
+    let mut buf = String::with_capacity(1 << 21);
+    let _ = write!(buf, "vvidx\t{}\t{}\n", VERSION, now);
     let mut rps: Vec<&String> = links.keys().collect();
     rps.sort();
     for rp in rps {
         let fl = &links[rp];
         let (mt, sz, ino) = *disk.get(rp)?;
-        buf.push_str(&format!("F\t{}\t{}\t{}\t{}\t{}\t{}\n",
-            esc(rp), mt, sz, ino, fl.sha, if fl.utf8_ok { "1" } else { "0" }));
+        let e_rp = esc(rp);
+        let _ = write!(buf, "F\t{}\t{}\t{}\t{}\t{}\t{}\n",
+            e_rp, mt, sz, ino, fl.sha, if fl.utf8_ok { "1" } else { "0" });
         for (k, t) in &fl.links {
-            buf.push_str(&format!("L\t{}\t{}\t{}\n", esc(rp), k, esc(t)));
+            let _ = write!(buf, "L\t{}\t{}\t{}\n", e_rp, k, esc(t));
         }
     }
+    prof("  w:format", __w); let __w2 = std::time::Instant::now();
+    // Integrity footer. Without it a crash can leave a RECORD-ALIGNED PREFIX:
+    // valid header, every surviving row well-formed, and an F row whose own
+    // trailing L rows were lost. That file passes the per-file (mtime,size,ino)
+    // check — so it is never re-lexed — and silently serves missing links.
+    // Demonstrated 2026-08-27 (a dropped backlink python still found), which is
+    // why the fsync below could only be removed once this footer existed.
+    let body_len = buf.len();
+    let h = fnv1a64(buf.as_bytes());
+    let _ = write!(buf, "vvidx-end\t{}\t{:016x}\n", body_len, h);
+
     let tmp = cp.with_extension("vvidx.tmp");
     let mut f = fs::File::create(&tmp).ok()?;
     f.write_all(buf.as_bytes()).ok()?;
-    f.sync_all().ok();
+    prof("  w:write", __w2); let __w3 = std::time::Instant::now();
+    // no fsync: disposable, delete-don't-repair cache; rename() is atomic
+    if std::env::var_os("VV_FSYNC").is_some() { f.sync_all().ok(); }
+    prof("  w:fsync", __w3); let __w4 = std::time::Instant::now();
     fs::rename(&tmp, cp).ok()?;
+    prof("  w:rename", __w4);
     Some(())
+}
+
+// --- experiment-only instrumentation (VV_PROF=1 -> stderr phase timings) ---
+pub fn prof(label: &str, t: std::time::Instant) {
+    if std::env::var_os("VV_PROF").is_some() {
+        eprintln!("PROF\t{}\t{:.3}", label, t.elapsed().as_secs_f64() * 1000.0);
+    }
 }
