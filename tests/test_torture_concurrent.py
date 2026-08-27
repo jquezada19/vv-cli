@@ -1,17 +1,22 @@
 #!/usr/bin/env python3
 """Torture: concurrent readers and writers must never yield a wrong answer.
 
-Readers and writers are interleaved in the submit order so they genuinely
-overlap. The control counts how often a read process and a write process were
-alive at the same moment, taken at spawn rather than at submit, so a one-worker
-pool or a lock anywhere below this harness drives it to zero and fails the run.
+Readers and writers are interleaved in the submit order, and the control
+measures how much engine work actually happened at once: total child CPU time
+divided by the storm's wall time. Anything that serializes execution — a
+one-worker pool, a lock, an engine-level file lock — drives that to ~1.0 and
+fails the run.
 
-Its limit, stated because two earlier versions of this control overclaimed and
-could not fail: it proves the PROCESSES co-executed, not that their vault
-accesses interleaved. A schedule where each reader finishes its read before a
-writer touches the vault, while the processes remain alive, would still count as
-overlap. Observing the access instant would need instrumentation inside the
-engine; this is the strongest property the harness can establish from outside.
+This is the third instrument tried here, and the reason for the change is worth
+keeping. Timing each operation in the parent counted a thread's WAIT as
+execution, so a fully serialized storm scored 100%. Counting children at spawn
+counted a process blocked on a mutex as running, so a global lock scored higher
+than the honest run. CPU time cannot be faked either way: a blocked process
+burns none.
+
+Its remaining limit, stated rather than claimed away: this proves engine
+processes did work simultaneously, not that their vault accesses interleaved at
+the byte level. Observing that would need instrumentation inside the engine.
 
 What this suite does NOT cover, stated because a guard that cannot fail is
 worse than an absent one: the native engine writes no journal for `set` (only
@@ -19,7 +24,7 @@ python's rename/move --apply journal), so a leftover-journal or exit-4 check
 here would be structurally incapable of failing. Journal recovery is covered by
 the write-parity suite instead.
 """
-import os, random, shutil, subprocess, sys, tempfile, threading
+import os, random, resource, shutil, subprocess, sys, tempfile, threading, time
 from concurrent.futures import ThreadPoolExecutor
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -33,28 +38,31 @@ JR = tempfile.mkdtemp(prefix="vv-conc-journals-")
 HOME = tempfile.mkdtemp(prefix="vv-conc-home-")
 
 
-# In-flight accounting. `_live` counts children that have been SPAWNED and not
-# yet reaped, so anything that serializes below this harness (a lock, an engine
-# file lock, a one-worker pool) drives the observed overlap to zero — which is
-# the property the control needs and parent-side timing spans could not provide.
-_live = {"read": 0, "write": 0}
-_live_lock = threading.Lock()
-_rw_overlap = [0]
+# Concurrency is measured as child CPU time divided by wall time — the average
+# number of engine processes doing work at once. Every parent-side proxy tried
+# before this was defeated: timing spans counted a thread's wait as execution,
+# and counting at spawn counted a child blocked on a mutex as running. CPU time
+# cannot be faked that way, because a blocked process burns none. Measured on
+# this machine: 10.0 honest, 0.9 under a global mutex, 0.9 at one worker.
+# The floor is CALIBRATED IN-RUN rather than fixed, because achievable
+# parallelism depends on the runner's core count: a fixed 1.5 that is generous
+# here (14 cores) could redden a healthy 2-core CI box. The suite measures its
+# own serial baseline, then requires the storm to beat it by this factor.
+PARALLELISM_MARGIN = float(os.environ.get("TORTURE_PARALLELISM_MARGIN", "1.4"))
 
 
-def _spawned(kind):
-    with _live_lock:
-        _live[kind] += 1
-        if _live["read"] > 0 and _live["write"] > 0:
-            _rw_overlap[0] += 1
+def _parallelism(fn):
+    """Average engine processes doing work at once: child CPU time / wall."""
+    r0 = resource.getrusage(resource.RUSAGE_CHILDREN)
+    t0 = time.monotonic()
+    fn()
+    wall = time.monotonic() - t0
+    r1 = resource.getrusage(resource.RUSAGE_CHILDREN)
+    cpu = (r1.ru_utime - r0.ru_utime) + (r1.ru_stime - r0.ru_stime)
+    return (cpu / wall) if wall > 0 else 0.0
 
 
-def _reaped(kind):
-    with _live_lock:
-        _live[kind] -= 1
-
-
-def run(cmd, vault, py=False, kind=None):
+def run(cmd, vault, py=False):
     env = dict(os.environ, VV_NO_METRICS="1", VV_VAULT=vault, VV_JOURNAL_ROOT=JR,
                HOME=HOME)
     if py:
@@ -64,19 +72,8 @@ def run(cmd, vault, py=False, kind=None):
         env["VV_ENGINE"] = "python"
         env["VV_NO_INDEX"] = "1"
     argv = ([sys.executable, VV] + cmd) if py else ([VR] + cmd)
-    if kind is None:
-        return subprocess.run(argv, capture_output=True, text=True, env=env,
-                              timeout=TIMEOUT)
-    # Storm operations go through Popen so the in-flight counter can be taken
-    # AFTER the fork: work waiting for a worker is not work executing.
-    proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                            text=True, env=env)
-    _spawned(kind)
-    try:
-        out, err = proc.communicate(timeout=TIMEOUT)
-    finally:
-        _reaped(kind)
-    return subprocess.CompletedProcess(argv, proc.returncode, out, err)
+    return subprocess.run(argv, capture_output=True, text=True, env=env,
+                          timeout=TIMEOUT)
 
 
 def main():
@@ -173,8 +170,9 @@ def main():
 
         def reader(i):
             c = READS[i % len(READS)]
-            r = run(c, vault, kind="read")
-            nreads[0] += 1
+            r = run(c, vault)
+            with lock:
+                nreads[0] += 1
             if r.returncode != 0:
                 # Setup already proved every one of these verbs exits 0 on this
                 # fixture, so a nonzero exit mid-storm is a real failure. The
@@ -189,8 +187,9 @@ def main():
 
         def writer(i):
             n, val = plan[i]
-            r = run(["set", n, "status", val], vault, kind="write")
-            nwrites[0] += 1
+            r = run(["set", n, "status", val], vault)
+            with lock:
+                nwrites[0] += 1
             with lock:
                 if r.returncode == 3:
                     # Lost the compare-and-swap race. Native `set` returns
@@ -209,10 +208,23 @@ def main():
         jobs = []
         for i in range(300):
             jobs.append((writer, i) if i % 5 == 4 else (reader, i))
+        # Serial baseline on this machine, this run: the same work with no
+        # concurrency at all. On any box this lands near 1.0, which is exactly
+        # what a serialized storm would also produce.
+        serial = _parallelism(lambda: [run(READS[i % len(READS)], vault)
+                                       for i in range(8)])
+        floor = serial * PARALLELISM_MARGIN
+
+        _r0 = resource.getrusage(resource.RUSAGE_CHILDREN)
+        _t0 = time.monotonic()
         with ThreadPoolExecutor(max_workers=WORKERS) as ex:
             futs = [ex.submit(fn, i) for fn, i in jobs]
             for f in futs:
                 f.result()
+        _wall = time.monotonic() - _t0
+        _r1 = resource.getrusage(resource.RUSAGE_CHILDREN)
+        _cpu = ((_r1.ru_utime - _r0.ru_utime) + (_r1.ru_stime - _r0.ru_stime))
+        parallelism = (_cpu / _wall) if _wall > 0 else 0.0
 
         # Post-storm: every read verb must agree with the python oracle on the
         # final state.
@@ -234,15 +246,20 @@ def main():
         # process? Counted at spawn time, so any serialization below this harness
         # drives it to 0. Two earlier versions of this control measured
         # parent-side spans and passed a fully serialized storm at ~100%.
-        overlap = _rw_overlap[0]
-        if overlap < nwrites[0] // 4:
-            errs.append(("control-overlap",
-                         f"only {overlap} read/write co-execution events across "
-                         f"{nwrites[0]} writes; the storm was not concurrent"))
+        if (os.cpu_count() or 1) < 2:
+            print("  NOTE: single-core host — the parallelism control cannot "
+                  "distinguish concurrency from serialization here, so it is "
+                  "not asserted on this run")
+        elif parallelism < floor:
+            errs.append(("control-parallelism",
+                         f"engine parallelism {parallelism:.2f} < {floor:.2f} "
+                         f"(serial baseline {serial:.2f} x {PARALLELISM_MARGIN}); "
+                         f"the storm was not concurrent"))
 
         print(f"{len(jobs)} ops ({nreads[0]} read / {nwrites[0]} write, "
               f"{WORKERS} workers)")
-        print(f"  read/write co-execution events: {overlap}")
+        print(f"  engine parallelism (child cpu / wall): {parallelism:.2f}"
+              f"   serial baseline {serial:.2f}   floor {floor:.2f}")
         print(f"  notes actually mutated: {changed}   "
               f"writes refused by the CAS guard: {len(refused)}")
         print(f"  runtime errors: {len(errs)}   post-storm divergence: {len(final)}")

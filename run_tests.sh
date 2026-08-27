@@ -12,6 +12,15 @@ cd "$(dirname "$0")"
 # child process, including any suite added later.
 export VV_NO_METRICS=1
 
+# src/vv_impl.py uses PEP 701 multi-line f-string expressions (3.12+). On an
+# older interpreter the python oracle dies at import, and the differential
+# suites then report a cache or engine defect for what is an interpreter
+# problem — so say it once, here, instead.
+if ! python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 12) else 1)'; then
+  echo "  FAIL python3 is $(python3 -c 'import sys; print(".".join(map(str, sys.version_info[:3])))') — this project needs 3.12+"
+  exit 1
+fi
+
 fail=0
 run() {  # run <label> <cmd...>
   local label="$1"; shift
