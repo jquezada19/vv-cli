@@ -105,7 +105,7 @@ def main():
             fails.append(("version-cargo-skew", ver, "not in vrust/Cargo.toml"))
         # bare invocation: SAME terse usage from both entries — stderr, exit 1,
         # ONE line (an accidental no-args in an agent loop must not cost the
-        # full help catalog; review consensus 2026-08-27).
+        # full help catalog).
         for label, cmd in (("rust", [VR]), ("python", [sys.executable, VV])):
             r = subprocess.run(cmd, capture_output=True, text=True, env=env)
             n += 1
