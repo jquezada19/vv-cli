@@ -50,6 +50,7 @@ run "full parity"         python3 tests/test_full_parity.py
 run "phase2 cache+patch"  python3 tests/test_phase2.py
 run "cache integrity"     python3 tests/test_cache_integrity.py
 run "link needle filter"  python3 tests/test_link_needle.py
+run "search entry points"  python3 tests/test_search_entry.py
 
 echo "property/fuzz:"
 for s in ${SEEDS:-999 42 31337}; do

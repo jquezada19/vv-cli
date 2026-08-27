@@ -145,8 +145,15 @@ check("synthetic: rust == EXPECTED", r == EXPECTED,
       f"only-rust={sorted(r - EXPECTED)[:4]} only-expected={sorted(EXPECTED - r)[:4]}")
 check("synthetic: rust == python", r == p, f"only-rust={sorted(r - p)[:4]} only-python={sorted(p - r)[:4]}")
 
-# ---- search parity: same query -> same paths AND scores in both engines ----
-# (snippets may differ at multi-byte boundaries; ranking must not)
+# ---- search parity: same query -> BYTE-IDENTICAL output in both engines ----
+# This used to compare only the "==" path+score headers, waiving snippets as
+# "may differ at multi-byte boundaries". Measured 2026-08-27, that waiver was
+# hiding a systematic bug rather than an edge case: `w` is a width in CHARACTERS
+# (python slices a char-indexed str) but the rust engine sliced BYTES, so every
+# snippet containing multi-byte UTF-8 came back short by one char per extra
+# byte — 16 of 18 real vault query terms diverged. The corpus below is now
+# deliberately full of em dashes, arrows and accents so byte/char slicing cannot
+# agree by accident, and the whole stdout is compared.
 SEARCH_CORPUS = {
     "Alpha.md": "beta beta beta beta beta beta beta beta\n",   # many mentions
     "beta.md": "unrelated body\n",                              # named match
@@ -163,9 +170,34 @@ def search_lines(vault, engine, *q):
     rr = subprocess.run([sys.executable, os.path.join(REPO, "src", "vv.py"), "search", *q],
                         capture_output=True, text=True, env=env)
     return [l.strip() for l in rr.stdout.split("\n") if l.startswith("==")]
+def search_full(vault, engine, *q):
+    env = dict(os.environ, VV_VAULT=vault, VV_ENGINE=engine)
+    rr = subprocess.run([sys.executable, os.path.join(REPO, "src", "vv.py"), "search", *q],
+                        capture_output=True, text=True, env=env)
+    return rr.returncode, rr.stdout, rr.stderr
 rs = search_lines(tmp2, "rust", "beta")
 ps = search_lines(tmp2, "python", "beta")
 check("search: rust == python (paths+scores)", rs == ps and len(rs) == 4, f"rust={rs} py={ps}")
+# the snippet BODY, not just the ranking — this is what the old waiver hid.
+# Its own corpus: deliberately multi-byte, so byte-slicing and char-slicing
+# cannot agree by accident, and separate from the ranking fixture above.
+tmp3 = tempfile.mkdtemp(prefix="vv-parity-utf8-")
+os.makedirs(os.path.join(tmp3, "sub"))
+UTF8_CORPUS = {
+    "utf8.md": ("beta \u2014 em dashes \u2014 arrows \u2192 \u2192 caf\u00e9 na\u00efve "
+                + "padding \u2014 \u00e9\u00e9\u00e9 \u2192 " * 40 + "\n"),
+    "sub/utf8 beta.md": ("\u00a1Hola! beta \u2014 \u00fcber \u2192 "
+                         + "\u00e9m dash \u2014 " * 60 + "\n"),
+    "plain.md": "beta with pure ascii padding " * 30 + "\n",
+}
+for name, body in UTF8_CORPUS.items():
+    with open(os.path.join(tmp3, name), "w") as f:
+        f.write(body)
+for _w in ("500", "80", "37", "12"):
+    fr = search_full(tmp3, "rust", "beta", "--w", _w)
+    fp = search_full(tmp3, "python", "beta", "--w", _w)
+    check(f"search: rust == python BYTE-identical incl. snippets (--w {_w})", fr == fp,
+          f"rust={fr[1][:160]!r} py={fp[1][:160]!r}")
 check("search: name matches outrank mention count",
       len(rs) == 4 and "sub/beta notes.md" in rs[0] and rs[1].startswith("== beta.md")
       and "Alpha.md" in rs[2], rs)

@@ -72,15 +72,20 @@ fn score_one(fp: &std::path::PathBuf, root: &std::path::PathBuf,
             }
         }
     }
-    let start = first_pos.map_or(0, |p| p.saturating_sub(w / 4));
-    let start = (0..=start).rev().find(|i| text.is_char_boundary(*i)).unwrap_or(0);
-    let end = (start + w).min(text.len());
-    let end = (end..text.len().max(end)).find(|i| text.is_char_boundary(*i)).unwrap_or(text.len());
-    let snip = text[start..end].replace('\n', " ¶ ");
+    // `w` is a width in CHARACTERS, not bytes — python slices `text[start:start+w]`
+    // on a char-indexed str. Byte slicing here made every snippet containing
+    // multi-byte UTF-8 (em dashes, arrows, curly quotes — ubiquitous in the
+    // vault) short by one char per extra byte: 16 of 18 real query terms
+    // diverged from python, and the engine-parity suite never saw it because it
+    // compares only the `==` path+score headers, never the snippet body.
+    // `low.find` returns a BYTE offset, so convert it to a char index first.
+    let start = first_pos.map_or(0, |bp| low[..bp].chars().count().saturating_sub(w / 4));
+    let snip: String = text.chars().skip(start).take(w).collect::<String>()
+        .replace('\n', " ¶ ");
     Some((score, rel, snip))
 }
 
-fn cmd_search(args: &[String]) {
+fn cmd_search(args: &[String], orig: &[String]) -> ! {
     let mut k = 5usize;
     let mut w = 500usize;
     let mut terms: Vec<String> = Vec::new();
@@ -132,11 +137,30 @@ fn cmd_search(args: &[String]) {
     });
     #[allow(unreachable_code)]
     hits.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.len().cmp(&b.1.len())).then(a.1.cmp(&b.1)));
+    // Zero hits is python's to answer, not ours. python emits a phrase hint
+    // ("matched as ONE phrase ... retry unquoted") that this engine does not
+    // implement; printing a bare "(0 of 0 matches)" here silently un-ships that
+    // hint on the default entry and reinstates the quoted-phrase SILENCE the
+    // hint was added to fix. Nothing has been printed yet, so handing off is
+    // clean. Caught 2026-08-27 by replaying real sessions through both engines.
+    // Zero hits: only hand off when THIS binary is the top-level entry. When
+    // python invoked us (VV_FROM_PY) it adds the hint itself, and handing off
+    // would print it twice.
+    //
+    // Recursion is bounded by that same flag, not by forcing python's slow
+    // in-process scanner: python re-invokes this binary WITH VV_FROM_PY set, so
+    // the inner call returns normally instead of handing off again. Forcing
+    // VV_ENGINE=python here also terminated, but made a zero-hit search 360 ms
+    // (vs 36 ms for a hit) by rescanning with the pure python scanner.
+    if hits.is_empty() && std::env::var_os("VV_FROM_PY").is_none() {
+        exec_python(orig);
+    }
     let shown = hits.len().min(k);
     for (score, rel, snip) in hits.iter().take(k) {
         println!("== {} (score {})\n{}\n", rel, score, snip);
     }
     println!("({} of {} matches)", shown, hits.len());
+    exit(0);
 }
 
 
@@ -417,7 +441,7 @@ fn main() {
         }
     }
     match args.first().map(String::as_str) {
-        Some("search") => cmd_search(&args[1..]),
+        Some("search") => cmd_search(&args[1..], &orig),
         Some("linkscan") => cmd_linkscan(&args[1..]),
         Some(_) => exec_python(&orig),   // every other vv command is python's
         None => {
