@@ -248,10 +248,8 @@ fn is_balanced_flow(v: &str) -> bool {
                     return false;
                 }
             }
-            '}' => {
-                if stack.pop() != Some('{') {
-                    return false;
-                }
+            '}' if stack.pop() != Some('{') => {
+                return false;
             }
             _ => {}
         }
@@ -310,7 +308,7 @@ fn yaml_scalar(v: &str) -> String {
 fn splice(lines: &[&str], start: usize, end: usize, new_lines: &[String]) -> String {
     let full_text = lines.join("\n");
     let crlf = eol_of(&full_text) == "\r\n";
-    let ended_with_newline = !lines.is_empty() && *lines.last().unwrap() == "";
+    let ended_with_newline = !lines.is_empty() && lines.last().unwrap().is_empty();
     let mut body: Vec<String> = new_lines
         .iter()
         .map(|b| b.trim_end_matches('\r').to_string())
@@ -562,7 +560,7 @@ fn cmd_appendsec(vault: &Path, args: &[String]) -> Outcome {
     while ins > s.start && lines[ins - 1].trim().is_empty() {
         ins -= 1;
     }
-    let new_content = splice(&lines, ins, ins, &[text_arg.clone()]);
+    let new_content = splice(&lines, ins, ins, std::slice::from_ref(text_arg));
     if !atomic_write(&fp, &new_content, Some(sig)) {
         return Outcome::Fallback;
     }

@@ -239,7 +239,7 @@ impl OrderedCounter {
             .cloned()
             .zip(self.counts.iter().cloned())
             .collect();
-        items.sort_by(|a, b| b.1.cmp(&a.1));
+        items.sort_by_key(|a| std::cmp::Reverse(a.1));
         match limit {
             Some(n) => items.into_iter().take(n).collect(),
             None => items,
@@ -405,7 +405,7 @@ fn cmd_show(args: &[String], vault: &Path, t0: Instant) -> Outcome {
             continue;
         }
         let t = readpath::sec_text(&lines, s);
-        let tb = t.as_bytes().len() as i64;
+        let tb = t.len() as i64;
         if tb == 0 {
             continue; // empty preamble section still cost a newline (skip)
         }
@@ -415,7 +415,7 @@ fn cmd_show(args: &[String], vault: &Path, t0: Instant) -> Outcome {
                     "[more: {} '{}' {}B — continue: vv show {} --from {}]",
                     s.id, s.title, tb, ref_, s.id
                 );
-                if used + more.as_bytes().len() as i64 + 1 > max_bytes {
+                if used + more.len() as i64 + 1 > max_bytes {
                     more = "[more]".to_string();
                 }
                 out_buf.push_str(&more);
@@ -426,10 +426,10 @@ fn cmd_show(args: &[String], vault: &Path, t0: Instant) -> Outcome {
                 "[truncated: {} '{}' is {}B of a {}B budget — read it whole with: vv read {} {}]",
                 s.id, s.title, tb, max_bytes, ref_, s.id
             );
-            let mut room = max_bytes - used - marker.as_bytes().len() as i64 - 2;
+            let mut room = max_bytes - used - marker.len() as i64 - 2;
             if room <= 0 {
                 marker = "[truncated]".to_string();
-                room = max_bytes - used - marker.as_bytes().len() as i64 - 2;
+                room = max_bytes - used - marker.len() as i64 - 2;
             }
             if room > 0 {
                 let tbytes = t.as_bytes();
@@ -443,7 +443,6 @@ fn cmd_show(args: &[String], vault: &Path, t0: Instant) -> Outcome {
             }
             out_buf.push_str(&marker);
             out_buf.push('\n');
-            used = max_bytes;
             break;
         }
         out_buf.push_str(&t);

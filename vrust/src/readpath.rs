@@ -187,7 +187,7 @@ pub fn heading(l: &str) -> Option<(usize, &str)> {
     }
 }
 
-pub fn parse<'a>(text: &'a str) -> (Vec<&'a str>, Vec<Sec>) {
+pub fn parse(text: &str) -> (Vec<&str>, Vec<Sec>) {
     let lines: Vec<&str> = text.split('\n').collect();
     let fm_end = fm_bounds(&lines);
     let mut fenced = fence_mask(&lines, fm_end);
@@ -346,7 +346,7 @@ pub fn log_metrics(op: &str, t0: std::time::Instant, out_bytes: usize, cf: u64) 
 
 pub fn emit(buf: &str) -> usize {
     print!("{}", buf);
-    buf.as_bytes().len()
+    buf.len()
 }
 
 pub fn run(cmd: &str, args: &[String], vault: &Path) -> Outcome {

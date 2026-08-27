@@ -21,17 +21,6 @@ pub struct FileLinks {
     sha: String,                    // content identity, computed at lex time
 }
 
-impl FileLinks {
-    /// Experiment arm C builds these from SQL rows (sha unused on that path).
-    pub fn new(utf8_ok: bool, links: Vec<(char, String)>) -> Self {
-        FileLinks {
-            utf8_ok,
-            links,
-            sha: String::new(),
-        }
-    }
-}
-
 struct Row {
     mtime: u128,
     size: u64,
@@ -56,13 +45,13 @@ fn cache_path(vault: &Path) -> Option<PathBuf> {
 /// 1.2 MB body; that cost is charged to every invocation, not just writes.
 fn fnv1a64(b: &[u8]) -> u64 {
     let mut h: u64 = 0x9e3779b97f4a7c15 ^ (b.len() as u64);
-    let mut it = b.chunks_exact(8);
-    for w in &mut it {
-        let v = u64::from_le_bytes(w.try_into().unwrap());
+    let (chunks, rest) = b.as_chunks::<8>();
+    for w in chunks {
+        let v = u64::from_le_bytes(*w);
         h ^= v.wrapping_mul(0xff51afd7ed558ccd);
         h = h.rotate_left(31).wrapping_mul(0xc4ceb9fe1a85ec53);
     }
-    for &x in it.remainder() {
+    for &x in rest {
         h = (h ^ x as u64).wrapping_mul(0x100000001b3);
     }
     h
@@ -144,33 +133,6 @@ fn lex_file(vault: &Path, rp: &str) -> Option<FileLinks> {
         links: crate::graph::active_links(&text),
         sha,
     })
-}
-
-/// ARM D: targeted TSV read — same needle filter sqlq pushes into SQL, done
-/// during the line scan so non-candidate L rows are never unescaped/allocated.
-/// Returns (candidates, utf8_ok map) or None (caller live-scans).
-pub fn backlink_candidates(
-    vault: &Path,
-    needle: &str,
-) -> Option<(Vec<(String, char, String)>, HashMap<String, bool>)> {
-    let full = links_map(vault)?; // freshness + sync, identical rules
-    let m = std::time::Instant::now();
-    let mut u8ok = HashMap::new();
-    let mut out = Vec::new();
-    for (rp, fl) in &full {
-        u8ok.insert(rp.clone(), fl.utf8_ok);
-        for (k, t) in &fl.links {
-            if *k == 'w' && !t.to_lowercase().contains(needle) {
-                continue;
-            }
-            out.push((rp.clone(), *k, t.clone()));
-        }
-    }
-    if std::env::var_os("VV_PROF").is_some() {
-        eprintln!("PROF\ttsv:candidates\t{}", out.len());
-    }
-    prof("tsv:targeted", m);
-    Some((out, u8ok))
 }
 
 /// Fresh link map for the vault, or None (caller live-scans).
@@ -307,16 +269,16 @@ fn write_cache(
         .as_nanos();
     use std::fmt::Write as _;
     let mut buf = String::with_capacity(1 << 21);
-    let _ = write!(buf, "vvidx\t{}\t{}\n", VERSION, now);
+    let _ = writeln!(buf, "vvidx\t{}\t{}", VERSION, now);
     let mut rps: Vec<&String> = links.keys().collect();
     rps.sort();
     for rp in rps {
         let fl = &links[rp];
         let (mt, sz, ino) = *disk.get(rp)?;
         let e_rp = esc(rp);
-        let _ = write!(
+        let _ = writeln!(
             buf,
-            "F\t{}\t{}\t{}\t{}\t{}\t{}\n",
+            "F\t{}\t{}\t{}\t{}\t{}\t{}",
             e_rp,
             mt,
             sz,
@@ -325,7 +287,7 @@ fn write_cache(
             if fl.utf8_ok { "1" } else { "0" }
         );
         for (k, t) in &fl.links {
-            let _ = write!(buf, "L\t{}\t{}\t{}\n", e_rp, k, esc(t));
+            let _ = writeln!(buf, "L\t{}\t{}\t{}", e_rp, k, esc(t));
         }
     }
     prof("  w:format", __w);
@@ -338,7 +300,7 @@ fn write_cache(
     // why the fsync below could only be removed once this footer existed.
     let body_len = buf.len();
     let h = fnv1a64(buf.as_bytes());
-    let _ = write!(buf, "vvidx-end\t{}\t{:016x}\n", body_len, h);
+    let _ = writeln!(buf, "vvidx-end\t{}\t{:016x}", body_len, h);
 
     let tmp = cp.with_extension("vvidx.tmp");
     let mut f = fs::File::create(&tmp).ok()?;

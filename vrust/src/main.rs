@@ -1,4 +1,16 @@
 #![forbid(unsafe_code)]
+// Style lints allowed deliberately, not from neglect (each -D-enforced otherwise):
+// - needless_range_loop: the lexers walk parallel byte/mask arrays by index on
+//   purpose; rewriting verified loops into iterator chains to please a style
+//   lint risks parity drift in a differential-tested engine for zero payoff.
+// - type_complexity / too_many_args: the cache and link-resolution signatures
+//   mirror the Python implementation's shapes; a type alias would rename the
+//   complexity, not remove it.
+#![allow(
+    clippy::needless_range_loop,
+    clippy::type_complexity,
+    clippy::too_many_arguments
+)]
 // vrust — PROTOTYPE: Rust vault search/outline, std-only (no crates).
 // Mirrors vnote2.py semantics for an apples-to-apples benchmark:
 //   vrust search <terms...> [--k N] [--w CHARS]
@@ -385,11 +397,7 @@ fn cmd_linkscan(args: &[String]) {
                         (j + 2..b.len().saturating_sub(1)).find(|&k| b[k] == ']' && b[k + 1] == ']')
                     {
                         let inner: String = b[j + 2..end].iter().collect();
-                        let seg = inner
-                            .split(|c| c == '|' || c == '#')
-                            .next()
-                            .unwrap_or("")
-                            .trim();
+                        let seg = inner.split(['|', '#']).next().unwrap_or("").trim();
                         // exactly ONE trailing backslash is consumed at a boundary:
                         // [[Note\|alias]] escapes the alias pipe, [[Note\]] resolves to
                         // Note; a second backslash stays in the target and resolves to
@@ -406,7 +414,7 @@ fn cmd_linkscan(args: &[String]) {
                             && !target.contains('\u{0}')
                             && needle
                                 .as_ref()
-                                .map_or(true, |n| target.to_lowercase().contains(n.as_str()))
+                                .is_none_or(|n| target.to_lowercase().contains(n.as_str()))
                         {
                             buf.push_str(&format!("{}\t{}\tw\t{}\n", rel, i + 1, target));
                         }
