@@ -19,8 +19,12 @@ Stress replay:
 A write that legitimately refuses (exit 3 stale hash, exit 1 not-found because
 the note was since renamed) is reported apart from one that CRASHES.
 """
-import argparse, collections, glob, json, os, re, shlex, shutil, statistics
+import argparse, collections, glob, json, os, re, shutil, statistics
 import subprocess, sys, tempfile, time
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import sweepguard as sg
+import vvops
 
 PROJ = os.path.expanduser("~/.claude/projects/-Users-jxq-Documents-Obsidian-Vault")
 VAULT = os.path.expanduser("~/Documents/Obsidian Vault")
@@ -28,10 +32,8 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PYENTRY = [sys.executable, os.path.join(REPO, "src/vv.py")]
 NATIVE = [os.path.join(REPO, "vrust/target/release/vrust")]
 
-READ_VERBS = {"read", "outline", "show", "head", "resolve", "search", "backlinks",
-              "links", "orphans", "deadends", "board", "props", "tags", "impact"}
-WRITE_VERBS = {"set", "unset", "append", "appendsec", "patch", "daily-append",
-               "rename", "move", "new"}
+READ_VERBS, WRITE_VERBS = vvops.READ_VERBS, vvops.WRITE_VERBS
+
 
 def walk(o):
     if isinstance(o, dict):
@@ -40,26 +42,15 @@ def walk(o):
     elif isinstance(o, list):
         for v in o: yield from walk(v)
 
-VV_RE = re.compile(r"(?:vv\.py[\"']?|(?<![\w./-])vv)\s+((?:--vault\s+\S+\s+)?)([a-z][a-z-]*)")
-
-def argv_after(cmd, mstart):
-    """Recover the vv argv, stopping at shell operators and dropping --vault."""
-    tail = cmd[mstart:].split("\n")[0]
-    tail = re.sub(r"\s\d?>>?\s*\S+", " ", tail)          # drop redirections first
-    tail = re.split(r"\s(?:;|&&|\|\||\||#)\s", tail)[0].strip()
-    try: argv = shlex.split(tail)
-    except ValueError: return None
-    out, skip = [], False
-    for a in argv:
-        if skip: skip = False; continue
-        if a == "--vault": skip = True; continue
-        if a in (">", ">>", ";", "&&", "|"): continue
-        out.append(a.rstrip(";"))
-    return out or None
 
 def extract(n_sessions):
+    vvops.self_test()                       # canary before any real data
     files = sorted(glob.glob(os.path.join(PROJ, "*.jsonl")),
                    key=os.path.getmtime, reverse=True)[:n_sessions]
+    sg.preflight_corpus("session_ledger.transcripts", files)
+    funnel = sg.Funnel("ledger", "files", "tool_uses", "vv_ops")
+    rej = sg.RejectLog("ledger-extract")
+    baseline = 0
     ops, per_session, synthetic = [], collections.Counter(), set()
     for f in files:
         sid = os.path.basename(f)[:-6]
@@ -71,23 +62,28 @@ def extract(n_sessions):
             except json.JSONDecodeError: continue
             for d in walk(rec):
                 if not isinstance(d, dict) or d.get("type") != "tool_use": continue
+                funnel.bump("tool_uses")
                 inp = d.get("input") or {}
                 if d.get("name") != "Bash" or not isinstance(inp, dict): continue
                 cmd = inp.get("command") or ""
                 if not isinstance(cmd, str) or "vv" not in cmd: continue
                 if re.search(r"<<'?\w*EOF", cmd): continue      # heredoc that merely mentions vv
-                for m in VV_RE.finditer(cmd):
-                    verb = m.group(2)
-                    cls = "read" if verb in READ_VERBS else "write" if verb in WRITE_VERBS else None
-                    if not cls: continue
-                    # slice from the VERB, not from the `vv` token: starting at
-                    # m.start() makes argv[0] == "vv" and rejects every op.
-                    argv = argv_after(cmd, m.start(2))
-                    if not argv or argv[0] != verb: continue
-                    entry = "native" if ".py" not in cmd[m.start():m.end()] else "python"
-                    ops.append({"cls": cls, "verb": verb, "argv": argv,
-                                "session": sid, "entry": entry})
+                baseline += len(vvops.LOOSE_RE.findall(cmd))
+                found = vvops.parse_invocations(cmd)
+                for o in found:
+                    ops.append({**o, "session": sid})
                     per_session[sid] += 1
+                    rej.keep()
+                if not found and vvops.LOOSE_RE.search(cmd):
+                    rej.reject("looked like a vv invocation but parsed to nothing", cmd)
+    funnel.counts["files"] = len(files)
+    funnel.counts["vv_ops"] = len(ops)
+    funnel.require("files"); funnel.require("tool_uses")
+    funnel.report()
+    rej.require_not_unanimous()
+    rej.report()
+    sg.require_recall("ledger-extract", len(ops), baseline,
+                      baseline_desc="loose command-position regex")
     return files, ops, per_session, synthetic
 
 def run(engine, argv, vault, timeout=60):

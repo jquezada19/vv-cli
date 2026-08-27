@@ -16,6 +16,10 @@ Usage: vault_ops_replay.py [--sessions 50] [--limit-per-kind 40]
 """
 import argparse, collections, glob, json, os, re, shutil, subprocess, sys, tempfile
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import sweepguard as sg
+import vvops
+
 PROJ = os.path.expanduser("~/.claude/projects/-Users-jxq-Documents-Obsidian-Vault")
 VAULT = os.path.expanduser("~/Documents/Obsidian Vault")
 VV = os.path.expanduser("~/Desktop/Git/vv-cli/src/vv.py")
@@ -38,8 +42,13 @@ def walk(o):
 
 
 def extract(n_sessions):
+    vvops.self_test()          # canary BEFORE any real data is touched
     files = sorted(glob.glob(os.path.join(PROJ, "*.jsonl")),
                    key=os.path.getmtime, reverse=True)[:n_sessions]
+    sg.preflight_corpus("vault_ops_replay.transcripts", files)
+    funnel = sg.Funnel("extract", "files", "tool_uses", "vv_ops")
+    rej = sg.RejectLog("vv-extract")
+    baseline = {"n": 0}
     ops = []
     for f in files:
         for ln in open(f, encoding="utf-8", errors="replace"):
@@ -50,6 +59,7 @@ def extract(n_sessions):
             for d in walk(rec):
                 if not isinstance(d, dict) or d.get("type") != "tool_use":
                     continue
+                funnel.bump("tool_uses")
                 name, inp = d.get("name"), d.get("input") or {}
                 if not isinstance(inp, dict):
                     continue
@@ -69,53 +79,40 @@ def extract(n_sessions):
                     if not isinstance(cmd, str):
                         continue
                     if re.search(r"<<'?\w*EOF|^\s*def |python3 - ", cmd):
-                        continue          # a heredoc that merely MENTIONS vv.py
-                    for m in re.finditer(r"vv\.py[\"']?\s+((?:--vault\s+\S+\s+)?)([a-z-]+)", cmd):
-                        verb = m.group(2)
-                        if verb in READ_VERBS:
-                            ops.append({"cls": "read", "tool": "vv", "verb": verb, "cmd": cmd})
-                        elif verb in WRITE_VERBS:
-                            ops.append({"cls": "write", "tool": "vv", "verb": verb, "cmd": cmd})
+                        continue          # a heredoc that merely MENTIONS vv
+                    # ONE shared extractor (bench/vvops.py). This used to be a
+                    # local copy matching only `vv.py <verb>`; when the native
+                    # `vv` binary became the default entry it silently lost 47%
+                    # of operations (156 recovered where 294 exist) and still
+                    # printed a confident mix. Duplicated extractor, duplicated
+                    # blind spot -- hence the single implementation + canary.
+                    if "vv" in cmd:
+                        baseline["n"] += len(vvops.LOOSE_RE.findall(cmd))
+                    found = vvops.parse_invocations(cmd)
+                    for o in found:
+                        ops.append({"cls": o["cls"], "tool": "vv", "verb": o["verb"],
+                                    "argv": o["argv"], "cmd": cmd})
+                        rej.keep()
+                    if not found and vvops.LOOSE_RE.search(cmd):
+                        rej.reject("looked like a vv invocation but parsed to nothing", cmd)
                     if "vault_ask.py" in cmd:
                         ops.append({"cls": "read", "tool": "vault_ask", "cmd": cmd})
                     if re.search(r"record\.py\s+query", cmd):
                         ops.append({"cls": "read", "tool": "record", "cmd": cmd})
                     if re.search(r"\bobsidian\s+\w", cmd):
                         ops.append({"cls": "read", "tool": "obsidian", "cmd": cmd})
+    funnel.counts["files"] = len(files)
+    funnel.counts["vv_ops"] = sum(1 for o in ops if o.get("tool") == "vv")
+    funnel.require("files")
+    funnel.require("tool_uses")      # transcripts present but nothing parsed = broken reader
+    funnel.report()
+    rej.require_not_unanimous()
+    rej.report()
+    # dumb high-recall lower bound, independent of the extractor's parsing:
+    # a >=1 floor cannot catch a PARTIAL miss (the real one still returned 156).
+    sg.require_recall("vv-extract", funnel.counts["vv_ops"], baseline["n"],
+                      baseline_desc="loose regex over the same commands")
     return ops
-
-
-def parse_vv_args(cmd):
-    """Recover the vv argv after the script path, dropping any --vault pair."""
-    m = re.search(r"vv\.py[\"']?\s+(.*)$", cmd, re.S)
-    if not m:
-        return None
-    tail = m.group(1).split("\n")[0].split("&&")[0].split("|")[0].strip()
-    # Stop at shell operators: the transcript line is a SHELL command, so a
-    # trailing `> /dev/null` or `; echo done` would otherwise be replayed as
-    # positional arguments and look like a tool usage error.
-    # Drop redirections FIRST: `2>/dev/null` has no space before `>`, so a
-    # space-delimited split kept it and it replayed as a positional arg --
-    # which read as a tool usage error rather than a harness artifact.
-    tail = re.sub(r"\s\d?>>?\s*\S+", " ", tail)
-    tail = re.split(r"\s(?:;|&&|\|\||#)\s|\s(?:;)", tail)[0]
-    try:
-        import shlex
-        argv = shlex.split(tail)
-    except ValueError:
-        return None
-    argv = [x.rstrip(";") for x in argv if x not in (">", ">>", ";", "&&", "|")]
-    out = []
-    skip = False
-    for a in argv:
-        if skip:
-            skip = False
-            continue
-        if a == "--vault":
-            skip = True
-            continue
-        out.append(a)
-    return out or None
 
 
 def main():
@@ -196,10 +193,16 @@ def main():
             results[key]["ok" if ok else "gone"] += 1
             continue
         if o["tool"] in ("Grep", "Glob"):
-            results[key]["ok"] += 1     # pattern-only; nothing to execute safely
+            # NOT "ok": nothing was run. Counting an unexecuted pattern as a
+            # success inflates coverage with operations the replay never tested.
+            results[key]["not-executed"] += 1
             continue
         if o["tool"] == "vv":
-            argv = parse_vv_args(o["cmd"])
+            # argv comes from the SHARED extractor (bench/vvops.py), already
+            # canaried. There used to be a second parser here (parse_vv_args)
+            # doing the same job differently -- a duplicate extractor is a
+            # duplicate blind spot, which is how the entry-point miss survived.
+            argv = o.get("argv")
             if not argv:
                 results[key]["unparsed"] += 1
                 continue
@@ -224,7 +227,7 @@ def main():
             if mm:
                 cmd += ["--grep", mm.group(1).strip("'\"")]
         elif o["tool"] == "obsidian":
-            results[key]["skipped-live-app"] += 1
+            results[key]["not-executed"] += 1     # needs the live app
             continue
 
         if cmd is None:
@@ -244,6 +247,14 @@ def main():
             results[key][f"CRASH-{r.returncode}"] += 1
             failures.append((key, " ".join(cmd[3:7]), (r.stderr or "")[:120]))
 
+    executed = sum(v for row in results.values() for kk, v in row.items()
+                   if kk == "ok" or kk.startswith("refused-") or kk.startswith("CRASH")
+                   or kk == "TIMEOUT")
+    if executed == 0:
+        sys.exit("replay: NOTHING was actually executed — every operation was "
+                 "skipped, unparsed or not-executed. This is a broken replay, "
+                 "not a clean run.")
+    print(f"executed {executed} operation(s); the rest were not run\n")
     print("results by operation kind:")
     for k in sorted(results):
         row = results[k]
