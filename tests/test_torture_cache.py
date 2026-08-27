@@ -27,11 +27,11 @@ caches the footer REJECTS, so they prove the engine never answers wrongly from
 damage — it is free to rebuild rather than read. Only the forged-footer control,
 on the accepted path, proves the cache is consulted at all.
 
-The oracle is the python engine, forced with VV_ENGINE=python. Its independence
-from the cache comes from live-walking the vault, not from VV_NO_INDEX (which
-only disables python's own SQLite index). Known limit: the oracle shells out to
-the native link lexer, so this is an oracle for the CACHE layer only — a lexer
-bug is invisible to it.
+The oracle is the python engine, forced with VV_ENGINE=python. That flag is what
+makes it independent: every vrust shell-out in src/vv_impl.py is gated on
+use_rust(), which is False under VV_ENGINE=python, so the oracle live-walks the
+vault in python and does not share the native lexer. VV_NO_INDEX only disables
+python's own SQLite index and is not what provides the independence.
 """
 import hashlib, os, random, shutil, subprocess, sys, tempfile
 
