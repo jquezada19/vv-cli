@@ -27,8 +27,17 @@ run() {  # run <label> <cmd...>
 }
 
 if [ -d vrust ]; then
-  (cd vrust && cargo build --release >/dev/null 2>&1) && echo "  ok   rust engine built" \
-    || echo "  --   rust engine unavailable (python fallback will be used)"
+  # A failed build must fail the gate. Otherwise a stale target/release/vrust
+  # from an earlier build stays on disk and every native suite silently tests
+  # the OLD binary while the gate reports green.
+  if (cd vrust && cargo build --release >/dev/null 2>&1); then
+    echo "  ok   rust engine built"
+  elif [ -x vrust/target/release/vrust ]; then
+    fail=1
+    echo "  FAIL rust engine build failed and a stale binary is present"
+  else
+    echo "  --   rust engine unavailable (python fallback will be used)"
+  fi
 fi
 
 echo "unit + integration:"

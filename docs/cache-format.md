@@ -41,7 +41,8 @@ This is not theoretical. Reproduced on the real vault 2026-08-27: truncating one
 record's `L` rows made `backlinks` drop a link that the Python engine still
 found. Raised by an adversarial review of a proposal to drop the write's
 `fsync`; the proposal's safety argument ("any corruption fails to parse and
-rebuilds") was wrong, and the reproduction is now `tests/test_cache_integrity.py`.
+rebuilds") was wrong, and the reproduction is now `tests/test_cache_integrity.py`, and the exhaustive
+sweep over the same failure space is `tests/test_torture_cache.py`.
 
 The footer records the body's **length** and a **checksum**, and both are
 load-bearing — each was confirmed by disabling it and watching the suite fail:
@@ -50,11 +51,21 @@ load-bearing — each was confirmed by disabling it and watching the suite fail:
 |---|---|
 | truncation / lost tail | footer presence + body length |
 | same-length corruption of a link row | checksum |
+| a whole record deleted from the body | body length |
+| a tampered or malformed footer | footer parse + both fields |
 
 Because a torn write is now *detectable*, `fsync` before the `rename` is no
 longer what protects correctness, and it is not performed. A crash can lose the
 newest cache; it cannot produce a cache that lies. `VV_FSYNC=1` restores it for
 A/B measurement.
+
+That claim is scoped to *crash-produced* damage, and the scope is load-bearing:
+a writer that damages the body **and re-stamps a matching footer** produces a
+cache that is accepted and does lie. `tests/test_torture_cache.py` forges
+exactly that case on purpose — it is the suite's blindness control, proving the
+cache is consulted at all, and it is the reason the footer is described below as
+an integrity check rather than a security boundary. Nothing in the write path
+can produce it; anything that can write the file deliberately could.
 
 The checksum is FNV-flavoured but consumes 8 bytes at a time: it runs on **every
 read**, and a byte-at-a-time FNV-1a measured 1.75 ms over this vault's 1.2 MB
