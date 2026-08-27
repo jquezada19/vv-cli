@@ -1,6 +1,6 @@
 # vv — a fast, terse, agent-friendly CLI for Obsidian vaults
 
-`vv` reads, writes, and edits an Obsidian vault headlessly, built for AI-agent
+`vv` (**Verified Vault**) reads, writes, and edits an Obsidian vault headlessly, built for AI-agent
 workflows where **every output byte enters the model's context**. Output is terse
 by contract, edits are hash-anchored compare-and-swap, multi-file operations are
 journaled with classified rollback, and link semantics are verified against the
@@ -15,14 +15,15 @@ shared bug can't certify itself.
 
 Why use this over `grep`/`cat` or the official `obsidian` CLI? Measured on a real
 1,500-note vault (macOS, Python 3.13, median of 5 runs; reproduce with
-`python3 bench/bench.py` — re-measured 2026-08-26):
+`python3 bench/bench.py` — re-measured 2026-08-27, after the persistent index
+and the parallel Rust scan landed):
 
 | task | shell (grep/cat) | obsidian CLI | vv |
 |---|---|---|---|
-| read ONE section of a note | 3 ms · 15,965 B (whole file) | 5 ms · 15,965 B (whole file) | 105 ms · **1,442 B** |
-| search a common term | 5,800 ms · 3,505,090 B | 106 ms · 299,519 B | 152 ms · **2,993 B** |
-| flip one frontmatter field | 23 ms · 15,966 B round-trip | n/a headless-only | 57 ms · **35 B** |
-| backlinks of a hub note | 2,306 ms · 107,037 B | **6 ms** · 252 B | 238 ms · 266 B |
+| read ONE section of a note | 3 ms · 15,965 B (whole file) | 5 ms · 15,965 B (whole file) | 82 ms · **1,442 B** |
+| search a common term | 5,842 ms · 3,505,090 B | 118 ms · 299,519 B | **97 ms** · **2,993 B** |
+| flip one frontmatter field | 23 ms · 15,966 B round-trip | n/a headless-only | 50 ms · **35 B** |
+| backlinks of a hub note | 2,293 ms · 107,037 B | **5 ms** · 252 B | 74 ms · 266 B |
 
 The column that matters for an agent is **bytes**: that's the context (token)
 bill, paid on every operation, every session. Reading one section costs **11×
@@ -30,10 +31,49 @@ fewer bytes** than opening the note; search returns ~1,200× fewer bytes than
 grep and ~100× fewer than the obsidian CLI at comparable latency; flipping a
 frontmatter field costs 35 bytes against a 16 KB read-modify-write.
 
-Honest caveats, unchanged by the re-measurement: `cat` beats vv on raw wall-time
-for single files (vv pays ~30 ms of Python startup per call), and the obsidian
-CLI wins backlinks outright — the app holds a live in-memory cache. vv's job is
-to be *accurate and cheap in context* without needing the app open at all.
+Honest caveats: `cat` still beats vv on raw wall-time for single files (vv pays
+~27 ms of Python startup per call — see *The index*, below), and the obsidian
+CLI still wins backlinks outright — the app holds a live in-memory cache and its
+CLI is a 133 KB socket shim into it. vv's job is to be *accurate and cheap in
+context* without needing the app open at all.
+
+## The index
+
+Since 2026-08-27, graph and frontmatter commands (`backlinks`, `orphans`,
+`deadends`, `impact`, `board`, `tags`, `props`, `lint --quick`) are served from a
+**persistent SQLite index** — a derived, disposable cache under
+`~/.cache/vv/index/`, never inside the vault. Freshness is per-invocation, not
+per-interval: every command stat-walks the vault (no file reads, ~10 ms), diffs
+`(mtime_ns, size, inode)` per file by **equality** against the DB, and re-parses
+only changed files — so a just-edited note is reflected on the very next
+command, with no daemon and no file watcher. Git's "racily clean" rule
+(re-hash anything whose mtime ties the index's own commit stamp) closes the
+same-tick rewrite hole. Raw link targets are stored, never resolved
+destinations — bare-link winners depend on the current duplicate-basename
+population, so resolution happens at query time.
+
+The index is an accelerator, not an authority: on any doubt (corruption, torn
+read, version mismatch) vv falls back to the live scan and the DB is deleted
+and rebuilt — never repaired, never served partially. Byte-parity between the
+indexed and live paths is regression-tested on every accelerated command.
+
+| | before | after |
+|---|--:|--:|
+| backlinks | 242 ms | 77 ms |
+| orphans | 254 ms | 83 ms |
+| impact | 260 ms | 101 ms |
+| tags | 176 ms | 64 ms |
+| `lint --quick` | 1,766 ms | 87 ms |
+| search (parallel Rust scan, not the index) | 153 ms | 99 ms |
+
+`vv index` shows status; `vv index --rebuild` forces a rebuild; `VV_NO_INDEX=1`
+disables it (also how the before/after above was measured —
+`bench/index_bench.py`). The remaining floor is CPython startup: ~22 ms of
+interpreter plus imports. The other historical cost — recompiling the main
+script's 87 KB on every run, ~13 ms, because CPython never bytecode-caches a
+script invoked by path — was removed 2026-08-27 by splitting `vv.py` into a
+launcher stub over an imported `vv_impl.py`, which does get `__pycache__`
+caching. Going below ~22 ms means a native entrypoint (parked).
 
 ## Why not just read the files?
 
@@ -56,7 +96,7 @@ failed lookup prints `did you mean:` suggestions).
 | `read NOTE SEC` | one section — by outline id, or by heading title / `#Heading` / `(preamble)`; an ambiguous title refuses and names the ids |
 | `show NOTE [--max-bytes N] [--from SEC]` | budgeted read with a continuation token; `--max-bytes` is a **hard ceiling in UTF-8 bytes**, and a single oversized section is truncated-and-marked rather than emitted whole |
 | `head NOTE` · `resolve NAME` | frontmatter only · name → path |
-| `search TERMS [--k N] [--w C]` | ranked full-text: a note **named** for the query outranks mere mentions; a `dir/` term filters by path |
+| `search TERMS [--k N] [--w C]` | ranked full-text: a note **named** for the query outranks mere mentions; a `dir/` term filters by path. Unquoted args are AND-ed terms; a **quoted arg is one phrase** — a zero-hit phrase whose words do co-occur prints a retry-unquoted hint instead of silence |
 
 ### Write
 
@@ -91,7 +131,8 @@ failed lookup prints `did you mean:` suggestions).
 
 | command | what it does |
 |---|---|
-| `lint [--quick]` | broken links, memory-slug links, table-pipe render breaks |
+| `lint [--quick]` | broken links, memory-slug links, table-pipe render breaks (index-served) |
+| `index [--rebuild]` | index status · force a full rebuild |
 | `doctor` | vault / engine / git / journal / metrics status |
 | `doctor --rollback` · `--discard` | resolve a pending journal (restores or drops backups) |
 
@@ -101,6 +142,7 @@ failed lookup prints `did you mean:` suggestions).
 |---|---|
 | `--vault PATH` / `VV_VAULT` | target vault (flag wins) |
 | `VV_ENGINE=rust\|python` | force an engine — the test gate runs both |
+| `VV_NO_INDEX=1` / `VV_INDEX_ROOT` | disable the index · relocate it (tests) |
 | exit `0 · 1 · 3 · 4 · 5` | ok · usage/not-found · stale hash or plan · dirty journal · not UTF-8 |
 | errors | grep-stable: `kind: message — next: <command>` |
 
