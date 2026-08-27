@@ -279,7 +279,7 @@ check("V20a --help exits 0 with the command list",
       r.returncode == 0 and "Read:" in r.stdout, r.stdout + r.stderr)
 _bare = run()
 check("V20b --help matches bare invocation", r.stdout == _bare.stdout, r.stdout)
-_src = open(VV).read()
+_src = open(os.path.join(os.path.dirname(VV), 'vv_impl.py')).read()  # stub split 2026-08-27
 import re as _re2
 _cmds = set(_re2.findall(r'"([a-z-]+)":\s*cmd_', _src))
 _missing = sorted(c for c in _cmds if not _re2.search(r'(?<![a-z-])' + _re2.escape(c) + r'(?![a-z-])', _bare.stdout))
