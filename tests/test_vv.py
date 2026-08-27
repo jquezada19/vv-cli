@@ -116,6 +116,29 @@ check("T10c trailing-colon value is quoted", 'description: "trailing colon:"' in
 run("set", REL_FIX, "description", "- leading dash")
 t = open(f"{SB}/VV Fixture.md").read()
 check("T10d leading-indicator value is quoted", 'description: "- leading dash"' in t, t[:200])
+# Over-quoting is a defect too: these must stay BARE. Quoting `-1` turns a
+# number into the string "-1" -- a silent type change, and a regression the
+# first version of yaml_scalar introduced (Codex review 2026-08-26). `-`, `?`
+# and `:` only indicate when followed by a space.
+for _k, _v in (("num", "-1"), ("word", "-foo"), ("qmark", "?foo"),
+               ("bool2", "true"), ("date", "2026-08-01")):
+    run("set", REL_FIX, _k, _v)
+    _t = open(f"{SB}/VV Fixture.md").read()
+    check(f"legal bare scalar {_v!r} is NOT quoted", f"{_k}: {_v}\n" in _t, _t[:200])
+    run("unset", REL_FIX, _k)
+# Malformed input that merely LOOKS quoted/flow must be quoted, not trusted:
+# `"a" junk"` and `[a, b]]` passed the first version's delimiter test and would
+# have broken the whole block.
+run("set", REL_FIX, "malq", '"a" junk"')
+check("a malformed quoted value is re-quoted, not trusted",
+      'malq: "\\"a\\" junk\\""' in open(f"{SB}/VV Fixture.md").read(),
+      open(f"{SB}/VV Fixture.md").read()[:220])
+run("unset", REL_FIX, "malq")
+run("set", REL_FIX, "malf", "[a, b]]")
+check("an unbalanced flow collection is quoted, not trusted",
+      'malf: "[a, b]]"' in open(f"{SB}/VV Fixture.md").read())
+run("unset", REL_FIX, "malf")
+
 run("set", REL_FIX, "plain", "done")
 t = open(f"{SB}/VV Fixture.md").read()
 check("T10e ordinary scalar stays bare", "plain: done" in t, t[:200])
@@ -180,10 +203,10 @@ os.remove(_bigd)
 import datetime as _dt, glob as _glob
 _sd = os.path.expanduser("~/Documents/Obsidian Vault/Standups")
 _today = _dt.date.today().isoformat()
-_had_standup = bool(_glob.glob(os.path.join(_sd, f"*{_today}*.md")))
-if not _had_standup:
-    check("daily-append: skipped (no standup note for today)", True)
-else:
+# These used to be skipped when the REAL vault had no standup for today --
+# unrelated state deciding whether a test runs (Codex review 2026-08-26). The
+# fixture creates its own standup, so they always run.
+if True:
     # Never write to the real standup: exercise the same code path in a temp vault.
     import tempfile as _tf
     _tv = _tf.mkdtemp(prefix="vv-daily-")

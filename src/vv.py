@@ -423,34 +423,86 @@ def cmd_append(ref, text):
     atomic_write(fp, cur + ("" if cur.endswith("\n") or not cur else eol) + text + eol, expect_sig=_sig)
     out(f"appended to {rel(fp)}")
 
-_YAML_LEAD = set("-?:,[]{}#&*!|>'\"%@`")
+# Characters that are ALWAYS YAML indicators in first position.
+# `-`, `?` and `:` are deliberately NOT here: they only indicate when followed by
+# a space (or end of value). Treating them as unconditional indicators quoted
+# `-1` into the STRING "-1" -- a silent type change, and a regression this
+# function introduced rather than prevented (Codex review 2026-08-26).
+_YAML_LEAD = set("[]{}#&*!|>'\"%@`,")
+
+
+def _is_wellformed_quoted(v):
+    """True only if v is a properly closed quoted scalar with no stray quote.
+
+    The first version accepted anything that merely started and ended with the
+    same quote, so `"a" junk"` was passed through as 'already quoted' and broke
+    the whole block -- the exact failure this function exists to prevent.
+    """
+    if len(v) < 2 or v[0] != v[-1] or v[0] not in "\"'":
+        return False
+    q, inner = v[0], v[1:-1]
+    if q == "'":
+        return inner.count("'") % 2 == 0          # '' is the escape
+    i = 0
+    while i < len(inner):
+        if inner[i] == "\\":
+            i += 2
+            continue
+        if inner[i] == '"':
+            return False                           # unescaped closing quote
+        i += 1
+    return True
+
+
+def _is_balanced_flow(v):
+    """True if v is a syntactically balanced flow collection ([...] / {...})."""
+    if not v or v[0] not in "[{":
+        return False
+    pairs = {"]": "[", "}": "{"}
+    stack = []
+    for ch in v:
+        if ch in "[{":
+            stack.append(ch)
+        elif ch in "]}":
+            if not stack or stack.pop() != pairs[ch]:
+                return False
+    return not stack
+
 
 def yaml_scalar(v):
     """Quote a frontmatter value when leaving it bare would produce invalid YAML.
 
     Found 2026-08-26, day one of the shadow pilot: `set description "vv pilot:
     live from ..."` wrote the colon-space bare, which makes the WHOLE
-    frontmatter block unparseable — Obsidian's metadataCache returned nothing
+    frontmatter block unparseable -- Obsidian's metadataCache returned nothing
     for the note, silently dropping it out of every Bases view. Frontmatter is
     the vault's source of truth, so a malformed write is data loss that looks
     like success (exit 0, plausible output).
 
-    Deliberately conservative: an already-quoted value, a flow collection
-    ([a, b] / {k: v}), and ordinary bare scalars are passed through untouched
-    so existing notes and callers keep their exact formatting.
+    Deliberately conservative in both directions: it must not emit invalid YAML,
+    and it must not quote a value that was already fine -- over-quoting changes
+    types (`-1` -> "-1") and churns notes on every write.
     """
-    if not isinstance(v, str) or v == "":
-        return '""' if v == "" else v
-    if len(v) >= 2 and ((v[0] == v[-1] == '"') or (v[0] == v[-1] == "'")):
-        return v                      # caller quoted it already
-    if v[0] in "[{" and v[-1] in "]}":
-        return v                      # flow list/map, intentional structure
+    if not isinstance(v, str):
+        return v
+    if v == "":
+        return '""'
+    if _is_wellformed_quoted(v) or _is_balanced_flow(v):
+        return v                       # already valid; leave the author's form
     needs = (": " in v or v.endswith(":") or " #" in v
              or v[0] in _YAML_LEAD or v != v.strip()
-             or "\n" in v or "\t" in v)
+             or re.match(r"^[-?:](\s|$)", v)      # indicator only before a space
+             or "\n" in v or "\r" in v or "\t" in v
+             or any(ord(c) < 0x20 for c in v))
     if not needs:
         return v
-    return '"' + v.replace("\\", "\\\\").replace('"', '\\"') + '"'
+    # Escape for a double-quoted scalar. \n and \r must become escapes, not raw
+    # bytes: YAML folds a literal newline inside a quoted scalar to a space,
+    # which would silently lose the line break.
+    esc = (v.replace("\\", "\\\\").replace('"', '\\"')
+            .replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t"))
+    return '"' + esc + '"'
+
 
 def cmd_set(ref, key, value):
     _dirty_gate()
@@ -1163,7 +1215,14 @@ def _journal_rollback(jdir, written=None):
     write belong to another writer and are left alone, never clobbered.
     `written` maps rel-path -> sha256 of what THIS process wrote (None = restore
     unconditionally, the pre-classification behavior). Returns rel-paths left."""
-    man = json.load(open(os.path.join(jdir, "manifest.json")))
+    mpath = os.path.join(jdir, "manifest.json")
+    if not os.path.exists(mpath):
+        # Killed during _journal_start, before the first manifest existed. There
+        # is nothing to restore and nothing was written yet; refuse loudly rather
+        # than raising a traceback out of doctor.
+        die(f"conflict: journal {os.path.basename(jdir)} has no manifest (killed during "
+            f"preparation) — next: vv doctor --discard", 1)
+    man = json.load(open(mpath))
     import shutil as _sh
     left = []
 
@@ -1197,7 +1256,16 @@ def _journal_rollback(jdir, written=None):
             continue   # untouched since journaling — nothing to undo
         if written is not None:
             if r_ not in written:
-                continue   # we never wrote it; the change is someone else's — leave it
+                # We never wrote it; the change is someone else's — leave it.
+                #
+                # A review proposed reporting this as a conflict, on the grounds
+                # that a changed-but-unrecorded file might be OUR partial write
+                # whose log entry never landed. Write-ahead logging closes that
+                # window directly -- the intended hash is now recorded BEFORE the
+                # file is touched -- so this branch can only mean a third party,
+                # and a journaled-but-never-written file being edited externally
+                # is normal, not a conflict. Pinned by V12c/V12d.
+                continue
             if live_h is not None and live_h != written[r_]:
                 left.append(r_)   # our write was overwritten since — do not clobber
                 continue
@@ -1347,10 +1415,18 @@ def _do_relocate(ref, dest_rel_noext, apply_, opname, expect_plan=None):
         for wi, (p, new_text) in enumerate(results.items()):
             if 0 <= fault_after <= wi:
                 raise fault_exc(f"INJECTED FAULT after {wi} writes")
-            atomic_write(p, new_text)
+            # WRITE-AHEAD: record the INTENDED hash before touching the file.
+            # The first version logged after the write, so a kill between
+            # os.replace() and the log left a changed-but-unrecorded file --
+            # which rollback then treated as another writer's bytes and skipped,
+            # deleting the journal and reporting "originals restored" while vv's
+            # own rewrite stayed on disk (Codex review 2026-08-26). Logging first
+            # can only over-record, and an over-recorded file is one we compare
+            # and correctly leave alone.
             _sha = hashlib.sha256(new_text.encode()).hexdigest()
+            _journal_written(jdir, rel(p), _sha)
+            atomic_write(p, new_text)
             written[rel(p)] = _sha
-            _journal_written(jdir, rel(p), _sha)   # durable: survives a hard kill
         if fault_after == len(results):
             raise RuntimeError(f"INJECTED FAULT after {len(results)} writes (pre-rename)")
         d = os.path.dirname(new_fp)
