@@ -134,6 +134,32 @@ def main():
                     or "(did you mean: outline)" not in r.stderr
                     or "next:" not in r.stderr):
                 fails.append(("typo-suggest", label, (r.stdout + r.stderr)[:90]))
+        # --- P2a: search --files — paths only, cheapest possible answer ----
+        # Both engines, byte-identical; no "==" headers, no snippet bodies, the
+        # standard count trailer intact. Uses the fixtures already on disk.
+        fouts = []
+        for label, cmd in (("rust", [VR]), ("python", [sys.executable, VV])):
+            env2 = dict(env)
+            if label == "python":
+                env2["VV_ENGINE"] = "python"   # exercise the pure-python path, not the shell-out
+            r = subprocess.run(cmd + ["search", "heading", "--files"],
+                               capture_output=True, text=True, env=env2)
+            n += 1
+            body = r.stdout
+            if (r.returncode != 0 or "== " in body or "score" in body
+                    or "matches)" not in body
+                    or not any(l.endswith(".md") for l in body.splitlines())):
+                fails.append(("files-flag", label, r.returncode, body[:90]))
+            fouts.append(body)
+        if len(set(fouts)) != 1:
+            fails.append(("files-parity", [o[:60] for o in fouts]))
+        # --files respects --k like normal search: ask for 1, get 1 path + honest trailer
+        r = subprocess.run([VR, "search", "heading", "--files", "--k", "1"],
+                           capture_output=True, text=True, env=env)
+        n += 1
+        paths = [l for l in r.stdout.splitlines() if l.endswith(".md")]
+        if len(paths) != 1 or "(1 of " not in r.stdout:
+            fails.append(("files-k", r.stdout[:90]))
         if fails:
             for f in fails[:8]:
                 print("FAIL", f)

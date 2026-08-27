@@ -120,12 +120,14 @@ fn score_one(
 fn cmd_search(args: &[String], orig: &[String]) -> ! {
     let mut k = 5usize;
     let mut w = 500usize;
+    let mut files_only = false;
     let mut terms: Vec<String> = Vec::new();
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             "--k" => k = it.next().and_then(|v| v.parse().ok()).unwrap_or(5),
             "--w" => w = it.next().and_then(|v| v.parse().ok()).unwrap_or(500),
+            "--files" => files_only = true,
             t => terms.push(t.to_lowercase()),
         }
     }
@@ -198,8 +200,15 @@ fn cmd_search(args: &[String], orig: &[String]) -> ! {
         exec_python(orig);
     }
     let shown = hits.len().min(k);
-    for (score, rel, snip) in hits.iter().take(k) {
-        println!("== {} (score {})\n{}\n", rel, score, snip);
+    if files_only {
+        // --files: matching paths only, same ranking, same trailer (parity-pinned).
+        for (_score, rel, _snip) in hits.iter().take(k) {
+            println!("{}", rel);
+        }
+    } else {
+        for (score, rel, snip) in hits.iter().take(k) {
+            println!("== {} (score {})\n{}\n", rel, score, snip);
+        }
     }
     println!("({} of {} matches)", shown, hits.len());
     exit(0);

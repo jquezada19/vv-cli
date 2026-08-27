@@ -2,7 +2,7 @@
 """vv — fast, terse, agent-friendly CLI for Obsidian vaults.
 
 Read:    outline NOTE · read NOTE SEC · head NOTE · show NOTE [--max-bytes N] [--from SEC]
-         resolve NAME · search TERMS [--k N] [--w CHARS]
+         resolve NAME · search TERMS [--k N] [--w CHARS] [--files]
 Write:   patch NOTE SEC SHA8 <stdin · appendsec NOTE SEC TEXT · append NOTE TEXT
          set NOTE KEY VALUE · unset NOTE KEY · new PATH [--template T] [--k v ...]
 Relocate rename NOTE NEWNAME [--apply [SHA8]] · move NOTE DESTFOLDER [--apply [SHA8]]
@@ -794,13 +794,14 @@ def cmd_props(key, folder=""):
     out(f"({sum(c.values())} notes with {key})")
 
 def _parse_search_args(args):
-    k, w, terms = 5, 500, []
+    k, w, files_only, terms = 5, 500, False, []
     it = iter(args)
     for a in it:
         if a == "--k": k = int(next(it))
         elif a == "--w": w = int(next(it))
+        elif a == "--files": files_only = True
         else: terms.append(a.lower())
-    return k, w, terms
+    return k, w, files_only, terms
 
 
 def _search_hits(terms, w):
@@ -894,7 +895,7 @@ def _phrase_hint(terms):
 
 
 def cmd_search(*args):
-    k, w, terms = _parse_search_args(args)
+    k, w, files_only, terms = _parse_search_args(args)
     if use_rust():
         import subprocess
         # VV_FROM_PY tells the engine that PYTHON is the orchestrator here, so
@@ -912,8 +913,14 @@ def cmd_search(*args):
     if not terms:
         die("usage: search needs a query — next: vv search <terms> [--k N] [--w CHARS]")
     hits = _search_hits(terms, w)
-    for score, r_, snip in hits[:k]:
-        out(f"== {r_} (score {score})\n{snip}\n")
+    if files_only:
+        # --files: matching paths only, same ranking, same trailer — the
+        # cheapest possible answer for "what should I read next".
+        for _score, r_, _snip in hits[:k]:
+            out(r_)
+    else:
+        for score, r_, snip in hits[:k]:
+            out(f"== {r_} (score {score})\n{snip}\n")
     out(f"({min(len(hits), k)} of {len(hits)} matches)")
     if not hits:
         h = _phrase_hint(terms)
