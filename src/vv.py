@@ -1217,6 +1217,10 @@ def _index_sync(scope=None):
     con.execute("PRAGMA journal_mode=WAL")
     con.execute("PRAGMA foreign_keys=ON")   # OFF by default: CASCADE is inert without it
     con.execute("PRAGMA synchronous=NORMAL")
+    con.execute("PRAGMA mmap_size=67108864")   # map the DB (~2 MB) into memory:
+    # page lookups become pointer derefs into the kernel page cache instead of
+    # read() syscalls (panel recommendation 2026-08-27)
+    con.execute("PRAGMA temp_store=MEMORY")
     ver = con.execute("PRAGMA user_version").fetchone()[0]
     if ver != PARSER_VERSION:
         con.executescript("DROP TABLE IF EXISTS pipes; DROP TABLE IF EXISTS links; DROP TABLE IF EXISTS files; "
