@@ -522,13 +522,105 @@ fn cmd_appendsec(vault: &Path, args: &[String]) -> Outcome {
     Outcome::Done(0)
 }
 
+
+// ---------- patch (phase 2) ----------
+// STDIN ORDERING IS THE WHOLE TRICK (mirrors python exactly): every check that
+// can Fallback runs BEFORE stdin is consumed — python re-reads stdin itself on
+// fallback and nothing is lost. Only after the sha8 check passes is stdin
+// read; from that point on, any failure re-feeds the captured bytes to python
+// via a piped child instead of the bare exec (which would hand python an
+// empty pipe and silently patch an empty body).
+fn exec_python_with_stdin(vault: &Path, args: &[String], body: &[u8]) -> Outcome {
+    use std::process::{Command, Stdio};
+    let vv = std::env::var("VV_PY_ENTRY").unwrap_or_else(|_| {
+        std::env::current_exe().ok()
+            .and_then(|p| p.ancestors().nth(4).map(|a| a.to_path_buf()))
+            .map(|r| r.join("src/vv.py").to_string_lossy().into_owned())
+            .unwrap_or_else(|| "vv.py".into())
+    });
+    let mut argv: Vec<String> = vec!["patch".into()];
+    argv.extend(args.iter().cloned());
+    let child = Command::new("python3").arg(&vv)
+        .arg("--vault").arg(vault)
+        .args(&argv)
+        .stdin(Stdio::piped()).spawn();
+    let mut child = match child { Ok(c) => c, Err(_) => return Outcome::Done(1) };
+    if let Some(mut si) = child.stdin.take() {
+        let _ = si.write_all(body);
+    }
+    match child.wait() {
+        Ok(s) => Outcome::Done(s.code().unwrap_or(1)),
+        Err(_) => Outcome::Done(1),
+    }
+}
+
+fn cmd_patch(vault: &Path, args: &[String]) -> Outcome {
+    let t0 = std::time::Instant::now();
+    if args.len() != 3 {
+        return Outcome::Fallback;
+    }
+    if has_pending_journal(vault) {
+        return Outcome::Fallback;   // python emits the canonical exit-4 text
+    }
+    let (ref_, sid, expect) = (&args[0], &args[1], &args[2]);
+    let fp = match crate::readpath::resolve(vault, ref_) {
+        Some(f) => f,
+        None => return Outcome::Fallback,
+    };
+    let cf = fs::metadata(&fp).map(|m| m.len()).unwrap_or(0);
+    let bytes = match fs::read(&fp) { Ok(b) => b, Err(_) => return Outcome::Fallback };
+    let text = match String::from_utf8(bytes) { Ok(t) => t, Err(_) => return Outcome::Fallback };
+    let (lines, secs) = crate::readpath::parse(&text);
+    let s = match crate::readpath::find_sec(&secs, sid) {
+        Some(s) => s,
+        None => return Outcome::Fallback,
+    };
+    if sid == "H0" && s.end > 0 && !lines.is_empty()
+        && lines[0].trim_end_matches('\r') == "---" {
+        return Outcome::Fallback;   // python's "refused: H0 contains frontmatter" text
+    }
+    let cur = crate::readpath::sec_text(&lines, s);
+    if crate::readpath::sha8(&cur) != *expect {
+        return Outcome::Fallback;   // stale: python re-checks and emits exit 3 — stdin UNTOUCHED so far
+    }
+    // ---- point of no return: consume stdin ----
+    let mut raw = Vec::new();
+    if std::io::Read::read_to_end(&mut std::io::stdin(), &mut raw).is_err() {
+        return exec_python_with_stdin(vault, args, &raw);
+    }
+    let body_str = match String::from_utf8(raw.clone()) {
+        Ok(b) => b,
+        Err(_) => return exec_python_with_stdin(vault, args, &raw),
+    };
+    let mut body = body_str.replace("\r\n", "\n");
+    if body.ends_with('\n') {
+        body.pop();
+    }
+    let body_lines: Vec<String> = if body.is_empty() && s.end == s.start {
+        Vec::new()
+    } else {
+        body.split('\n').map(|x| x.to_string()).collect()
+    };
+    let new_text = splice(&lines, s.start, s.end, &body_lines);
+    if !atomic_write(&fp, &new_text, None) {
+        return exec_python_with_stdin(vault, args, &raw);
+    }
+    let rel = fp.strip_prefix(vault).unwrap_or(&fp).to_string_lossy().into_owned();
+    let n = crate::readpath::emit(&format!(
+        "patched {} in {} ({}B -> {}B)\n",
+        s.id, rel, cur.chars().count(), body.chars().count()));
+    crate::readpath::log_metrics("patch", t0, n, cf);
+    Outcome::Done(0)
+}
+
 pub fn run(cmd: &str, args: &[String], vault: &Path) -> Outcome {
     match cmd {
         "set" => cmd_set(vault, args),
         "unset" => cmd_unset(vault, args),
         "append" => cmd_append(vault, args),
         "appendsec" => cmd_appendsec(vault, args),
-        // new / daily-append / patch: not implemented — Fallback to python.
+        "patch" => cmd_patch(vault, args),
+        // new / daily-append: not implemented — Fallback to python.
         _ => Outcome::Fallback,
     }
 }

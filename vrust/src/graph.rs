@@ -71,7 +71,7 @@ fn mask_comments(masked: &mut [char], pos: &mut usize, in_comment: &mut bool) {
 /// Active [[wiki]] / ](path.md) link targets in `text`: kind 'w' or 'm'.
 /// Fenced blocks (own-marker close), inline code spans and HTML comments are
 /// excluded, matching link_targets_in/masked_lines in vv_impl.py.
-fn active_links(text: &str) -> Vec<(char, String)> {
+pub fn active_links(text: &str) -> Vec<(char, String)> {
     let mut result = Vec::new();
     let lines: Vec<&str> = text.split('\n').collect();
     let mut fm_end = 0usize;
@@ -417,27 +417,44 @@ fn cmd_backlinks(ref_: &str, vault: &Path, t0: Instant) -> Outcome {
     let idx = basename_index(&files);
 
     let mut hits: HashSet<String> = HashSet::new();
-    for p in &files {
-        if *p == fp {
-            continue;
-        }
-        let rp = rel_string(p, vault);
-        if hits.contains(&rp) {
-            continue;
-        }
-        // read_raw() dying on non-UTF-8 is caught (SystemExit) and skipped in
-        // the Python live scanner — mirror that: skip, never fail the command.
-        let text = match fs::read_to_string(p) {
-            Ok(t) => t,
-            Err(_) => continue,
-        };
-        for (kind, target) in active_links(&text) {
-            if kind == 'w' && !target.to_lowercase().contains(tgt_base.as_str()) {
-                continue; // needle filter: scan_links(needle=tgt_base)
+    if let Some(cachemap) = crate::cache::links_map(vault) {
+        for (rp, fl) in &cachemap {
+            let p = vault.join(rp);
+            if p == fp || !fl.utf8_ok {
+                continue; // python's scanner skips non-UTF-8 files entirely
             }
-            if link_matches(p, kind, &target, &fp, &tgt_base, &tgt_rel_noext, &idx, vault) {
-                hits.insert(rp.clone());
-                break;
+            for (kind, target) in &fl.links {
+                if *kind == 'w' && !target.to_lowercase().contains(tgt_base.as_str()) {
+                    continue;
+                }
+                if link_matches(&p, *kind, target, &fp, &tgt_base, &tgt_rel_noext, &idx, vault) {
+                    hits.insert(rp.clone());
+                    break;
+                }
+            }
+        }
+    } else {
+        // cache doubtful: the parity-proven live scan, never a wrong answer
+        for p in &files {
+            if *p == fp {
+                continue;
+            }
+            let rp = rel_string(p, vault);
+            if hits.contains(&rp) {
+                continue;
+            }
+            let text = match fs::read_to_string(p) {
+                Ok(t) => t,
+                Err(_) => continue,
+            };
+            for (kind, target) in active_links(&text) {
+                if kind == 'w' && !target.to_lowercase().contains(tgt_base.as_str()) {
+                    continue; // needle filter: scan_links(needle=tgt_base)
+                }
+                if link_matches(p, kind, &target, &fp, &tgt_base, &tgt_rel_noext, &idx, vault) {
+                    hits.insert(rp.clone());
+                    break;
+                }
             }
         }
     }
@@ -498,12 +515,28 @@ fn cmd_orphans(folder: &str, vault: &Path, t0: Instant) -> Outcome {
 
     let mut path_targets: HashSet<String> = HashSet::new();
     let mut bare_by_name: HashMap<String, Vec<PathBuf>> = HashMap::new();
-    for p in &files {
-        let text = match fs::read_to_string(p) {
-            Ok(t) => t,
-            Err(_) => continue,
-        };
-        for (kind, target) in active_links(&text) {
+    // cache-first: same rows the live loop would lex; non-UTF-8 files are
+    // skipped (utf8_ok=0), mirroring the python scanner's skip
+    let cachemap = crate::cache::links_map(vault);
+    let mut cached_rows: Vec<(PathBuf, Vec<(char, String)>)> = Vec::new();
+    if let Some(cm) = &cachemap {
+        for (rp, fl) in cm {
+            if fl.utf8_ok {
+                cached_rows.push((vault.join(rp), fl.links.clone()));
+            }
+        }
+    }
+    let live_iter: Vec<(PathBuf, Vec<(char, String)>)> = if cachemap.is_some() {
+        cached_rows
+    } else {
+        files.iter().filter_map(|p| {
+            fs::read_to_string(p).ok().map(|text| (p.clone(), active_links(&text)))
+        }).collect()
+    };
+    for (p, file_links) in &live_iter {
+        for (kind, target) in file_links {
+            let kind = *kind;
+            let target = target.clone();
             let tl = target.trim().to_lowercase();
             if kind == 'm' {
                 let dec = unquote(&tl);
@@ -567,18 +600,23 @@ fn cmd_deadends(vault: &Path, t0: Instant) -> Outcome {
     let mut rels: Vec<String> = files.iter().map(|p| rel_string(p, vault)).collect();
     rels.sort();
 
+    let cachemap = crate::cache::links_map(vault);
     let mut buf = String::new();
     let mut n = 0usize;
     for rp in &rels {
-        let full = vault.join(rp);
-        // Python: open(..., errors="replace").read() — never raises on bad
-        // UTF-8, so mirror with a lossy decode rather than Fallback.
-        let bytes = match fs::read(&full) {
-            Ok(b) => b,
-            Err(_) => return Outcome::Fallback,
+        let empty = if let Some(cm) = &cachemap {
+            match cm.get(rp) {
+                Some(fl) => fl.links.is_empty(),   // deadends counts lossy-lexed links
+                None => return Outcome::Fallback,  // cache/walk disagree: refuse to guess
+            }
+        } else {
+            let bytes = match fs::read(vault.join(rp)) {
+                Ok(b) => b,
+                Err(_) => return Outcome::Fallback,
+            };
+            active_links(&String::from_utf8_lossy(&bytes)).is_empty()
         };
-        let text = String::from_utf8_lossy(&bytes).into_owned();
-        if active_links(&text).is_empty() {
+        if empty {
             buf.push_str(rp);
             buf.push('\n');
             n += 1;
