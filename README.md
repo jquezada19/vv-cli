@@ -62,6 +62,18 @@ how caches lie. The **native entry** keeps a TSV link cache (`.vvidx`) behind
 behind its graph and frontmatter commands and `lint --quick`. Both follow the
 same freshness contract, described here in the SQLite index's terms.
 
+The `.vvidx` cache additionally carries an **integrity footer** (body length +
+checksum), because the freshness contract alone is not enough to make it safe.
+Per-file `(mtime, size, ino)` equality proves each surviving record still
+describes its file — it cannot prove that record's own link rows survived a
+crash, so a record-aligned partial write would pass every structural check and
+silently serve *missing links*. The footer makes that state detectable, which is
+what lets the write skip `fsync` (a crash can lose the newest cache; it cannot
+produce one that lies). Both halves are pinned by `tests/test_cache_integrity.py`
+and were confirmed by disabling each and watching the suite fail. Format,
+reproduction, and the measured case against backing this with SQLite instead:
+[docs/cache-format.md](docs/cache-format.md).
+
 The python entry's index is a **persistent SQLite cache** under
 `~/.cache/vv/index/`, never inside the vault. Freshness is per-invocation, not
 per-interval: every command stat-walks the vault (no file reads, ~10 ms), diffs
