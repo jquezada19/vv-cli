@@ -60,12 +60,12 @@ pub fn sha256_hex(data: &[u8]) -> String {
     h.iter().map(|x| format!("{:08x}", x)).collect()
 }
 
-fn sha8(t: &str) -> String { sha256_hex(t.as_bytes())[..8].to_string() }
+pub fn sha8(t: &str) -> String { sha256_hex(t.as_bytes())[..8].to_string() }
 
 // ---------- md structure, ported line-for-line from vv_impl.py ----------
 const BOM: char = '\u{feff}';
 
-fn fm_bounds(lines: &[&str]) -> usize {
+pub fn fm_bounds(lines: &[&str]) -> usize {
     if lines.is_empty() { return 0; }
     let first = lines[0].trim_start_matches(BOM).trim_end_matches('\r');
     if first != "---" { return 0; }
@@ -88,7 +88,7 @@ fn fence_line(l: &str) -> Option<(char, usize, &str)> {
     Some((ch, run, &rest[run..]))
 }
 
-fn fence_mask(lines: &[&str], start: usize) -> Vec<bool> {
+pub fn fence_mask(lines: &[&str], start: usize) -> Vec<bool> {
     let mut masked = vec![false; lines.len()];
     let mut marker: Option<(char, usize)> = None;
     for i in start..lines.len() {
@@ -118,7 +118,7 @@ fn fence_mask(lines: &[&str], start: usize) -> Vec<bool> {
 pub struct Sec { pub id: String, pub level: usize, pub title: String,
                  pub start: usize, pub end: usize }
 
-fn heading(l: &str) -> Option<(usize, &str)> {
+pub fn heading(l: &str) -> Option<(usize, &str)> {
     // ^(#{1,6})\s+(.*)$ — python \s matches unicode ws but headings use ASCII;
     // match python: any char with is_whitespace() after the hashes.
     let b = l.as_bytes();
@@ -161,7 +161,7 @@ pub fn sec_text(lines: &[&str], s: &Sec) -> String {
 
 // find_sec happy path: id, #Heading, (preamble), unambiguous title. Anything
 // else (miss OR ambiguity) -> None -> python fallback for the canonical error.
-fn find_sec<'a>(secs: &'a [Sec], sid: &str) -> Option<&'a Sec> {
+pub fn find_sec<'a>(secs: &'a [Sec], sid: &str) -> Option<&'a Sec> {
     for s in secs { if s.id == sid { return Some(s); } }
     let mut want = sid.trim().to_string();
     if want.starts_with('#') {
@@ -177,14 +177,14 @@ fn find_sec<'a>(secs: &'a [Sec], sid: &str) -> Option<&'a Sec> {
 }
 
 // ---------- resolve happy path ----------
-fn contain(vault: &Path, rel: &str) -> Option<PathBuf> {
+pub fn contain(vault: &Path, rel: &str) -> Option<PathBuf> {
     let full = vault.join(rel);
     let real = fs::canonicalize(&full).ok()?;
     let vreal = fs::canonicalize(vault).ok()?;
     if real == vreal || real.starts_with(&vreal) { Some(full) } else { None }
 }
 
-fn resolve(vault: &Path, ref_: &str) -> Option<PathBuf> {
+pub fn resolve(vault: &Path, ref_: &str) -> Option<PathBuf> {
     if let Some(fp) = contain(vault, ref_) {
         if fp.is_file() { return Some(fp); }
     }
@@ -205,7 +205,7 @@ fn resolve(vault: &Path, ref_: &str) -> Option<PathBuf> {
 }
 
 // ---------- metrics (mirror _log in vv_impl.py) ----------
-fn log_metrics(op: &str, t0: std::time::Instant, out_bytes: usize, cf: u64) {
+pub fn log_metrics(op: &str, t0: std::time::Instant, out_bytes: usize, cf: u64) {
     if std::env::var_os("VV_JOURNAL_ROOT").is_some() || std::env::var_os("VV_NO_METRICS").is_some() {
         return;
     }
@@ -227,7 +227,7 @@ fn log_metrics(op: &str, t0: std::time::Instant, out_bytes: usize, cf: u64) {
     }
 }
 
-fn emit(buf: &str) -> usize {
+pub fn emit(buf: &str) -> usize {
     print!("{}", buf);
     buf.as_bytes().len()
 }
@@ -292,7 +292,7 @@ pub fn run(cmd: &str, args: &[String], vault: &Path) -> Outcome {
     }
 }
 
-fn split_fm(t: &str) -> Option<&str> {
+pub fn split_fm(t: &str) -> Option<&str> {
     // ^---\r?\n(.*?)\r?\n---(\r?\n)?  non-greedy, DOTALL
     let rest = t.strip_prefix("---\r\n").or_else(|| t.strip_prefix("---\n"))?;
     // find earliest \r?\n---(\r?\n|$)
