@@ -46,7 +46,7 @@ def patch_result(text, s, stdin_body):
     return vv.splice(lines, s["start"], s["end"], bl)
 
 bad_struct, bad_rt, unreadable, parse_err = [], [], [], []
-n_notes = n_secs = 0
+n_notes = n_secs = n_real = n_real_secs = 0
 t0 = time.perf_counter()
 for fp in vv.md_files():
     try:
@@ -64,6 +64,9 @@ for fp in vv.md_files():
     except Exception as e:
         parse_err.append(f"{vv.rel(fp)}: {e!r}"[:100]); continue
     n_notes += 1
+    if not vv.rel(fp).startswith("Sandbox/"):
+        n_real += 1
+        n_real_secs += len([x for x in secs if x["start"] != x["end"]])
     for i, s in enumerate(secs):
         if s["start"] == s["end"]:
             continue
@@ -74,6 +77,27 @@ for fp in vv.md_files():
             bad_rt.append(f"{vv.rel(fp)}#{s['id']}")
 el = time.perf_counter() - t0
 print(f"scanned {n_notes} notes / {n_secs} sections in {el:.1f}s ({el/max(n_notes,1)*1000:.2f}ms per note)")
+
+# Floor: a missing, empty, or wrongly-pointed vault otherwise scans nothing,
+# every check passes vacuously, and the gate prints REAL-VAULT VERIFICATION
+# PASS. A corpus check that cannot fail on an empty corpus is not a check.
+# 5, not 50: CI runs this whole gate against a deliberately small generated
+# fixture vault (.github/workflows/fixture_vault.py builds 10 notes), so a floor
+# above that turns CI red for a healthy tree. The floor's job is catching a
+# MISSING, EMPTY, or wrongly-pointed vault — which scans 0 — not detecting
+# partial degradation, which it cannot do: 60 notes of an expected 5,000 pass.
+FLOOR = int(os.environ.get("VV_VERIFY_MIN_NOTES", "5"))
+# Counted OUTSIDE Sandbox/ on purpose: earlier suites in the gate create
+# Sandbox/vvtest/ fixtures, and counting those masked this floor exactly when it
+# mattered — an empty vault run through the full gate cleared it on suite
+# residue and failed later with a confusing error about a CRLF note the user
+# never wrote.
+check(f"corpus floor (>= {FLOOR} notes outside Sandbox/)", n_real >= FLOOR,
+      f"scanned only {n_real} non-Sandbox notes from {vv.VAULT} "
+      f"({n_notes} total incl. test fixtures) — vault missing or empty?")
+check(f"section floor (>= {FLOOR} sections outside Sandbox/)", n_real_secs >= FLOOR,
+      f"parsed only {n_real_secs} non-Sandbox sections from {n_real} notes "
+      f"({n_secs} total incl. test fixtures) — outline parsing dead?")
 check("structure: sections partition every note", not bad_struct, f"{len(bad_struct)}: {bad_struct[:3]}")
 check("round-trip: every section byte-identical", not bad_rt, f"{len(bad_rt)}: {bad_rt[:3]}")
 check("parser: no crashes", not parse_err, f"{len(parse_err)}: {parse_err[:2]}")

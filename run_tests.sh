@@ -12,6 +12,16 @@ cd "$(dirname "$0")"
 # child process, including any suite added later.
 export VV_NO_METRICS=1
 
+# src/vv_impl.py uses PEP 701 multi-line f-string expressions (3.12+). On an
+# older interpreter the python oracle dies at import, and the differential
+# suites then report a cache or engine defect for what is an interpreter
+# problem — so say it once, here, instead.
+if ! python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 12) else 1)'; then
+  _pyver=$(python3 -c 'import sys; print(".".join(map(str, sys.version_info[:3])))' 2>/dev/null || echo "missing or not runnable")
+  echo "  FAIL python3 is ${_pyver} — this project needs 3.12+"
+  exit 1
+fi
+
 fail=0
 run() {  # run <label> <cmd...>
   local label="$1"; shift
@@ -26,9 +36,34 @@ run() {  # run <label> <cmd...>
   fi
 }
 
+if [ ! -d vrust ]; then
+  # Not optional: without it every native suite SKIPs and the gate goes green on
+  # a tree that cannot have been tested.
+  echo "  FAIL vrust/ is missing — the native engine is part of this repo"
+  exit 1
+fi
 if [ -d vrust ]; then
-  (cd vrust && cargo build --release >/dev/null 2>&1) && echo "  ok   rust engine built" \
-    || echo "  --   rust engine unavailable (python fallback will be used)"
+  # A failed build must fail the gate. Otherwise a stale target/release/vrust
+  # from an earlier build stays on disk and every native suite silently tests
+  # the OLD binary while the gate reports green.
+  _build_log=$(mktemp)
+  if (cd vrust && cargo build --release >"$_build_log" 2>&1); then
+    echo "  ok   rust engine built"
+  else
+    # ALWAYS fail. With a stale binary present the native suites would silently
+    # test the OLD executable; with no binary they SKIP, and a compile-breaking
+    # change would ride a green gate on any runner whose cargo cache was cold.
+    fail=1
+    if [ -x vrust/target/release/vrust ]; then
+      echo "  FAIL rust engine build failed and a stale binary is present"
+    else
+      echo "  FAIL rust engine build failed"
+    fi
+    # Show why. A bare "build failed" is unactionable for a contributor whose
+    # only view of this is a CI log.
+    tail -20 "$_build_log" | sed 's/^/         /'
+  fi
+  rm -f "$_build_log"
 fi
 
 echo "unit + integration:"
