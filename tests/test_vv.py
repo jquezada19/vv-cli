@@ -129,6 +129,48 @@ check("T10g pre-quoted value is not double-quoted",
 for k in ("description", "plain", "listy", "prequoted"):
     run("unset", REL_FIX, k)
 
+# --- lost-update guard (2026-08-26) ---------------------------------------
+# Obsidian is a SECOND WRITER: it normally runs with the vault open and saves
+# buffers on its own schedule. Only `patch` was compare-and-swapped, so a save
+# landing between our read and our write was silently overwritten by every other
+# writer (set/unset/append/appendsec/daily-append). Found while surveying
+# AFFiNE's CRDT model -- the "single-writer, CAS is enough" premise was wrong.
+sys.path.insert(0, os.path.dirname(VV))   # suite is subprocess-based; this guard is unit-tested
+import vv as _vv
+_lu = f"{SB}/VV LostUpdate.md"
+open(_lu, "w").write("---\nstatus: next\n---\n\nbody\n")
+_sig = _vv.file_sig(_lu)
+_vv.atomic_write(_lu, "---\nstatus: done\n---\n\nbody\n", expect_sig=_sig)
+check("lost-update: write with a current signature succeeds",
+      "status: done" in open(_lu).read())
+open(_lu, "a").write("\nconcurrent edit\n")          # the second writer lands
+try:
+    _vv.atomic_write(_lu, "clobbered", expect_sig=_sig)
+    _refused = None
+except SystemExit as e:
+    _refused = e.code
+check("lost-update: stale signature refused with exit 3", _refused == 3)
+check("lost-update: the concurrent writer's edit survives",
+      "concurrent edit" in open(_lu).read())
+os.remove(_lu)
+
+# --- show --max-bytes is a real ceiling (2026-08-26) ----------------------
+# Two compounding defects, found by a Codex review seat: the budget counted
+# CHARACTERS (a non-ASCII section under-counts up to 4x) and a single oversized
+# section bypassed the cap entirely because the guard required used > 0.
+# Measured: --max-bytes 1000 emitted 20,009 bytes. `show` exists to bound
+# context cost, so an advertised ceiling that is not a ceiling is the whole
+# feature failing quietly.
+_bigd = f"{SB}/VV Big.md"
+open(_bigd, "w", encoding="utf-8").write("## A\n\n" + ("\u00e9" * 6000) + "\n")
+for _cap in (4000, 1000, 300, 120):
+    _r = run("show", "Sandbox/vvtest/VV Big.md", "--max-bytes", str(_cap))
+    _b = len(_r.stdout.encode("utf-8"))
+    check(f"show --max-bytes {_cap} is a hard ceiling (got {_b}B)", _b <= _cap)
+check("oversized first section is marked truncated, not dumped",
+      "[truncated" in run("show", "Sandbox/vvtest/VV Big.md", "--max-bytes", "500").stdout)
+os.remove(_bigd)
+
 r = run("unset", REL_FIX, "status")
 t = open(f"{SB}/VV Fixture.md").read()
 check("T11 unset", "status:" not in t and "type: test" in t)

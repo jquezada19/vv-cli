@@ -244,6 +244,27 @@ def fm_props(fm):
                 props[m.group(1)] = m.group(2).strip('"')
     return props
 
+def file_sig(fp):
+    """Cheap identity of a file's current bytes, for lost-update detection.
+
+    Obsidian is a SECOND WRITER: it is normally running with the vault open and
+    saves buffers on its own schedule. Only `patch` was compare-and-swapped;
+    set/unset/append/appendsec/daily-append were read-modify-write, so a save
+    landing between our read and our write was silently overwritten (found
+    2026-08-26 while surveying AFFiNE's CRDT model -- the "single-writer, CAS is
+    enough" premise was simply wrong).
+
+    mtime_ns + size, not a hash: the point is to detect a concurrent write in the
+    millisecond window we actually opened, and re-hashing every file on every
+    frontmatter flip would cost more than it protects.
+    """
+    try:
+        st = os.stat(fp)
+        return (st.st_mtime_ns, st.st_size)
+    except OSError:
+        return None
+
+
 def read_raw(fp):
     try:
         with open(fp, newline="", encoding="utf-8") as f:
@@ -254,9 +275,13 @@ def read_raw(fp):
 def eol_of(text):
     return "\r\n" if "\r\n" in text else "\n"
 
-def atomic_write(fp, content):
+def atomic_write(fp, content, expect_sig=None):
     # follow a symlink to its real target so we replace the file, not the link
     target = os.path.realpath(fp) if os.path.islink(fp) else fp
+    if expect_sig is not None and file_sig(target) != expect_sig:
+        # Same vocabulary as patch's stale-hash refusal: exit 3, re-read, retry.
+        die(f"stale: {rel(target)} changed on disk since it was read "
+            f"(Obsidian or another writer) — re-run the command", 3)
     d = os.path.dirname(target) or "."
     import tempfile as _tf
     fd, tmp = _tf.mkstemp(dir=d, prefix=".vv-", suffix=".tmp")
@@ -353,20 +378,22 @@ def cmd_patch(ref, sid, expect):
 def cmd_appendsec(ref, sid, text):
     _dirty_gate()
     fp = resolve(ref)
+    _sig = file_sig(fp)
     lines, secs = parse(read_raw(fp))
     s = find_sec(lines, secs, sid)
     ins = s["end"]
     while ins > s["start"] and lines[ins - 1].strip() == "":
         ins -= 1
-    atomic_write(fp, splice(lines, ins, ins, [text]))
+    atomic_write(fp, splice(lines, ins, ins, [text]), expect_sig=_sig)
     out(f"appended to {sid} in {rel(fp)}")
 
 def cmd_append(ref, text):
     _dirty_gate()
     fp = resolve(ref)
+    _sig = file_sig(fp)
     cur = read_raw(fp)
     eol = eol_of(cur)
-    atomic_write(fp, cur + ("" if cur.endswith("\n") or not cur else eol) + text + eol)
+    atomic_write(fp, cur + ("" if cur.endswith("\n") or not cur else eol) + text + eol, expect_sig=_sig)
     out(f"appended to {rel(fp)}")
 
 _YAML_LEAD = set("-?:,[]{}#&*!|>'\"%@`")
@@ -402,11 +429,12 @@ def cmd_set(ref, key, value):
     _dirty_gate()
     value = yaml_scalar(value)
     fp = resolve(ref)
+    _sig = file_sig(fp)
     text = read_raw(fp)
     fm, body, tail, bom = split_fm_full(text)
     eol = eol_of(text)
     if fm is None:
-        atomic_write(fp, bom + f"---{eol}{key}: {value}{eol}---{eol}" + text[len(bom):])
+        atomic_write(fp, bom + f"---{eol}{key}: {value}{eol}---{eol}" + text[len(bom):], expect_sig=_sig)
     else:
         fm_lines = fm.replace("\r\n", "\n").split("\n")
         if block_scalar_key(fm_lines, key):
@@ -417,12 +445,13 @@ def cmd_set(ref, key, value):
             fm_lines[hit[0]] = f"{key}: {value}"
         else:
             fm_lines.append(f"{key}: {value}")
-        atomic_write(fp, bom + "---" + eol + eol.join(fm_lines) + eol + "---" + tail + body)
+        atomic_write(fp, bom + "---" + eol + eol.join(fm_lines) + eol + "---" + tail + body, expect_sig=_sig)
     out(f"set {key}={value} in {rel(fp)}")
 
 def cmd_unset(ref, key):
     _dirty_gate()
     fp = resolve(ref)
+    _sig = file_sig(fp)
     text = read_raw(fp)
     fm, body, tail, bom = split_fm_full(text)
     if fm is None:
@@ -434,7 +463,7 @@ def cmd_unset(ref, key):
     kept = [l for l in fm_lines if not re.match(rf"^{re.escape(key)}:", l)]
     if kept == fm_lines:
         die(f"not-found: no key {key} in {rel(fp)}")
-    atomic_write(fp, bom + "---" + eol + eol.join(kept) + eol + "---" + tail + body)
+    atomic_write(fp, bom + "---" + eol + eol.join(kept) + eol + "---" + tail + body, expect_sig=_sig)
     out(f"unset {key} in {rel(fp)}")
 
 def cmd_new(*args):
@@ -921,11 +950,50 @@ def cmd_show(ref, *args):
         if not started:
             continue
         t = sec_text(lines, s)
-        if used + len(t) > max_bytes and used > 0:
-            out(f"[more: {s['id']} '{s['title']}' {len(t)}B — continue: vv show {ref} --from {s['id']}]")
+        # BYTES, not characters: `show` exists to bound context cost, and len()
+        # on a non-ASCII section under-counts by up to 4x. Measured 2026-08-26:
+        # --max-bytes 1000 emitted 20,009 bytes. Same chars-vs-bytes class as the
+        # metrics fix earlier that day -- the metric was corrected, the ENFORCER
+        # was not.
+        tb = len(t.encode("utf-8"))
+        if tb == 0:
+            continue          # an empty preamble section still cost a newline
+        # `used` counts EMITTED bytes, newline included: out() adds one per call,
+        # and leaving it out put the total over the cap by exactly that much.
+        if used + tb + 1 > max_bytes:
+            if used > 0:
+                more = (f"[more: {s['id']} '{s['title']}' {tb}B "
+                        f"— continue: vv show {ref} --from {s['id']}]")
+                if used + len(more.encode("utf-8")) + 1 > max_bytes:
+                    more = "[more]"
+                # If even "[more]" does not fit, it is still emitted: a budget
+                # under ~32B cannot carry a continuation marker, and overshooting
+                # by a few bytes there is strictly better than truncating
+                # SILENTLY, which would look like the note simply ended.
+                out(more)
+                break
+            # A single oversized section used to bypass the cap entirely (the
+            # guard required used > 0), so the advertised ceiling was not a
+            # ceiling. Truncate on a UTF-8 boundary instead: the cap holds AND
+            # the caller still makes progress, which returning nothing would not.
+            marker = (f"[truncated: {s['id']} '{s['title']}' is {tb}B of a {max_bytes}B "
+                      f"budget — read it whole with: vv read {ref} {s['id']}]")
+            # The marker and the newlines out() adds count against the budget
+            # too, or the ceiling is still exceeded -- by less, which is the
+            # same bug. Two out() calls => two newlines.
+            room = max_bytes - used - len(marker.encode("utf-8")) - 2
+            if room <= 0:
+                marker = "[truncated]"
+                room = max_bytes - used - len(marker.encode("utf-8")) - 2
+            if room > 0:
+                # sec_text already ends with a newline and out() adds one, so the
+                # slice is rstripped -- otherwise the total lands 1 byte over.
+                out(t.encode("utf-8")[:room].decode("utf-8", errors="ignore").rstrip("\n"))
+            out(marker)
+            used = max_bytes
             break
         out(t)
-        used += len(t)
+        used += tb + 1
     if not started:
         die(f"not-found: no section {start} — next: vv outline NOTE")
 
