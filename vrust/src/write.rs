@@ -533,7 +533,7 @@ fn cmd_appendsec(vault: &Path, args: &[String]) -> Outcome {
 fn exec_python_with_stdin(vault: &Path, args: &[String], body: &[u8]) -> Outcome {
     use std::process::{Command, Stdio};
     let vv = std::env::var("VV_PY_ENTRY").unwrap_or_else(|_| {
-        std::env::current_exe().ok()
+        std::env::current_exe().ok().and_then(|p| std::fs::canonicalize(p).ok())
             .and_then(|p| p.ancestors().nth(4).map(|a| a.to_path_buf()))
             .map(|r| r.join("src/vv.py").to_string_lossy().into_owned())
             .unwrap_or_else(|| "vv.py".into())
