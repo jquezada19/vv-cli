@@ -8,6 +8,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::exit;
 mod readpath;
+mod graph;
+mod write;
+mod query;
 
 fn vault() -> PathBuf {
     if let Ok(v) = env::var("VV_VAULT") {
@@ -393,8 +396,16 @@ fn main() {
         }
     }
     if let Some(cmd) = args.first().map(String::as_str) {
-        if matches!(cmd, "outline" | "read" | "head" | "resolve") {
-            match readpath::run(cmd, &args[1..], &vault()) {
+        let handler: Option<fn(&str, &[String], &std::path::Path) -> readpath::Outcome> =
+            match cmd {
+                "outline" | "read" | "head" | "resolve" => Some(readpath::run),
+                "backlinks" | "links" | "orphans" | "deadends" | "impact" => Some(graph::run),
+                "set" | "unset" | "append" | "appendsec" | "new" | "daily-append" | "patch" => Some(write::run),
+                "board" | "tags" | "props" | "show" => Some(query::run),
+                _ => None,
+            };
+        if let Some(h) = handler {
+            match h(cmd, &args[1..], &vault()) {
                 readpath::Outcome::Done(c) => exit(c),
                 readpath::Outcome::Fallback => exec_python(&orig),
             }
