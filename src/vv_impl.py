@@ -788,7 +788,9 @@ def cmd_props(key, folder=""):
     _list_out(entries, sum(c.values()), f"notes with {key}")
 
 def _parse_search_args(args):
-    k, w, files_only, terms = 5, 500, False, []
+    # a global --limit (stripped in main) acts as --k unless --k is explicit —
+    # accepting the flag and silently ignoring it would be agent-hostile
+    k, w, files_only, terms = (_LIMIT or 5), 500, False, []
     it = iter(args)
     for a in it:
         if a == "--k": k = int(next(it))
@@ -896,7 +898,11 @@ def cmd_search(*args):
         # the zero-hit phrase hint below is ours to add. Without it the engine
         # hands off to python itself on zero hits and the hint prints TWICE.
         env = dict(os.environ, VV_FROM_PY="1")
-        r = subprocess.run([VRUST, "search", *args], capture_output=True, text=True, env=env)
+        # k already folds in an explicit --k OR the globally-stripped --limit;
+        # re-state it for the child, which never saw the stripped flag. A
+        # duplicate --k is harmless (same value, last-wins parse).
+        r = subprocess.run([VRUST, "search", *args, "--k", str(k)],
+                           capture_output=True, text=True, env=env)
         sys.stdout.write(r.stdout); sys.stderr.write(r.stderr)
         global _out_total
         _out_total += len(r.stdout.encode("utf-8"))

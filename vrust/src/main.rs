@@ -118,7 +118,8 @@ fn score_one(
 }
 
 fn cmd_search(args: &[String], orig: &[String]) -> ! {
-    let mut k = 5usize;
+    // global --limit acts as --k unless --k is explicit (parity with python)
+    let mut k = readpath::LIMIT.get().copied().unwrap_or(5);
     let mut w = 500usize;
     let mut files_only = false;
     let mut terms: Vec<String> = Vec::new();

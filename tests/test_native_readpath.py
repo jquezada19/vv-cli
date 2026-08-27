@@ -193,6 +193,22 @@ def main():
                 pair.append(r.stdout)
             if pair[0] != pair[1]:
                 fails.append(("limit-parity", cargs[0], [o[:50] for o in pair]))
+        # search honors a global --limit as --k when --k is absent (silent
+        # acceptance-without-effect is agent-hostile); explicit --k wins.
+        # three paths: rust direct, pure python, AND python-entry shelling to
+        # the rust child (the path that lost the stripped flag on first draft).
+        for label, cmd, eng in (("rust", [VR], None),
+                                ("python", [sys.executable, VV], "python"),
+                                ("py-to-rust", [sys.executable, VV], "rust")):
+            env2 = dict(env)
+            if eng:
+                env2["VV_ENGINE"] = eng
+            r = subprocess.run(cmd + ["search", "L1", "--files", "--limit", "1"],
+                               capture_output=True, text=True, env=env2)
+            n += 1
+            paths = [l for l in r.stdout.splitlines() if l.endswith(".md")]
+            if len(paths) != 1 or "(1 of " not in r.stdout:
+                fails.append(("search-limit", label, r.stdout[:80]))
         if fails:
             for f in fails[:8]:
                 print("FAIL", f)
