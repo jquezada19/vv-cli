@@ -344,6 +344,32 @@ pub fn log_metrics(op: &str, t0: std::time::Instant, out_bytes: usize, cf: u64) 
     }
 }
 
+/// Global --limit N, stripped from argv in main(). Enumerators honor it via
+/// push_limited; absent = unlimited.
+pub static LIMIT: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+
+/// Entry lines + count trailer for an enumerator. The K-of-M trailer appears
+/// ONLY when --limit actually truncated — `total` may exceed entries.len()
+/// even without a limit (tags --counts shows the top 40 while the trailer
+/// counts every distinct tag), and that case keeps the plain total (parity
+/// with python's _list_out).
+pub fn push_limited(buf: &mut String, entries: &[String], total: usize, noun: &str) {
+    let lim = LIMIT.get().copied();
+    let shown = match lim {
+        Some(l) if entries.len() > l => &entries[..l],
+        _ => entries,
+    };
+    for e in shown {
+        buf.push_str(e);
+        buf.push('\n');
+    }
+    if lim.is_some_and(|l| entries.len() > l) {
+        buf.push_str(&format!("({} of {} {})\n", shown.len(), total, noun));
+    } else {
+        buf.push_str(&format!("({} {})\n", total, noun));
+    }
+}
+
 pub fn emit(buf: &str) -> usize {
     print!("{}", buf);
     buf.len()

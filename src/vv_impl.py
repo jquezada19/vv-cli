@@ -17,7 +17,7 @@ NOTE = vault-relative path OR bare name (wikilink-style resolution).
 SEC  = an outline id (H3) or the heading title exactly as `outline` prints it.
 search: unquoted args are AND-ed terms; a QUOTED arg is ONE phrase.
         `vv search a b` != `vv search "a b"`.
-Global:  --vault PATH        Help: vv --help (or no args)
+Global:  --vault PATH · --limit N (enumerators)        Help: vv --help
 Every op logs {op, ms, out_bytes} to ~/.claude/metrics/vv.jsonl.
 Exit: 0 ok · 1 not-found/usage · 3 stale hash or drifted plan · 4 pending journal (vv doctor)
 """
@@ -676,9 +676,7 @@ def cmd_backlinks(ref):
             continue
         if link_matches(p, kind, t, fp, tgt_base, tgt_rel_noext, idx):
             hits.append(p)
-    for p in sorted(hits):
-        out(rel(p))
-    out(f"({len(hits)} backlinks)")
+    _list_out([rel(p) for p in sorted(hits)], len(hits), "backlinks")
 
 def cmd_links(ref):
     fp = resolve(ref)
@@ -686,9 +684,7 @@ def cmd_links(ref):
     for _, kind, t in link_targets_in(read_raw(fp)):
         if kind == "wiki" and t not in seen:
             seen.append(t)
-    for l in seen:
-        out(l)
-    out(f"({len(seen)} links)")
+    _list_out(seen, len(seen), "links")
 
 def cmd_orphans(folder=""):
     root = contain(folder) if folder else VAULT
@@ -713,7 +709,7 @@ def cmd_orphans(folder=""):
             path_targets.add(tl)
         else:
             bare_by_name.setdefault(tl, []).append(p)
-    n = 0
+    entries = []
     for p in sorted(files):
         if not (p == root or p.startswith(root + os.sep) or not folder):
             continue
@@ -722,8 +718,8 @@ def cmd_orphans(folder=""):
         linked = rel_noext in path_targets or \
             any(src != p and bare_resolves(src, p, idx) for src in bare_by_name.get(base, ()))
         if not linked:
-            out(rel(p)); n += 1
-    out(f"({n} orphans)")
+            entries.append(rel(p))
+    _list_out(entries, len(entries), "orphans")
 
 def cmd_board(folder, *filters):
     want = dict(f.split("=", 1) for f in filters)
@@ -755,9 +751,7 @@ def cmd_board(folder, *filters):
         rows.sort()   # deterministic + identical to the indexed path on nested
         # folders (they disagreed in walk order until 2026-08-27 — caught by the
         # native-port fixture suite, a latent inconsistency from the index change)
-    for name, status, typ in rows:
-        out(f"{status}\t{typ}\t{name}")
-    out(f"({len(rows)} notes)")
+    _list_out([f"{status}\t{typ}\t{name}" for name, status, typ in rows], len(rows), "notes")
 
 def cmd_tags(*args):
     from collections import Counter
@@ -770,9 +764,10 @@ def cmd_tags(*args):
         t = props.get("tags", "")
         for tag in re.findall(r"[\w/-]+", t):
             c[tag] += 1
-    for tag, n in c.most_common(40 if "--counts" in args else 9999):
-        out(f"{n}\t{tag}" if "--counts" in args else tag)
-    out(f"({len(c)} tags)")
+    counted = "--counts" in args
+    entries = [f"{n}\t{tag}" if counted else tag
+               for tag, n in c.most_common(40 if counted else 9999)]
+    _list_out(entries, len(c), "tags")
 
 def cmd_props(key, folder=""):
     root = contain(folder) if folder else VAULT
@@ -789,12 +784,13 @@ def cmd_props(key, folder=""):
         v = props.get(key)
         if v:
             c[v] += 1
-    for v, n in c.most_common():
-        out(f"{n}\t{v}")
-    out(f"({sum(c.values())} notes with {key})")
+    entries = [f"{n}\t{v}" for v, n in c.most_common()]
+    _list_out(entries, sum(c.values()), f"notes with {key}")
 
 def _parse_search_args(args):
-    k, w, files_only, terms = 5, 500, False, []
+    # a global --limit (stripped in main) acts as --k unless --k is explicit —
+    # accepting the flag and silently ignoring it would be agent-hostile
+    k, w, files_only, terms = (_LIMIT or 5), 500, False, []
     it = iter(args)
     for a in it:
         if a == "--k": k = int(next(it))
@@ -902,7 +898,11 @@ def cmd_search(*args):
         # the zero-hit phrase hint below is ours to add. Without it the engine
         # hands off to python itself on zero hits and the hint prints TWICE.
         env = dict(os.environ, VV_FROM_PY="1")
-        r = subprocess.run([VRUST, "search", *args], capture_output=True, text=True, env=env)
+        # k already folds in an explicit --k OR the globally-stripped --limit;
+        # re-state it for the child, which never saw the stripped flag. A
+        # duplicate --k is harmless (same value, last-wins parse).
+        r = subprocess.run([VRUST, "search", *args, "--k", str(k)],
+                           capture_output=True, text=True, env=env)
         sys.stdout.write(r.stdout); sys.stderr.write(r.stderr)
         global _out_total
         _out_total += len(r.stdout.encode("utf-8"))
@@ -1468,19 +1468,17 @@ def cmd_show(ref, *args):
         die(f"not-found: no section {start} — next: vv outline NOTE")
 
 def cmd_deadends():
-    n = 0
+    entries = []
     h = index_handle()
     if h is not None:
         linked = {r[0] for r in h.con.execute(
             "SELECT DISTINCT f.path FROM links l JOIN files f ON f.id = l.file_id")}
-        for rp in h.rel_paths():
-            if rp not in linked:
-                out(rp); n += 1
+        entries = [rp for rp in h.rel_paths() if rp not in linked]
     else:
         for p in sorted(rel(p) for p in md_files()):
             if not any(True for _ in link_targets_in(open(os.path.join(VAULT, p), errors="replace").read())):
-                out(p); n += 1
-    out(f"({n} deadends)")
+                entries.append(p)
+    _list_out(entries, len(entries), "deadends")
 
 def _git(args_):
     import subprocess
@@ -1911,9 +1909,12 @@ def cmd_lint(*args):
         r = subprocess.run([sys.executable, canonical] + [a for a in args], cwd=VAULT)
         _log(_out_total, r.returncode); sys.exit(r.returncode)
     # --quick: native broken-wikilink scan (fence/inline-code aware, path-style by last segment)
-    limit = 50
-    if "--limit" in args:
-        limit = int(args[list(args).index("--limit") + 1])
+    # --limit is stripped globally in main() into _LIMIT (it collided with
+    # this command's own flag parsing when the global strip landed — the flag
+    # never reached us and the default silently reasserted itself; caught by
+    # the real-vault gate, which has >50 findings where the fixture vault has
+    # none). Same semantic, one owner.
+    limit = _LIMIT if _LIMIT is not None else 50
     idx = basename_index()
     stems = set(idx.keys())
     import glob
@@ -2045,11 +2046,34 @@ def _version():
 
 USAGE_LINE = "usage: vv COMMAND [ARGS] — next: vv --help for the command list"
 
+_LIMIT = None  # set from a global --limit N in main(); enumerators honor it
+
+def _list_out(entries, total, noun):
+    """Emit an enumerator's entry lines + count trailer, honoring --limit.
+
+    total may exceed len(entries) even without --limit (tags --counts shows the
+    top 40 while the trailer counts every distinct tag) — the trailer always
+    reports the true total, and truncation is announced, never silent."""
+    shown = entries if _LIMIT is None else entries[:_LIMIT]
+    for e in shown:
+        out(e)
+    if _LIMIT is not None and len(entries) > _LIMIT:
+        out(f"({len(shown)} of {total} {noun})")
+    else:
+        out(f"({total} {noun})")
+
 def main():
     global VAULT, _VAULT_REAL, _op
     a = sys.argv[1:]
     if a and a[0] in ("--version", "version"):
         print(f"vv {_version()}"); sys.exit(0)
+    if "--limit" in a:
+        i = a.index("--limit")
+        if i + 1 >= len(a) or not a[i + 1].isdigit() or int(a[i + 1]) < 1:
+            die("usage: --limit requires a positive integer")
+        global _LIMIT
+        _LIMIT = int(a[i + 1])
+        a = a[:i] + a[i + 2:]
     if "--vault" in a:
         i = a.index("--vault")
         if i + 1 >= len(a):

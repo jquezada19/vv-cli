@@ -190,10 +190,11 @@ fn cmd_board(args: &[String], vault: &Path, t0: Instant) -> Outcome {
     }
     rows.sort();
     let mut buf = String::new();
-    for (name, status, typ) in &rows {
-        buf.push_str(&format!("{}\t{}\t{}\n", status, typ, name));
-    }
-    buf.push_str(&format!("({} notes)\n", rows.len()));
+    let entries: Vec<String> = rows
+        .iter()
+        .map(|(name, status, typ)| format!("{}\t{}\t{}", status, typ, name))
+        .collect();
+    readpath::push_limited(&mut buf, &entries, rows.len(), "notes");
     let n = readpath::emit(&buf);
     readpath::log_metrics("board", t0, n, 0);
     Outcome::Done(0)
@@ -287,14 +288,18 @@ fn cmd_tags(args: &[String], vault: &Path, t0: Instant) -> Outcome {
     }
     let limit = if counts_flag { Some(40) } else { None };
     let mut buf = String::new();
-    for (tag, n) in c.most_common(limit) {
-        if counts_flag {
-            buf.push_str(&format!("{}\t{}\n", n, tag));
-        } else {
-            buf.push_str(&format!("{}\n", tag));
-        }
-    }
-    buf.push_str(&format!("({} tags)\n", c.len()));
+    let entries: Vec<String> = c
+        .most_common(limit)
+        .into_iter()
+        .map(|(tag, n)| {
+            if counts_flag {
+                format!("{}\t{}", n, tag)
+            } else {
+                tag.to_string()
+            }
+        })
+        .collect();
+    readpath::push_limited(&mut buf, &entries, c.len(), "tags");
     let n = readpath::emit(&buf);
     readpath::log_metrics("tags", t0, n, 0);
     Outcome::Done(0)
@@ -345,10 +350,17 @@ fn cmd_props(args: &[String], vault: &Path, t0: Instant) -> Outcome {
         }
     }
     let mut buf = String::new();
-    for (v, n) in c.most_common(None) {
-        buf.push_str(&format!("{}\t{}\n", n, v));
-    }
-    buf.push_str(&format!("({} notes with {})\n", c.total(), key));
+    let entries: Vec<String> = c
+        .most_common(None)
+        .into_iter()
+        .map(|(v, n)| format!("{}\t{}", n, v))
+        .collect();
+    readpath::push_limited(
+        &mut buf,
+        &entries,
+        c.total() as usize,
+        &format!("notes with {}", key),
+    );
     let n = readpath::emit(&buf);
     readpath::log_metrics("props", t0, n, 0);
     Outcome::Done(0)

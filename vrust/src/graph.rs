@@ -480,11 +480,7 @@ fn cmd_backlinks(ref_: &str, vault: &Path, t0: Instant) -> Outcome {
     let mut sorted: Vec<String> = hits.into_iter().collect();
     sorted.sort();
     let mut buf = String::new();
-    for h in &sorted {
-        buf.push_str(h);
-        buf.push('\n');
-    }
-    buf.push_str(&format!("({} backlinks)\n", sorted.len()));
+    readpath::push_limited(&mut buf, &sorted, sorted.len(), "backlinks");
     let n = readpath::emit(&buf);
     readpath::log_metrics("backlinks", t0, n, cf);
     Outcome::Done(0)
@@ -509,11 +505,7 @@ fn cmd_links(ref_: &str, vault: &Path, t0: Instant) -> Outcome {
         }
     }
     let mut buf = String::new();
-    for l in &seen {
-        buf.push_str(l);
-        buf.push('\n');
-    }
-    buf.push_str(&format!("({} links)\n", seen.len()));
+    readpath::push_limited(&mut buf, &seen, seen.len(), "links");
     let n = readpath::emit(&buf);
     readpath::log_metrics("links", t0, n, cf);
     Outcome::Done(0)
@@ -589,7 +581,7 @@ fn cmd_orphans(folder: &str, vault: &Path, t0: Instant) -> Outcome {
     let root_prefix = format!("{}/", root_str);
 
     let mut buf = String::new();
-    let mut n = 0usize;
+    let mut entries: Vec<String> = Vec::new();
     for (pstr, p) in &sorted_files {
         let included = pstr == &root_str || pstr.starts_with(&root_prefix) || folder.is_empty();
         if !included {
@@ -607,12 +599,10 @@ fn cmd_orphans(folder: &str, vault: &Path, t0: Instant) -> Outcome {
                     .any(|src| src != p && bare_resolves(src, p, &idx, vault))
             });
         if !linked {
-            buf.push_str(&rp);
-            buf.push('\n');
-            n += 1;
+            entries.push(rp);
         }
     }
-    buf.push_str(&format!("({} orphans)\n", n));
+    readpath::push_limited(&mut buf, &entries, entries.len(), "orphans");
     let bytes = readpath::emit(&buf);
     readpath::log_metrics("orphans", t0, bytes, 0);
     Outcome::Done(0)
@@ -626,7 +616,7 @@ fn cmd_deadends(vault: &Path, t0: Instant) -> Outcome {
 
     let cachemap = crate::cache::links_map(vault);
     let mut buf = String::new();
-    let mut n = 0usize;
+    let mut entries: Vec<String> = Vec::new();
     for rp in &rels {
         let empty = if let Some(cm) = &cachemap {
             match cm.get(rp) {
@@ -641,12 +631,10 @@ fn cmd_deadends(vault: &Path, t0: Instant) -> Outcome {
             active_links(&String::from_utf8_lossy(&bytes)).is_empty()
         };
         if empty {
-            buf.push_str(rp);
-            buf.push('\n');
-            n += 1;
+            entries.push(rp.clone());
         }
     }
-    buf.push_str(&format!("({} deadends)\n", n));
+    readpath::push_limited(&mut buf, &entries, entries.len(), "deadends");
     let bytes = readpath::emit(&buf);
     readpath::log_metrics("deadends", t0, bytes, 0);
     Outcome::Done(0)
