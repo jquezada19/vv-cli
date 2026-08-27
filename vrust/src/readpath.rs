@@ -218,9 +218,18 @@ pub fn log_metrics(op: &str, t0: std::time::Instant, out_bytes: usize, cf: u64) 
     let ts = now.ok().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .unwrap_or_default();
     let ms = t0.elapsed().as_millis();
+    // Provenance label (VV_METRICS_SRC) so the pilot report can separate
+    // benchmark traffic from usage instead of guessing from the arrival rate.
+    // Sanitised to [A-Za-z0-9_-]{0,24}: this record is built by string
+    // formatting, so an unescaped quote here would corrupt the whole log.
+    let src: String = std::env::var("VV_METRICS_SRC").unwrap_or_default()
+        .chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .take(24).collect();
+    let src_field = if src.is_empty() { String::new() }
+                    else { format!(", \"src\": \"{}\"", src) };
     let rec = format!(
-        "{{\"ts\": \"{}\", \"op\": \"{}\", \"ms\": {}, \"out_bytes\": {}, \"exit\": 0, \"cf_bytes\": {}, \"engine\": \"native\"}}\n",
-        ts, op, ms, out_bytes, cf);
+        "{{\"ts\": \"{}\", \"op\": \"{}\", \"ms\": {}, \"out_bytes\": {}, \"exit\": 0, \"cf_bytes\": {}, \"engine\": \"native\"{}}}\n",
+        ts, op, ms, out_bytes, cf, src_field);
     use std::io::Write;
     if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(path) {
         let _ = f.write_all(rec.as_bytes());

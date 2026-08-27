@@ -88,25 +88,38 @@ def load(path, since, until, funnel=None, label=""):
 
 MACHINE_OPS_PER_MIN = 120       # sustained; interactive use does not reach this
 
+# When vv started stamping VV_METRICS_SRC into each row. Rows written before
+# this COULD NOT have been marked, so calling them "unmarked" is not a reproach
+# and must not read as an outstanding action -- an alarm that fires forever on
+# something nobody can fix is an alarm people learn to scroll past.
+PROVENANCE_SINCE = "2026-08-27T11:49"
 
-def split_machine_paced(rows):
-    """Separate machine-paced bursts from plausibly-interactive usage.
 
-    The keep/kill question is "did a HUMAN-driven session use this", and the log
-    cannot tell the two apart: a benchmark loop and an agent session write
-    identical rows. Measured 2026-08-27, 98% of this log came from four
-    build hours -- so an unguarded report says "adoption 100%" while actually
-    measuring the instrument. That is the false-clean failure inverted: a
-    number that looks like a triumphant result and describes our own test rig.
+def classify_traffic(rows):
+    """Split rows into marked-synthetic / unmarked-but-machine-paced / usage.
 
-    Rate is the tell that needs no cooperation from the logger: no interactive
-    session sustains >120 ops/minute for minutes on end.
+    Two mechanisms, in order of trustworthiness:
+
+    1. PROVENANCE (`src`): the invocation said what it was. vv writes this from
+       VV_METRICS_SRC, which bench/sweepguard.mark_bench() sets. Exact, no
+       heuristic, no false positives.
+    2. RATE: a backstop for traffic that arrived unmarked. No interactive
+       session sustains >=120 ops/minute for minutes on end.
+
+    The gap between them is the interesting number and is reported, not hidden:
+    unmarked machine-paced rows mean a benchmark ran WITHOUT calling
+    mark_bench() -- most likely an ad-hoc loop, which is exactly what produced
+    the 117,312 contaminating rows on 2026-08-27. Seeing that count is how a
+    forgotten mark becomes visible instead of silently skewing adoption.
     """
-    by_min = collections.Counter(r.get("ts", "")[:16] for r in rows)
+    marked = [r for r in rows if r.get("src")]
+    rest = [r for r in rows if not r.get("src")]
+    by_min = collections.Counter(r.get("ts", "")[:16] for r in rest)
     hot = {m for m, n in by_min.items() if n >= MACHINE_OPS_PER_MIN}
-    human = [r for r in rows if r.get("ts", "")[:16] not in hot]
-    machine = [r for r in rows if r.get("ts", "")[:16] in hot]
-    return human, machine, sorted(hot)
+    unmarked_machine = [r for r in rest if r.get("ts", "")[:16] in hot]
+    human = [r for r in rest if r.get("ts", "")[:16] not in hot]
+    labels = collections.Counter(r.get("src") for r in marked)
+    return human, marked, unmarked_machine, sorted(hot), labels
 
 
 def _explain(name, path, diag):
@@ -146,17 +159,31 @@ def main():
         print("\nABORT: both metrics logs are missing/empty — there is nothing to "
               "report. Fix the logger; do not treat this as a pilot signal.")
         return 2
-    human, machine, hot_min = split_machine_paced(rows)
-    if machine:
-        print(f"\n  !! CONTAMINATION: {len(machine):,} of {len(rows):,} ops "
-              f"({100 * len(machine) / len(rows):.0f}%) arrived in {len(hot_min)} minute(s) "
-              f"at >={MACHINE_OPS_PER_MIN} ops/min — benchmark or test traffic, not usage.\n"
-              f"     Adoption and volume below are reported on the "
-              f"{len(human):,} plausibly-interactive ops only.")
+    human, marked, unmarked_machine, hot_min, labels = classify_traffic(rows)
+    if marked:
+        print(f"\n  provenance: {len(marked):,} op(s) are self-declared synthetic "
+              f"({', '.join(f'{k}={v:,}' for k, v in labels.most_common())}) — excluded.")
+    if unmarked_machine:
+        legacy = [r for r in unmarked_machine if r.get("ts", "") < PROVENANCE_SINCE]
+        recent = [r for r in unmarked_machine if r.get("ts", "") >= PROVENANCE_SINCE]
+        print(f"\n  machine-paced, excluded by RATE: {len(unmarked_machine):,} op(s) "
+              f"across {len(hot_min)} minute(s) at >={MACHINE_OPS_PER_MIN}/min.")
+        if legacy:
+            print(f"     {len(legacy):,} predate provenance stamping "
+                  f"({PROVENANCE_SINCE}) — they could not have been marked. No action.")
+        if recent:
+            print(f"     !! {len(recent):,} were written AFTER stamping landed and still "
+                  f"carry no `src`.\n"
+                  f"        A benchmark ran without bench/sweepguard.mark_bench(), or vv\n"
+                  f"        was driven by an ad-hoc loop. FIX THE MARKING — a heuristic\n"
+                  f"        that has to guess will eventually guess wrong.")
+    excluded = len(marked) + len(unmarked_machine)
+    if excluded:
+        print(f"     reporting on the {len(human):,} remaining plausibly-interactive op(s).")
         rows = human
         if not rows:
-            print("\nABORT: every logged op was machine-paced. There is no usage signal "
-                  "in this window — do not read a keep/kill decision from it.")
+            print("\nABORT: every logged op was synthetic or machine-paced. There is no "
+                  "usage signal in this window — do not read a keep/kill decision from it.")
             return 2
     if not rows and not legacy:
         print(f"no vault ops logged in [{a.since}, {a.until}] -- "

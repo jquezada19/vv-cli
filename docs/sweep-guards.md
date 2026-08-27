@@ -80,6 +80,28 @@ wearing the opposite sign. Rate is the tell that needs no cooperation from the
 logger: no interactive session sustains that. The report now separates the
 populations and refuses to draw a conclusion when every row is machine-paced.
 
-Its own failure mode is the fixed threshold: 119 ops/min of test traffic passes,
-and a genuine 120-op burst is dropped. It is a heuristic, not provenance — the
-durable fix is for the logger to mark its own test traffic.
+### Provenance (the durable fix, landed 2026-08-27)
+
+The rate heuristic guesses. Invocations now **declare themselves**: vv writes
+`VV_METRICS_SRC` into each row as `src`, from both engines, and
+`bench/sweepguard.mark_bench()` sets it so every child process inherits it. The
+report separates by label FIRST and falls back to rate only for unmarked rows.
+
+The label reaches a record the native engine builds by **string formatting**, so
+it is sanitised to `[A-Za-z0-9_-]{0,24}`: an unescaped quote would corrupt every
+subsequent row in the log. A test injects `ev"il, "op": "pwned` through both
+engines and asserts the file still parses.
+
+Marking, not suppressing: `VV_NO_METRICS` (used by the test suite) throws the
+data away, which hides benchmark volume instead of explaining it. A marked row
+stays auditable.
+
+**Residual gap, stated plainly.** `mark_bench()` covers the bench scripts. It
+cannot cover an ad-hoc measurement loop typed into a shell — which is exactly
+what produced the 117,312 contaminating rows. So the rate backstop stays, and
+the report prints how much machine-paced traffic arrived *unmarked*: a forgotten
+mark becomes visible rather than silently skewing adoption.
+
+Rows written before `PROVENANCE_SINCE` could not have been marked, so they are
+reported as "No action" rather than as an outstanding fix. An alarm that fires
+forever on something nobody can change is one people learn to scroll past.
