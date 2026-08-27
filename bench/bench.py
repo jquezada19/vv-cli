@@ -96,6 +96,12 @@ def main():
     for dp, dirs, fs in os.walk(VAULT):
         dirs[:] = [d for d in dirs if not d.startswith(".")]
         n_notes += sum(1 for f in fs if f.endswith(".md"))
+    if n_notes < 10:
+        # A benchmark over an empty or wrong-pathed vault still prints plausible
+        # millisecond figures; the corpus size is the only tell, so assert it
+        # rather than printing it and hoping someone notices.
+        sys.exit(f"bench: only {n_notes} notes under {VAULT} — the vault path is "
+                 f"wrong or empty. Timings against this corpus are meaningless.")
     print(f"notes: {n_notes} · note: {a.note} · term: '{a.term}' · runs: {a.runs} (median)\n")
     print(f"{'task':<14}{'approach':<10}{'ms':>8}{'bytes':>10}")
     for task, approach, ms, nbytes in rows:
