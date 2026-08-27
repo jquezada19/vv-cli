@@ -18,17 +18,21 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 VR = os.path.join(REPO, "vrust/target/release/vrust")
 VV = os.path.join(REPO, "src/vv.py")
 TIMEOUT = int(os.environ.get("TORTURE_TIMEOUT", "60"))
+WORKERS = int(os.environ.get("TORTURE_WORKERS", "16"))
 rng = random.Random(int(os.environ.get("SEED", "77")))
 
 JR = tempfile.mkdtemp(prefix="vv-conc-journals-")
 HOME = tempfile.mkdtemp(prefix="vv-conc-home-")
-INDEX = os.path.join(HOME, ".cache/vv/index")
 
 
 def run(cmd, vault, py=False):
     env = dict(os.environ, VV_NO_METRICS="1", VV_VAULT=vault, VV_JOURNAL_ROOT=JR,
-               HOME=HOME, VV_INDEX_ROOT=INDEX)
+               HOME=HOME)
     if py:
+        # VV_ENGINE=python is the load-bearing part: cmd_search delegates to the
+        # native binary whenever use_rust() holds, so without it the "oracle"
+        # would exec the very engine under test and the comparison is a tautology.
+        env["VV_ENGINE"] = "python"
         env["VV_NO_INDEX"] = "1"
         return subprocess.run([sys.executable, VV] + cmd, capture_output=True,
                               text=True, env=env, timeout=TIMEOUT)
@@ -39,6 +43,8 @@ def run(cmd, vault, py=False):
 def main():
     if not os.path.exists(VR):
         print("SKIP: binary not built")
+        for d in (JR, HOME):
+            shutil.rmtree(d, ignore_errors=True)
         return 0
     vault = tempfile.mkdtemp(prefix="vv-conc-")
     try:
@@ -63,6 +69,28 @@ def main():
                 return 1
             pre[tuple(c)] = r.stdout
 
+        # Which verbs can a `set status` write actually move? Measured, not
+        # assumed — and measured against EVERY note, not one. Flipping a single
+        # note misclassified `search` as invariant: its snippets embed note
+        # bodies, so it moves only when a note inside the result set changes.
+        # The verbs that still do not move have a constant correct answer for the
+        # whole storm, which is what makes a during-storm assertion possible.
+        for n in names:
+            run(["set", n, "status", "done"], vault)
+        invariant = {k for k in pre if run(list(k), vault).stdout == pre[k]}
+        for n in names:
+            run(["set", n, "status", "open"], vault)
+        for c in READS:                       # re-baseline after restoring
+            pre[tuple(c)] = run(c, vault).stdout
+        print("  status-invariant verbs (asserted during the storm): "
+              + ", ".join(sorted(" ".join(k) for k in invariant)))
+        print("  status-dependent verbs (exit code only): "
+              + ", ".join(sorted(" ".join(k) for k in pre if k not in invariant)))
+        if not invariant:
+            print("FAIL setup: no status-invariant read verb; nothing can be "
+                  "asserted during the storm")
+            return 1
+
         # Values exclude "open" so any landed write is detectable by the control
         # below; a plan built up front keeps the shared RNG off the worker threads
         # (random.Random is not thread-safe).
@@ -83,6 +111,10 @@ def main():
             if r.returncode not in (0, 1, 2, 3):
                 with lock:
                     errs.append(("bad-exit", c, r.returncode, r.stderr[:120]))
+            elif tuple(c) in invariant and r.stdout != pre[tuple(c)]:
+                # A verb no write can move returned a third answer mid-storm.
+                with lock:
+                    errs.append(("in-storm-divergence", c, r.stdout[:120]))
 
         def writer(i):
             n, val = plan[i]
@@ -91,19 +123,23 @@ def main():
             note(wspan, t0, time.monotonic())
             with lock:
                 if r.returncode == 3:
-                    # Lost the compare-and-swap race (src/vv_impl.py atomic_write
-                    # expect_sig). That is the write path REFUSING to clobber a
-                    # concurrent edit — the behavior under test, not a failure.
+                    # Lost the compare-and-swap race. Native `set` returns
+                    # Outcome::Fallback on a CAS mismatch (vrust/src/write.rs) and
+                    # re-execs python, which re-reads a fresh signature and
+                    # usually wins — so exit 3 means a SECOND lost race inside the
+                    # fallback window. Rare, correct, and not a failure. Counted
+                    # and reported; deliberately NOT asserted on, because a guard
+                    # keyed on a rare race would be one that never fires.
                     refused.append(n)
                 elif r.returncode != 0:
                     errs.append(("write-fail", n, r.returncode, r.stderr[:120]))
 
-        # Interleave: one writer every fourth job, so writes land throughout the
+        # Interleave: one writer every fifth job, so writes land throughout the
         # storm instead of after every read has already finished.
         jobs = []
         for i in range(300):
             jobs.append((writer, i) if i % 5 == 4 else (reader, i))
-        with ThreadPoolExecutor(max_workers=16) as ex:
+        with ThreadPoolExecutor(max_workers=WORKERS) as ex:
             futs = [ex.submit(fn, i) for fn, i in jobs]
             for f in futs:
                 f.result()
@@ -123,17 +159,18 @@ def main():
                       open(os.path.join(vault, "Notes", n + ".md")).read())
         if changed == 0:
             errs.append(("control-writes", "no write landed; the storm was a no-op"))
-        if len(refused) == len(wspan):
-            errs.append(("control-writes", "every write was refused; nothing was tested"))
-        w0 = min((t for t, _ in wspan), default=0.0)
-        w1 = max((t for _, t in wspan), default=0.0)
-        overlap = sum(1 for t0, t1 in rspan if t1 > w0 and t0 < w1)
+        # Each read must overlap an INDIVIDUAL writer's span. The union hull
+        # (min start .. max end) spans essentially the whole run, so a fully
+        # serialized execution scored ~92% against it — a guard that cannot fail.
+        overlap = sum(1 for t0, t1 in rspan
+                      if any(t1 > ws and t0 < we for ws, we in wspan))
         if overlap < len(rspan) // 4:
             errs.append(("control-overlap",
-                         f"only {overlap}/{len(rspan)} reads overlapped the write "
-                         f"window; the storm was not concurrent"))
+                         f"only {overlap}/{len(rspan)} reads overlapped a writer; "
+                         f"the storm was not concurrent"))
 
-        print(f"{len(jobs)} ops ({len(rspan)} read / {len(wspan)} write, 16 workers)")
+        print(f"{len(jobs)} ops ({len(rspan)} read / {len(wspan)} write, "
+              f"{WORKERS} workers)")
         print(f"  reads overlapping the write window: {overlap}/{len(rspan)}")
         print(f"  notes actually mutated: {changed}   "
               f"writes refused by the CAS guard: {len(refused)}")

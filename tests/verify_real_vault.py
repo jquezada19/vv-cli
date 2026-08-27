@@ -75,9 +75,16 @@ print(f"scanned {n_notes} notes / {n_secs} sections in {el:.1f}s ({el/max(n_note
 # Floor: a missing, empty, or wrongly-pointed vault otherwise scans nothing,
 # every check passes vacuously, and the gate prints REAL-VAULT VERIFICATION
 # PASS. A corpus check that cannot fail on an empty corpus is not a check.
-FLOOR = int(os.environ.get("VV_VERIFY_MIN_NOTES", "50"))
+# 5, not 50: CI runs this whole gate against a deliberately small generated
+# fixture vault (.github/workflows/fixture_vault.py builds 10 notes), so a floor
+# above that turns CI red for a healthy tree. The floor's job is catching a
+# MISSING, EMPTY, or wrongly-pointed vault — which scans 0 — not detecting
+# partial degradation, which it cannot do: 60 notes of an expected 5,000 pass.
+FLOOR = int(os.environ.get("VV_VERIFY_MIN_NOTES", "5"))
 check(f"corpus floor (>= {FLOOR} notes scanned)", n_notes >= FLOOR,
       f"scanned only {n_notes} notes from {vv.VAULT} — vault missing or empty?")
+check(f"section floor (>= {FLOOR} sections parsed)", n_secs >= FLOOR,
+      f"parsed only {n_secs} sections from {n_notes} notes — outline parsing dead?")
 check("structure: sections partition every note", not bad_struct, f"{len(bad_struct)}: {bad_struct[:3]}")
 check("round-trip: every section byte-identical", not bad_rt, f"{len(bad_rt)}: {bad_rt[:3]}")
 check("parser: no crashes", not parse_err, f"{len(parse_err)}: {parse_err[:2]}")
