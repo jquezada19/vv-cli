@@ -23,10 +23,12 @@ Five instruments were tried and every one was defeated by review:
 The common cause: from the parent, a process that is waiting is
 indistinguishable from one that is working, and any aggregate can be inflated by
 work that is not ours. Proving read-during-write requires the engine to report
-when it touches the vault. Until it does, this suite asserts what it can check —
-the pool has more than one worker and the job order alternates — and makes no
-claim about runtime interleaving. A number that cannot be trusted in either
-direction is worse than an honest gap.
+when it touches the vault. Until it does, this suite asserts the one structural fact it can check — the
+pool has more than one worker — and makes no claim about runtime interleaving.
+The job order does alternate, by construction a few lines below, but asserting
+that would only restate a literal: it reports the same count for a fully
+serialized storm, so it is evidence of nothing. A number that cannot be trusted
+in either direction is worse than an honest gap.
 
 What this suite does NOT cover, stated because a guard that cannot fail is
 worse than an absent one: the native engine writes no journal for `set` (only
@@ -216,28 +218,18 @@ def main():
         changed = sum(1 for n in names if after[n] != baseline[n])
         if changed == 0:
             errs.append(("control-writes", "no write landed; the storm was a no-op"))
-        # How often was a read process alive at the same moment as a write
-        # process? Counted at spawn time, so any serialization below this harness
-        # drives it to 0. Two earlier versions of this control measured
-        # parent-side spans and passed a fully serialized storm at ~100%.
-        # Concurrency is asserted STRUCTURALLY — see the docstring for why no
-        # runtime measurement is made. These check the configuration that
-        # produces concurrency, which is the part this harness can actually
-        # establish; they are not a claim about what the engine did at runtime.
+        # The one structural fact worth asserting: a single worker cannot
+        # produce a concurrent storm. The interleaving of `jobs` is a literal a
+        # few lines above and asserting it would only restate the source — it
+        # reported the same count for a fully serialized run, so it was evidence
+        # of nothing.
         if WORKERS < 2:
             errs.append(("control-structure",
                          f"TORTURE_WORKERS={WORKERS}: a single worker cannot "
                          f"produce a concurrent storm"))
-        kinds = [k for k, _ in jobs]
-        runs = sum(1 for a, b in zip(kinds, kinds[1:]) if a is not b)
-        if runs < len(jobs) // 10:
-            errs.append(("control-structure",
-                         f"only {runs} reader/writer alternations in {len(jobs)} "
-                         f"jobs; the storm is batched, not interleaved"))
 
         print(f"{len(jobs)} ops ({nreads[0]} read / {nwrites[0]} write, "
-              f"{WORKERS} workers)")
-        print(f"  reader/writer alternations in the submit order: {runs}")
+              f"{WORKERS} worker{'s' if WORKERS != 1 else ''})")
         print(f"  notes actually mutated: {changed}   "
               f"writes refused by the CAS guard: {len(refused)}")
         print(f"  runtime errors: {len(errs)}   post-storm divergence: {len(final)}")
