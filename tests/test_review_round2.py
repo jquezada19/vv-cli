@@ -243,8 +243,87 @@ check("V18b extra args are usage:", r.returncode == 1 and r.stderr.startswith("u
 r = run("search", "x", env={"VV_ENGINE": "turbo"})
 check("V18c unknown engine is engine:", r.returncode == 1 and r.stderr.startswith("engine:"), r.stderr)
 
+# V19: a quoted multi-word arg is ONE phrase; a zero-hit phrase whose words DO
+#      co-occur must say so. Without the hint a shell-quoting slip and a genuine
+#      true negative print the identical "(0 of 0 matches)" — the fail-closed
+#      rule applied to a query surface. Checked on BOTH engines: search is the
+#      one read command that delegates to the rust binary.
+tv = tempfile.mkdtemp(prefix="vv-r2h-")
+os.makedirs(f"{tv}/vault")
+open(f"{tv}/vault/Doc.md", "w").write("alpha lives here\nand bravo lives here too\n")
+for eng, lbl in ((None, "rust"), ({"VV_NO_RUST": "1"}, "python")):
+    e = dict(eng or {})
+    e["VV_VAULT"] = f"{tv}/vault"
+    # the phrase "alpha bravo" appears nowhere; the two words each do
+    r = run("search", "alpha bravo", env=e)
+    check(f"V19a[{lbl}] zero-hit phrase hints the unquoted retry",
+          "of 0 matches)" in r.stdout and "hint: matched as ONE phrase" in r.stdout
+          and "match 1 note" in r.stdout, r.stdout + r.stderr)
+    # genuine true negative: neither word exists -> silence, no hint
+    r = run("search", "zeta omega", env=e)
+    check(f"V19b[{lbl}] true negative stays silent",
+          "of 0 matches)" in r.stdout and "hint:" not in r.stdout, r.stdout + r.stderr)
+    # a single-term miss cannot be a quoting slip -> no hint
+    r = run("search", "zeta", env=e)
+    check(f"V19c[{lbl}] single-term miss has no hint",
+          "hint:" not in r.stdout, r.stdout + r.stderr)
+    # a phrase that DOES match must not be second-guessed
+    r = run("search", "alpha lives", env=e)
+    check(f"V19d[{lbl}] matching phrase gets no hint",
+          "of 1 matches)" in r.stdout and "hint:" not in r.stdout, r.stdout + r.stderr)
+shutil.rmtree(tv, ignore_errors=True)
+
+# V20: every dispatchable command appears in --help, and --help is dispatchable.
+r = run("--help")
+check("V20a --help exits 0 with the command list",
+      r.returncode == 0 and "Read:" in r.stdout, r.stdout + r.stderr)
+_bare = run()
+check("V20b --help matches bare invocation", r.stdout == _bare.stdout, r.stdout)
+_src = open(VV).read()
+import re as _re2
+_cmds = set(_re2.findall(r'"([a-z-]+)":\s*cmd_', _src))
+_missing = sorted(c for c in _cmds if not _re2.search(r'(?<![a-z-])' + _re2.escape(c) + r'(?![a-z-])', _bare.stdout))
+check("V20c every command is documented in help", not _missing, f"undocumented: {_missing}")
+
+# V21: persistent index (un-parked 2026-08-27). The properties that must never
+#      break: (a) a just-edited file is fresh on the next command; (b) a
+#      reparsed file leaves NO orphaned link rows (SQLite foreign_keys is OFF
+#      by default, so CASCADE alone is inert — caught live 2026-08-27);
+#      (c) a corrupt DB falls back to the live scan and answers correctly;
+#      (d) VV_NO_INDEX disables it; (e) indexed and live output are identical.
+tv = tempfile.mkdtemp(prefix="vv-r2i-"); ir = tempfile.mkdtemp(prefix="vv-r2i-idx-")
+os.makedirs(f"{tv}/vault")
+open(f"{tv}/vault/A.md", "w").write("---\ntype: note\ntags: [alpha]\n---\nlink to [[B]]\n")
+open(f"{tv}/vault/B.md", "w").write("---\ntype: note\ntags: [beta]\n---\nno links\n")
+ienv = {"VV_VAULT": f"{tv}/vault", "VV_INDEX_ROOT": ir}
+r = run("index", "--rebuild", env=ienv)
+check("V21-build index rebuild reports counts", "2 notes indexed" in r.stdout, r.stdout + r.stderr)
+open(f"{tv}/vault/A.md", "w").write("---\ntype: note\ntags: [gamma]\n---\nlink to [[C]]\n")
+r = run("backlinks", "B.md", env=ienv)
+check("V21a edited file is fresh next command (no orphaned link rows)",
+      "(0 backlinks)" in r.stdout and "A.md" not in r.stdout, r.stdout + r.stderr)
+r = run("tags", "--counts", env=ienv)
+check("V21b edited frontmatter is fresh", "gamma" in r.stdout and "alpha" not in r.stdout, r.stdout)
+# (e) parity: indexed vs VV_NO_INDEX on the same fixture
+for cmd in (["tags", "--counts"], ["backlinks", "B.md"], ["deadends"], ["props", "type"]):
+    a = run(*cmd, env=ienv); b = run(*cmd, env=dict(ienv, VV_NO_INDEX="1"))
+    check(f"V21c parity {cmd[0]}", a.stdout == b.stdout and a.returncode == b.returncode,
+          a.stdout + "|VS|" + b.stdout)
+# (c) corruption: garbage DB must not change answers, and next run self-heals
+db = [f for f in os.listdir(ir) if f.endswith(".sqlite")][0]
+open(os.path.join(ir, db), "w").write("garbage")
+r = run("tags", "--counts", env=ienv)
+check("V21d corrupt DB falls back and answers", r.returncode == 0 and "gamma" in r.stdout,
+      r.stdout + r.stderr)
+r = run("index", env=ienv)
+check("V21e next run self-heals (rebuild, no repair)", "2 notes" in r.stdout, r.stdout + r.stderr)
+# (d) kill switch
+r = run("tags", "--counts", env=dict(ienv, VV_NO_INDEX="1"))
+check("V21f VV_NO_INDEX still answers", r.returncode == 0 and "gamma" in r.stdout, r.stdout)
+shutil.rmtree(tv, ignore_errors=True); shutil.rmtree(ir, ignore_errors=True)
+
 if not fails:
     shutil.rmtree(SB, ignore_errors=True)
 shutil.rmtree(_JR, ignore_errors=True)
-print(f"\n{len(fails)} failures: {fails}" if fails else "\nALL PASS (round-2: 37)")
+print(f"\n{len(fails)} failures: {fails}" if fails else "\nALL PASS (round-2: 59)")
 sys.exit(1 if fails else 0)

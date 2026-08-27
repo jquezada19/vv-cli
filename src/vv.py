@@ -1,18 +1,30 @@
 #!/usr/bin/env python3
 """vv — PROTOTYPE full vault CLI (Python orchestrator; shells to vrust for hot scans).
 
-Read:    outline NOTE · read NOTE SEC · head NOTE · resolve NAME · search TERMS [--k N] [--w C]
+Read:    outline NOTE · read NOTE SEC · head NOTE · show NOTE [--max-bytes N] [--from SEC]
+         resolve NAME · search TERMS [--k N] [--w CHARS]
 Write:   patch NOTE SEC SHA8 <stdin · appendsec NOTE SEC TEXT · append NOTE TEXT
          set NOTE KEY VALUE · unset NOTE KEY · new PATH [--template T] [--k v ...]
-Graph:   backlinks NOTE · links NOTE · orphans [FOLDER]
+Relocate rename NOTE NEWNAME [--apply [SHA8]] · move NOTE DESTFOLDER [--apply [SHA8]]
+         link-aware + journaled. Dry-run prints a plan SHA8; --apply SHA8 executes
+         exactly that reviewed plan (exit 3 if the plan drifted). Never bare `mv`.
+Graph:   backlinks NOTE · links NOTE · impact NOTE · orphans [FOLDER] · deadends
 Query:   board FOLDER [k=v ...] · tags [--counts] · props KEY [FOLDER]
 Daily:   daily-append TEXT   (today's standup note; creates from convention if missing)
+Health:  doctor [--rollback | --discard] · lint [--quick [--limit N]] · index [--rebuild]
 
 NOTE = vault-relative path OR bare name (wikilink-style resolution).
+SEC  = an outline id (H3) or the heading title exactly as `outline` prints it.
+search: unquoted args are AND-ed terms; a QUOTED arg is ONE phrase.
+        `vv search a b` != `vv search "a b"`.
+Global:  --vault PATH        Help: vv --help (or no args)
 Every op logs {op, ms, out_bytes} to ~/.claude/metrics/vv.jsonl.
-Exit: 0 ok · 1 not-found/usage · 3 stale hash.
+Exit: 0 ok · 1 not-found/usage · 3 stale hash or drifted plan · 4 pending journal (vv doctor)
 """
-import sys, os, re, json, time, hashlib, glob, subprocess, datetime
+import sys, os, re, json, time, hashlib
+# subprocess, glob, datetime are imported AT USE SITES: together they cost
+# ~10 ms of startup and most commands touch none of them (Codex perf review
+# 2026-08-27, findings 8-9; measured with -X importtime).
 
 VAULT = os.environ.get("VV_VAULT") or os.path.expanduser("~/Documents/Obsidian Vault")
 VRUST = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "vrust/target/release/vrust")
@@ -30,6 +42,7 @@ def _log(out_bytes, exit_code=0, kind=None):
     if os.environ.get("VV_JOURNAL_ROOT") or os.environ.get("VV_NO_METRICS"):
         return
     try:
+        import datetime
         rec = {"ts": datetime.datetime.now().isoformat(timespec="seconds"),
                "op": _op, "ms": round((time.perf_counter() - _t0) * 1000),
                "out_bytes": out_bytes, "exit": exit_code}
@@ -566,6 +579,7 @@ def cmd_new(*args):
         os.makedirs(d, exist_ok=True)
     content = ""
     if template:
+        import glob
         hits = sorted(glob.glob(os.path.join(VAULT, "Templates", "**", template + "*.md"), recursive=True))
         if not hits:
             die(f"not-found: no template matching '{template}' under Templates/")
@@ -692,15 +706,27 @@ def cmd_board(folder, *filters):
     if not os.path.isdir(root):
         die(f"not-found: no such folder: {folder}")
     rows = []
-    for dirpath, dirs, names in os.walk(root):
-        dirs[:] = [d for d in dirs if not d.startswith(".")]
-        for n in sorted(names):
-            if not n.endswith(".md"):
+    rroot0 = os.path.relpath(root, VAULT)
+    h = index_handle(scope=rroot0)
+    if h is not None:
+        rroot = rroot0
+        for rp, props in h.props():
+            if not (rp == rroot or rp.startswith(rroot + os.sep)):
                 continue
-            fm, _ = split_fm(open(os.path.join(dirpath, n), errors="replace").read())
-            props = fm_props(fm)
             if all(props.get(k) == v for k, v in want.items()):
-                rows.append((n[:-3], props.get("status", "-"), props.get("type", "-")))
+                rows.append((os.path.basename(rp)[:-3], props.get("status", "-"),
+                             props.get("type", "-")))
+        rows.sort()
+    else:
+        for dirpath, dirs, names in os.walk(root):
+            dirs[:] = [d for d in dirs if not d.startswith(".")]
+            for n in sorted(names):
+                if not n.endswith(".md"):
+                    continue
+                fm, _ = split_fm(open(os.path.join(dirpath, n), errors="replace").read())
+                props = fm_props(fm)
+                if all(props.get(k) == v for k, v in want.items()):
+                    rows.append((n[:-3], props.get("status", "-"), props.get("type", "-")))
     for name, status, typ in rows:
         out(f"{status}\t{typ}\t{name}")
     out(f"({len(rows)} notes)")
@@ -708,9 +734,11 @@ def cmd_board(folder, *filters):
 def cmd_tags(*args):
     from collections import Counter
     c = Counter()
-    for p in md_files():
-        fm, _ = split_fm(open(p, errors="replace").read())
-        props = fm_props(fm)
+    h = index_handle()
+    rows = h.props() if h is not None else (
+        (rel(p), fm_props(split_fm(open(p, errors="replace").read())[0]))
+        for p in sorted(md_files()))
+    for _rp, props in rows:
         t = props.get("tags", "")
         for tag in re.findall(r"[\w/-]+", t):
             c[tag] += 1
@@ -720,40 +748,43 @@ def cmd_tags(*args):
 
 def cmd_props(key, folder=""):
     root = contain(folder) if folder else VAULT
+    rroot = os.path.relpath(root, VAULT) if folder else ""
     from collections import Counter
     c = Counter()
-    for p in md_files():
-        if folder and not (p == root or p.startswith(root + os.sep)):
+    h = index_handle(scope=rroot or None)
+    rows = h.props() if h is not None else (
+        (rel(p), fm_props(split_fm(open(p, errors="replace").read())[0]))
+        for p in sorted(md_files()))
+    for rp, props in rows:
+        if folder and not (rp == rroot or rp.startswith(rroot + os.sep)):
             continue
-        fm, _ = split_fm(open(p, errors="replace").read())
-        v = fm_props(fm).get(key)
+        v = props.get(key)
         if v:
             c[v] += 1
     for v, n in c.most_common():
         out(f"{n}\t{v}")
     out(f"({sum(c.values())} notes with {key})")
 
-def cmd_search(*args):
-    if use_rust():
-        r = subprocess.run([VRUST, "search", *args], capture_output=True, text=True)
-        sys.stdout.write(r.stdout); sys.stderr.write(r.stderr)
-        global _out_total
-        _out_total += len(r.stdout.encode("utf-8"))
-        _log(_out_total, r.returncode); sys.exit(r.returncode)
+def _parse_search_args(args):
     k, w, terms = 5, 500, []
     it = iter(args)
     for a in it:
         if a == "--k": k = int(next(it))
         elif a == "--w": w = int(next(it))
         else: terms.append(a.lower())
-    if not terms:
-        die("usage: search needs a query — next: vv search <terms> [--k N] [--w CHARS]")
-    # ranking (adapted from rustdoc search; IDENTICAL in the rust engine):
-    #   term with "/"  -> path filter: must be a substring of the vault-relative path
-    #   other terms    -> match in the note NAME (+500) and/or content (+1 per hit);
-    #                     every term must match somewhere
-    # so a note NAMED after the query outranks a long note that merely mentions it.
-    # ties: shorter path first, then lexicographic — deterministic across engines.
+    return k, w, terms
+
+
+def _search_hits(terms, w):
+    """Rank notes for TERMS. Shared by the python engine and the zero-hit hint.
+
+    ranking (adapted from rustdoc search; IDENTICAL in the rust engine):
+      term with "/"  -> path filter: must be a substring of the vault-relative path
+      other terms    -> match in the note NAME (+500) and/or content (+1 per hit);
+                        every term must match somewhere
+    so a note NAMED after the query outranks a long note that merely mentions it.
+    ties: shorter path first, then lexicographic — deterministic across engines.
+    """
     path_terms = [t for t in terms if "/" in t]
     body_terms = [t for t in terms if "/" not in t]
     hits = []
@@ -786,12 +817,62 @@ def cmd_search(*args):
         start = max(0, pos - w // 4) if pos >= 0 else 0   # name-only match: head of note
         hits.append((score, r_, text[start:start + w].replace("\n", " ¶ ")))
     hits.sort(key=lambda h: (-h[0], len(h[1]), h[1]))
+    return hits
+
+
+def _phrase_hint(terms):
+    """Zero hits + a quoted multi-word arg: say whether the words match unquoted.
+
+    A quoted arg is ONE phrase, so `vv search "a b c"` asks for a literal
+    substring while `vv search a b c` AND-s three terms. Both print
+    "(0 of 0 matches)" on failure, which makes a shell-quoting slip
+    indistinguishable from a genuine true negative — the tool reports silence
+    either way and the caller reads it as "the vault has nothing". That is the
+    fail-closed rule from Knowledge/Instruments must fail closed.md applied to a
+    query surface: when the split terms DO co-occur, say so instead.
+
+    Returns None when the distinction cannot arise (no multi-word arg) or when
+    splitting changes nothing (the words genuinely appear nowhere together).
+    """
+    if not any(len(t.split()) > 1 for t in terms):
+        return None
+    split = [w_ for t in terms for w_ in t.split()]
+    if len(split) == len(terms):
+        return None
+    n = len(_search_hits(split, 1))
+    if not n:
+        return None
+    return ("hint: matched as ONE phrase. Those words as separate terms match "
+            f"{n} note{'s' if n != 1 else ''} — retry unquoted: "
+            f"vv search {' '.join(split)}")
+
+
+def cmd_search(*args):
+    k, w, terms = _parse_search_args(args)
+    if use_rust():
+        import subprocess
+        r = subprocess.run([VRUST, "search", *args], capture_output=True, text=True)
+        sys.stdout.write(r.stdout); sys.stderr.write(r.stderr)
+        global _out_total
+        _out_total += len(r.stdout.encode("utf-8"))
+        if r.returncode == 0 and "of 0 matches)" in r.stdout:
+            h = _phrase_hint(terms)
+            if h: out(h)
+        _log(_out_total, r.returncode); sys.exit(r.returncode)
+    if not terms:
+        die("usage: search needs a query — next: vv search <terms> [--k N] [--w CHARS]")
+    hits = _search_hits(terms, w)
     for score, r_, snip in hits[:k]:
         out(f"== {r_} (score {score})\n{snip}\n")
     out(f"({min(len(hits), k)} of {len(hits)} matches)")
+    if not hits:
+        h = _phrase_hint(terms)
+        if h: out(h)
+
 
 def cmd_daily_append(text):
     _dirty_gate()
+    import datetime, glob
     today = datetime.date.today().isoformat()
     hits = glob.glob(os.path.join(VAULT, "Standups", f"*{today}*.md"))
     if not hits:
@@ -887,8 +968,13 @@ def scan_links(needle=None):
     `needle` prefilters wiki targets by substring (case-insensitive); markdown links are
     always yielded because percent-encoding hides names from a substring filter.
     """
+    h = index_handle()
+    if h is not None:
+        yield from h.links(needle)
+        return
     if use_rust():
         cmd = [VRUST, "linkscan"] + (["--grep", needle] if needle else [])
+        import subprocess
         r = subprocess.run(cmd, capture_output=True, text=True)
         if r.returncode == 0:
             for line in r.stdout.split("\n"):
@@ -997,10 +1083,230 @@ def link_targets_in(text):
             if "\0" not in m.group(2) and target_clear(m):
                 yield i, "md", m.group(2)
 
+# --------------------------------------------------------------------------
+# Persistent incremental index (un-parked 2026-08-27; measured 2026-08-26/27:
+# graph/frontmatter commands re-read the whole corpus per invocation, 180-250 ms
+# of which ~72% is per-file open() syscalls — see bench/index_bench.py).
+#
+# DESIGN (three-model panel + independent Codex review, 2026-08-27):
+#   - Derived, DISPOSABLE artifact: any doubt -> delete and rebuild (~sub-second).
+#     Never repaired, never served partially. Lives OUTSIDE the vault.
+#   - Freshness: every invocation stat-walks the vault (no reads) and diffs
+#     (mtime_ns, size, inode) per file against the DB by EQUALITY (never
+#     "newer than": git checkouts and mtime rewinds defeat watermarks). Only
+#     changed files are re-read. A just-edited note is fresh on the next command.
+#   - The git "racily clean" rule: any file whose mtime_ns >= the index's own
+#     last commit stamp is re-hashed (sha256) even when stat matches, closing
+#     the same-tick same-size rewrite hole.
+#   - Raw link targets are stored, never resolved destinations — bare-link
+#     winners depend on the duplicate-basename population, so resolution
+#     happens at query time against the CURRENT population (Codex review).
+#   - Fail-closed = fall back to the live scan on ANY index doubt. The index is
+#     an accelerator, not an authority; correctness never depends on it.
+#   - PARSER_VERSION pins the lexer: bump it when link/frontmatter parsing
+#     changes and every existing DB self-invalidates.
+# Kill switch: VV_NO_INDEX=1 (also how the bench measures before/after).
+
+PARSER_VERSION = 1
+INDEX_ROOT = os.environ.get("VV_INDEX_ROOT") or os.path.expanduser("~/.cache/vv/index")
+
+
+def _index_db_path():
+    key = hashlib.sha256(_VAULT_REAL.encode()).hexdigest()[:16]
+    return os.path.join(INDEX_ROOT, key + ".sqlite")
+
+
+def _index_stat_walk(scope=None):
+    """rel_path -> (mtime_ns, size, inode); no file reads. scope = vault-relative
+    folder to confine the walk (freshness is only needed for files a scoped
+    command will actually read)."""
+    m = {}
+    root = os.path.join(VAULT, scope) if scope else VAULT
+    for dirpath, dirs, names in os.walk(root):
+        dirs[:] = [d for d in dirs if not d.startswith(".") and d not in SKIP_DIRS]
+        for n in names:
+            if n.endswith(".md"):
+                fp = os.path.join(dirpath, n)
+                try:
+                    st = os.stat(fp)
+                except OSError:
+                    continue
+                m[os.path.relpath(fp, VAULT)] = (st.st_mtime_ns, st.st_size, st.st_ino)
+    return m
+
+
+def _index_parse(fp):
+    """One read -> (sha256, props_json, link_rows). The Python lexer is the
+    semantic authority (engine-parity tests hold Rust to it), so rows cached
+    here are exactly what scan_links would have yielded."""
+    raw = open(fp, "rb").read()
+    sha = hashlib.sha256(raw).hexdigest()
+    # universal-newline translation, matching text-mode open(): the live lexer
+    # sees \n-only text, so cached rows must be lexed from the same bytes
+    text = raw.decode("utf-8", errors="replace").replace("\r\n", "\n").replace("\r", "\n")
+    fm, _ = split_fm(text)
+    props = fm_props(fm)
+    links = [(i, kind, tgt) for i, kind, tgt in link_targets_in(text)]
+    return sha, json.dumps(props), links
+
+
+class _Index:
+    def __init__(self, con):
+        self.con = con
+
+    def rel_paths(self):
+        return [r[0] for r in self.con.execute("SELECT path FROM files ORDER BY path")]
+
+    def props(self):
+        for path, pj in self.con.execute("SELECT path, props FROM files ORDER BY path"):
+            yield path, json.loads(pj)
+
+    def links(self, needle=None):
+        q = "SELECT f.path, l.line, l.kind, l.target FROM links l JOIN files f ON f.id = l.file_id"
+        rows = self.con.execute(q + " ORDER BY f.path, l.line")
+        n = needle.lower() if needle else None
+        for path, line, kind, tgt in rows:
+            if n and kind == "wiki" and n not in tgt.lower():
+                continue
+            yield os.path.join(VAULT, path), line, kind, tgt
+
+
+_IDX = None          # resolved once per process: _Index, or False after a fallback
+_IDX_STAMP_SLOP_NS = 2_000_000_000   # racily-clean window: 2 s
+
+
+def index_handle(sync=True, scope=None):
+    """The index for this vault, freshly synced — or None (caller uses the live
+    scan). Never raises; never serves without a completed sync. scope confines
+    the freshness walk to one folder — ONLY for commands that read nothing
+    outside it (board/props with a folder); link queries always sync fully."""
+    global _IDX
+    if _IDX is not None:
+        return _IDX or None
+    if os.environ.get("VV_NO_INDEX") or (
+            os.environ.get("VV_JOURNAL_ROOT") and not os.environ.get("VV_INDEX_ROOT")):
+        # test mode (VV_JOURNAL_ROOT) without an explicit index root: stay on
+        # live scans so throwaway fixture vaults never litter ~/.cache/vv/index
+        _IDX = False
+        return None
+    try:
+        h = _index_sync(scope)
+        if scope is not None:
+            return h            # scoped handles are not cached process-wide
+        _IDX = h
+    except Exception:
+        try:                       # corrupt/unreadable DB: quarantine, next run rebuilds
+            os.rename(_index_db_path(), _index_db_path() + ".bad")
+        except OSError:
+            pass
+        _IDX = False
+    return _IDX or None
+
+
+def _index_sync(scope=None):
+    import sqlite3
+    os.makedirs(INDEX_ROOT, exist_ok=True)
+    con = sqlite3.connect(_index_db_path(), timeout=5)
+    con.execute("PRAGMA journal_mode=WAL")
+    con.execute("PRAGMA foreign_keys=ON")   # OFF by default: CASCADE is inert without it
+    con.execute("PRAGMA synchronous=NORMAL")
+    ver = con.execute("PRAGMA user_version").fetchone()[0]
+    if ver != PARSER_VERSION:
+        con.executescript("DROP TABLE IF EXISTS links; DROP TABLE IF EXISTS files; "
+                          "DROP TABLE IF EXISTS meta;")
+        con.executescript("""
+            CREATE TABLE files(id INTEGER PRIMARY KEY, path TEXT UNIQUE,
+                mtime_ns INTEGER, size INTEGER, ino INTEGER, sha TEXT, props TEXT);
+            CREATE TABLE links(file_id INTEGER REFERENCES files(id) ON DELETE CASCADE,
+                line INTEGER, kind TEXT, target TEXT);
+            CREATE INDEX links_file ON links(file_id);
+            CREATE TABLE meta(k TEXT PRIMARY KEY, v INTEGER);
+        """)
+        con.execute(f"PRAGMA user_version={PARSER_VERSION}")
+        con.commit()
+    stamp = {k: v for k, v in con.execute("SELECT k, v FROM meta")}.get("commit_ns", 0)
+    disk = _index_stat_walk(scope)
+    if scope:
+        q = con.execute("SELECT id, path, mtime_ns, size, ino, sha FROM files "
+                        "WHERE path = ? OR path LIKE ?", (scope, scope + os.sep + "%"))
+    else:
+        q = con.execute("SELECT id, path, mtime_ns, size, ino, sha FROM files")
+    db = {p: (m, s, i, sha, fid) for fid, p, m, s, i, sha in q}
+    now_ns = time.time_ns()
+    changed, gone = [], []
+    for p, st in disk.items():
+        row = db.get(p)
+        if row is None or row[:3] != st:
+            changed.append(p)
+        elif st[0] >= stamp - _IDX_STAMP_SLOP_NS:
+            # racily clean: stat matches but the write may share the commit tick
+            try:
+                if hashlib.sha256(open(os.path.join(VAULT, p), "rb").read()).hexdigest() != row[3]:
+                    changed.append(p)
+            except OSError:
+                changed.append(p)
+    gone = [p for p in db if p not in disk]
+    if changed or gone:
+        with con:                                   # one transaction
+            def _drop(path):
+                con.execute("DELETE FROM links WHERE file_id IN "
+                            "(SELECT id FROM files WHERE path=?)", (path,))
+                con.execute("DELETE FROM files WHERE path=?", (path,))
+            for p in gone:
+                _drop(p)
+            for p in changed:
+                fp = os.path.join(VAULT, p)
+                try:
+                    sha, pj, links = _index_parse(fp)
+                    st = os.stat(fp)
+                except OSError:
+                    _drop(p)
+                    continue
+                if (st.st_mtime_ns, st.st_size, st.st_ino) != disk[p]:
+                    raise RuntimeError("torn read during sync")   # -> fallback
+                _drop(p)
+                cur = con.execute(
+                    "INSERT INTO files(path, mtime_ns, size, ino, sha, props) VALUES(?,?,?,?,?,?)",
+                    (p, st.st_mtime_ns, st.st_size, st.st_ino, sha, pj))
+                fid = cur.lastrowid
+                con.executemany("INSERT INTO links VALUES(?,?,?,?)",
+                                [(fid, i, k, tg) for i, k, tg in links])
+            if scope is None:   # scoped syncs never advance the racy stamp:
+                # unscoped files were not revisited, so their racy window must
+                # stay open until a FULL sync re-hashes them
+                con.execute("INSERT OR REPLACE INTO meta VALUES('commit_ns',?)", (now_ns,))
+    return _Index(con)
+
+
+def cmd_index(*args):
+    if "--rebuild" in args:
+        for suf in ("", "-wal", "-shm", ".bad"):
+            try:
+                os.remove(_index_db_path() + suf)
+            except OSError:
+                pass
+        h = index_handle()
+        if h is None:
+            die("engine: index rebuild failed — commands fall back to live scans")
+        out(f"rebuilt: {len(h.rel_paths())} notes indexed at {_index_db_path()}")
+        return
+    h = index_handle()
+    if h is None:
+        out("index: DISABLED or unavailable (live scans in use)")
+        return
+    n = len(h.rel_paths())
+    nl = h.con.execute("SELECT COUNT(*) FROM links").fetchone()[0]
+    sz = os.path.getsize(_index_db_path())
+    out(f"index: {n} notes, {nl} links, {sz//1024} KB, parser v{PARSER_VERSION}")
+    out(f"path: {_index_db_path()}")
+
+
 def basename_index():
     """lowercased basename -> [paths]"""
     idx = {}
-    for p in md_files():
+    h = index_handle()
+    paths = (os.path.join(VAULT, r) for r in h.rel_paths()) if h is not None else md_files()
+    for p in paths:
         idx.setdefault(os.path.basename(p)[:-3].lower(), []).append(p)
     return idx
 
@@ -1089,12 +1395,21 @@ def cmd_show(ref, *args):
 
 def cmd_deadends():
     n = 0
-    for p in md_files():
-        if not any(True for _ in link_targets_in(open(p, errors="replace").read())):
-            out(rel(p)); n += 1
+    h = index_handle()
+    if h is not None:
+        linked = {r[0] for r in h.con.execute(
+            "SELECT DISTINCT f.path FROM links l JOIN files f ON f.id = l.file_id")}
+        for rp in h.rel_paths():
+            if rp not in linked:
+                out(rp); n += 1
+    else:
+        for p in sorted(rel(p) for p in md_files()):
+            if not any(True for _ in link_targets_in(open(os.path.join(VAULT, p), errors="replace").read())):
+                out(p); n += 1
     out(f"({n} deadends)")
 
 def _git(args_):
+    import subprocess
     return subprocess.run(["git", "-C", VAULT] + args_, capture_output=True, text=True).stdout.strip()
 
 def cmd_impact(ref, *args):
@@ -1121,6 +1436,7 @@ def _vault_journal_root():
 
 def _pending_journals():
     root = _vault_journal_root()
+    import glob
     return sorted(glob.glob(os.path.join(root, "*"))) if os.path.isdir(root) else []
 
 def _dirty_gate():
@@ -1194,6 +1510,7 @@ def _journal_written_map(jdir):
 
 
 def _journal_start(name, files, src=None, dest=None):
+    import datetime
     ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S-%f")
     jdir = os.path.join(_vault_journal_root(), f"{ts}-{name}")
     os.makedirs(jdir)
@@ -1485,6 +1802,7 @@ def cmd_move(ref, dest_folder, *args):
 def cmd_lint(*args):
     canonical = os.path.join(VAULT, ".claude/skills/vault-lint/vault_lint.py")
     if "--quick" not in args and os.path.exists(canonical):
+        import subprocess
         r = subprocess.run([sys.executable, canonical] + [a for a in args], cwd=VAULT)
         _log(_out_total, r.returncode); sys.exit(r.returncode)
     # --quick: native broken-wikilink scan (fence/inline-code aware, path-style by last segment)
@@ -1493,6 +1811,7 @@ def cmd_lint(*args):
         limit = int(args[list(args).index("--limit") + 1])
     idx = basename_index()
     stems = set(idx.keys())
+    import glob
     for p in sorted(glob.glob(os.path.join(VAULT, "Templates/**/*.md"), recursive=True)):
         stems.add(os.path.basename(p)[:-3].lower())
     findings = []
@@ -1594,18 +1913,19 @@ CMDS = {
     "board": cmd_board, "tags": cmd_tags, "props": cmd_props,
     "search": cmd_search, "daily-append": cmd_daily_append,
     "show": cmd_show, "deadends": cmd_deadends, "impact": cmd_impact,
-    "rename": cmd_rename, "move": cmd_move, "lint": cmd_lint, "doctor": cmd_doctor,
+    "rename": cmd_rename, "move": cmd_move, "lint": cmd_lint, "doctor": cmd_doctor, "index": cmd_index,
 }
 
 def _check_arity(cmd, fn, args):
     """Positional-arg validation at the boundary, so an INTERNAL TypeError is a
     defect (traceback), never mislabeled as user error (review 2026-08-26)."""
-    import inspect
-    ps = [p for p in inspect.signature(fn).parameters.values()]
-    var = any(p.kind == p.VAR_POSITIONAL for p in ps)
-    pos = [p for p in ps if p.kind == p.POSITIONAL_OR_KEYWORD]
-    req = len([p for p in pos if p.default is p.empty])
-    hi = None if var else len(pos)
+    # read arity off the code object directly: importing inspect costs ~4.4 ms
+    # on EVERY command for the same three facts (Codex perf review 2026-08-27)
+    code = fn.__code__
+    pos_n = code.co_argcount
+    var = bool(code.co_flags & 0x04)          # CO_VARARGS
+    req = pos_n - len(fn.__defaults__ or ())
+    hi = None if var else pos_n
     if len(args) < req or (hi is not None and len(args) > hi):
         want = f"{req}+" if hi is None else (str(req) if req == hi else f"{req}-{hi}")
         die(f"usage: {cmd} takes {want} positional args, got {len(args)} — "
@@ -1624,11 +1944,13 @@ if __name__ == "__main__":
         _VAULT_REAL = os.path.realpath(VAULT)
         a = a[:i] + a[i + 2:]
     if not a:
-        sys.exit(__doc__)
+        print(__doc__.rstrip()); sys.exit(0)
     _op = a[0]   # real command, even when --vault preceded it
+    if a[0] in ("--help", "-h", "help"):
+        print(__doc__.rstrip()); sys.exit(0)
     fn = CMDS.get(a[0])
     if not fn:
-        die(f"usage: unknown command {a[0]} — next: run vv with no args for help")
+        die(f"usage: unknown command {a[0]} — next: run vv --help for the command list")
     _check_arity(a[0], fn, a[1:])
     fn(*a[1:])
     _log(_out_total)
