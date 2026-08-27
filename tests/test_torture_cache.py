@@ -89,7 +89,7 @@ def build(vault, n):
         body = "\n".join(f"link to [[{t}]]" for t in tgts)
         nxt = names[(i + 1) % len(names)]
         extra = f"\nmd link [{nxt}]({nxt.replace(' ', '%20')}.md)\n"
-        with open(os.path.join(vault, nm + ".md"), "w") as f:
+        with open(os.path.join(vault, nm + ".md"), "w", encoding="utf-8") as f:
             f.write(f"---\ntype: test\n---\n\n# {nm}\n\n{body}\n{extra}")
     return names
 
@@ -105,6 +105,12 @@ def main():
         _cleanup(HOME, JR)
         return 0
     fails, notes = [], int(os.environ.get("TORTURE_NOTES", "18"))
+    if notes < 3:
+        # The probe sets sample 6 and 4 names; below this the sample raises and
+        # the gate shows a bare FAIL with no diagnostic line.
+        print(f"FAIL config: TORTURE_NOTES={notes} is too small; need >= 3")
+        _cleanup(HOME, JR)
+        return 1
     vault = tempfile.mkdtemp(prefix="vv-torture-")
     try:
         names = build(vault, notes)
@@ -122,6 +128,10 @@ def main():
             return 1
         orig = open(cp, "rb").read()
         end = orig.rfind(b"\nvvidx-end\t")
+        if end < 0:
+            print("FAIL: cache has no vvidx-end footer; the format changed or the "
+                  "write was interrupted — this suite cannot forge against it")
+            return 1
         body_lines = orig[:end + 1].split(b"\n")
         print(f"cache {len(orig)} bytes; vault {len(names)} notes")
 
@@ -170,8 +180,19 @@ def main():
             # that as consumption lets a crash masquerade as coverage.
             if a.returncode == 0 and (a.returncode, a.stdout) != (b.returncode, b.stdout):
                 consumers.append(pr)
+        # Acceptance is decided by one named probe that reads link data by
+        # construction, not by whichever candidate happened to run last: the
+        # engine REWRITES a cache it rejects (and stamps a fresh header
+        # timestamp), so bytes surviving a link-reading probe means the footer
+        # was accepted.
+        with open(cp, "wb") as f:
+            f.write(forged)
+        run(["backlinks", names[0]], vault)
         accepted = open(cp, "rb").read() == forged
 
+        print(f"    forged a cache with all {sum(1 for l in body_lines if l.startswith(b'L'))} "
+              f"link rows dropped (a non-redundant wiki row at line {victim} proves "
+              f"there was a real link to lose)")
         print("    cache-consuming probes: "
               + (", ".join(" ".join(p) for p in consumers) or "NONE"))
         print("    probes that ignore the cache (excluded): "
@@ -188,6 +209,44 @@ def main():
                   "changed nothing -> the cache is not consulted and this suite "
                   "proves nothing")
             return 1
+        # Baseline: with an intact cache, NO probe may satisfy the consumer
+        # predicate. Without this, an unrelated native/oracle parity bug would
+        # masquerade as cache consumption and the sweep would rotate damage onto
+        # a probe that cannot observe it.
+        with open(cp, "wb") as f:
+            f.write(orig)
+        run(["backlinks", names[0]], vault)
+        contaminated = []
+        for pr in candidates:
+            with open(cp, "wb") as f:
+                f.write(orig)
+            a = run(pr, vault)
+            b = run(pr, vault, py=True)
+            if a.returncode == 0 and (a.returncode, a.stdout) != (b.returncode, b.stdout):
+                contaminated.append(" ".join(pr))
+        if contaminated:
+            print("FAIL baseline: these probes disagree with the oracle on an "
+                  "INTACT cache, so 'differs from oracle' does not mean 'consulted "
+                  "the cache': " + ", ".join(contaminated))
+            return 1
+        with open(cp, "wb") as f:
+            f.write(orig)
+
+        # Cardinality check. For this fixture the answer is knowable up front:
+        # the markdown ring guarantees every backlinks target loses a link when
+        # all L rows vanish, so all six backlinks probes and orphans must
+        # consume, and no links probe may. Without this, a classifier that
+        # collapsed to a single probe would rotate every one of the ~5,500
+        # damages onto it and still print ALL PASS.
+        expect = {tuple(p) for p in candidates if p[0] != "links"}
+        got = {tuple(p) for p in consumers}
+        if got != expect:
+            print("FAIL classifier: expected exactly the non-`links` probes to "
+                  f"consume the cache ({len(expect)}), got {len(got)}. "
+                  f"missing={sorted(' '.join(p) for p in expect - got)} "
+                  f"unexpected={sorted(' '.join(p) for p in got - expect)}")
+            return 1
+
         probes = consumers
 
         seen = {}
@@ -226,8 +285,10 @@ def main():
                         break
                 if fails:
                     break
-            print(f"(b) byte flips: {done} flips over {len(offs)} distinct offsets "
-                  f"x 8 bits -> {'DIVERGED' if fails else 'clean'}")
+            reached = (done + 7) // 8
+            print(f"(b) byte flips: {done} flips over {reached} of {len(offs)} "
+                  f"distinct offsets x 8 bits -> "
+                  f"{'DIVERGED' if fails else 'clean'}")
 
         # (c) whole-record deletion — real F/L records only, never the footer
         if not fails:

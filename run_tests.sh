@@ -32,11 +32,16 @@ if [ -d vrust ]; then
   # the OLD binary while the gate reports green.
   if (cd vrust && cargo build --release >/dev/null 2>&1); then
     echo "  ok   rust engine built"
-  elif [ -x vrust/target/release/vrust ]; then
-    fail=1
-    echo "  FAIL rust engine build failed and a stale binary is present"
   else
-    echo "  --   rust engine unavailable (python fallback will be used)"
+    # ALWAYS fail. With a stale binary present the native suites would silently
+    # test the OLD executable; with no binary they SKIP, and a compile-breaking
+    # change would ride a green gate on any runner whose cargo cache was cold.
+    fail=1
+    if [ -x vrust/target/release/vrust ]; then
+      echo "  FAIL rust engine build failed and a stale binary is present"
+    else
+      echo "  FAIL rust engine build failed"
+    fi
   fi
 fi
 
