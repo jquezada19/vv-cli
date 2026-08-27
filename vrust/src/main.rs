@@ -8,6 +8,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::exit;
 mod readpath;
+mod cache;
 mod graph;
 mod write;
 mod query;
@@ -403,7 +404,7 @@ fn main() {
                 // corpus natively (~148 ms) while python answers from its SQLite index
                 // (48-84 ms) — those route to python until graph.rs grows the vvidx cache
                 // (measured 2026-08-27, E5). impact was never ported.
-                "links" => Some(graph::run),
+                "links" | "backlinks" | "orphans" | "deadends" => Some(graph::run),  // vvidx cache landed (phase 2)
                 "set" | "unset" | "append" | "appendsec" | "new" | "daily-append" | "patch" => Some(write::run),
                 "board" | "tags" | "props" | "show" => Some(query::run),
                 _ => None,

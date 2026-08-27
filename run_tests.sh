@@ -47,6 +47,7 @@ run "native graph"        python3 tests/test_graph_parity.py
 run "native write"        python3 tests/test_write_parity.py
 run "native query"        python3 tests/test_query_parity.py
 run "full parity"         python3 tests/test_full_parity.py
+run "phase2 cache+patch"  python3 tests/test_phase2.py
 
 echo "property/fuzz:"
 for s in ${SEEDS:-999 42 31337}; do
