@@ -465,8 +465,18 @@ fn exec_python(argv: &[String]) -> ! {
     exit(1);
 }
 
+// Baked at build; the gate pins VERSION == Cargo.toml so the two cannot skew.
+const VERSION: &str = include_str!("../../VERSION");
+
 fn main() {
     let mut args: Vec<String> = env::args().skip(1).collect();
+    if matches!(
+        args.first().map(String::as_str),
+        Some("--version") | Some("version")
+    ) {
+        println!("vv {}", VERSION.trim());
+        exit(0);
+    }
     let orig: Vec<String> = args.clone();
     // --vault PATH before dispatch, mirroring vv.py
     if let Some(i) = args.iter().position(|a| a == "--vault") {
@@ -509,9 +519,8 @@ fn main() {
         Some("linkscan") => cmd_linkscan(&args[1..]),
         Some(_) => exec_python(&orig), // every other vv command is python's
         None => {
-            eprintln!(
-                "usage: vrust search <terms...> [--k N] [--w CHARS] | linkscan [--grep NEEDLE]"
-            );
+            // Byte-identical to python's bare-invocation line (pinned by test).
+            eprintln!("usage: vv COMMAND [ARGS] — next: vv --help for the command list");
             exit(1);
         }
     }

@@ -279,11 +279,16 @@ r = run("--help")
 check("V20a --help exits 0 with the command list",
       r.returncode == 0 and "Read:" in r.stdout, r.stdout + r.stderr)
 _bare = run()
-check("V20b --help matches bare invocation", r.stdout == _bare.stdout, r.stdout)
+# Changed 2026-08-27 (spec rev 2): bare invocation is a ONE-line usage on
+# stderr with exit 1, no longer the full help — an accidental no-args in an
+# agent loop must not cost the whole catalog.
+check("V20b bare invocation is terse usage, not the catalog",
+      _bare.returncode == 1 and _bare.stdout == "" and _bare.stderr.count("\n") == 1
+      and "next: vv --help" in _bare.stderr, _bare.stdout + _bare.stderr)
 _src = open(os.path.join(os.path.dirname(VV), 'vv_impl.py')).read()  # stub split 2026-08-27
 import re as _re2
 _cmds = set(_re2.findall(r'"([a-z-]+)":\s*cmd_', _src))
-_missing = sorted(c for c in _cmds if not _re2.search(r'(?<![a-z-])' + _re2.escape(c) + r'(?![a-z-])', _bare.stdout))
+_missing = sorted(c for c in _cmds if not _re2.search(r'(?<![a-z-])' + _re2.escape(c) + r'(?![a-z-])', r.stdout))  # r = --help; bare is terse since 2026-08-27
 check("V20c every command is documented in help", not _missing, f"undocumented: {_missing}")
 
 # V21: persistent index (un-parked 2026-08-27). The properties that must never

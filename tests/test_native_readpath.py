@@ -86,6 +86,54 @@ def main():
             if "(28B -> 27B)" not in r.stdout:
                 fails.append(("uni-patch-pin", label, (r.stdout + r.stderr).strip()[:80],
                               "expected (28B -> 27B)"))
+        # --- P1 surface pins (spec rev 2, 2026-08-27) --------------------
+        # --version: identical bytes from both entries, matching VERSION file.
+        ver = open(os.path.join(REPO, "VERSION")).read().strip()
+        outs = []
+        for label, cmd in (("rust", [VR]), ("python", [sys.executable, VV])):
+            r = subprocess.run(cmd + ["--version"], capture_output=True, text=True, env=env)
+            n += 1
+            if r.returncode != 0 or r.stdout != f"vv {ver}\n" or r.stderr:
+                fails.append(("version", label, r.returncode, (r.stdout + r.stderr)[:60]))
+            outs.append(r.stdout)
+        if len(set(outs)) != 1:
+            fails.append(("version-parity", outs))
+        # Cargo.toml must carry the same version (two files, one gate-pinned value).
+        cargo = open(os.path.join(REPO, "vrust", "Cargo.toml")).read()
+        n += 1
+        if f'version = "{ver}"' not in cargo:
+            fails.append(("version-cargo-skew", ver, "not in vrust/Cargo.toml"))
+        # bare invocation: SAME terse usage from both entries — stderr, exit 1,
+        # ONE line (an accidental no-args in an agent loop must not cost the
+        # full help catalog).
+        for label, cmd in (("rust", [VR]), ("python", [sys.executable, VV])):
+            r = subprocess.run(cmd, capture_output=True, text=True, env=env)
+            n += 1
+            if (r.returncode != 1 or r.stdout != ""
+                    or r.stderr.count("\n") != 1
+                    or "next: vv --help" not in r.stderr
+                    or "linkscan" in r.stderr):
+                fails.append(("noargs", label, r.returncode, (r.stdout + r.stderr)[:80]))
+        # help: -h == --help, no PROTOTYPE, identical across entries (rust execs python).
+        houts = []
+        for flag in ("--help", "-h"):
+            for label, cmd in (("rust", [VR]), ("python", [sys.executable, VV])):
+                r = subprocess.run(cmd + [flag], capture_output=True, text=True, env=env)
+                n += 1
+                if r.returncode != 0 or "PROTOTYPE" in r.stdout or "Read:" not in r.stdout:
+                    fails.append(("help", label, flag, r.stdout[:60]))
+                houts.append(r.stdout)
+        if len(set(houts)) != 1:
+            fails.append(("help-parity", "four help outputs differ"))
+        # unknown command: grep-stable error + exactly one suggestion.
+        for label, cmd in (("rust", [VR]), ("python", [sys.executable, VV])):
+            r = subprocess.run(cmd + ["outlien"], capture_output=True, text=True, env=env)
+            n += 1
+            if (r.returncode != 1
+                    or "unknown command outlien" not in r.stderr
+                    or "(did you mean: outline)" not in r.stderr
+                    or "next:" not in r.stderr):
+                fails.append(("typo-suggest", label, (r.stdout + r.stderr)[:90]))
         if fails:
             for f in fails[:8]:
                 print("FAIL", f)

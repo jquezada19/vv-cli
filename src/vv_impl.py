@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""vv — PROTOTYPE full vault CLI (Python orchestrator; shells to vrust for hot scans).
+"""vv — fast, terse, agent-friendly CLI for Obsidian vaults.
 
 Read:    outline NOTE · read NOTE SEC · head NOTE · show NOTE [--max-bytes N] [--from SEC]
          resolve NAME · search TERMS [--k N] [--w CHARS]
@@ -2027,9 +2027,22 @@ def _check_arity(cmd, fn, args):
         die(f"usage: {cmd} takes {want} positional args, got {len(args)} — "
             f"next: run vv with no args for the command list")
 
+VERSION_FALLBACK = "1.1.0-dev"  # used only when VERSION is absent (bare-file deploys)
+
+def _version():
+    try:
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "VERSION")) as f:
+            return f.read().strip()
+    except OSError:
+        return VERSION_FALLBACK
+
+USAGE_LINE = "usage: vv COMMAND [ARGS] — next: vv --help for the command list"
+
 def main():
     global VAULT, _VAULT_REAL, _op
     a = sys.argv[1:]
+    if a and a[0] in ("--version", "version"):
+        print(f"vv {_version()}"); sys.exit(0)
     if "--vault" in a:
         i = a.index("--vault")
         if i + 1 >= len(a):
@@ -2041,13 +2054,17 @@ def main():
         _VAULT_REAL = os.path.realpath(VAULT)
         a = a[:i] + a[i + 2:]
     if not a:
-        print(__doc__.rstrip()); sys.exit(0)
+        # One line, stderr, exit 1: an accidental bare `vv` in an agent loop
+        # must not cost the full help catalog (spec rev 2, 2026-08-27).
+        sys.stderr.write(USAGE_LINE + "\n"); sys.exit(1)
     _op = a[0]   # real command, even when --vault preceded it
     if a[0] in ("--help", "-h", "help"):
         print(__doc__.rstrip()); sys.exit(0)
     fn = CMDS.get(a[0])
     if not fn:
-        die(f"usage: unknown command {a[0]} — next: run vv --help for the command list")
+        sugg = suggest_names(a[0], [c + ".md" for c in CMDS], n=1)  # same tiered ranking notes get
+        hint = f" (did you mean: {sugg[0]})" if sugg else ""
+        die(f"usage: unknown command {a[0]}{hint} — next: run vv --help for the command list")
     _check_arity(a[0], fn, a[1:])
     fn(*a[1:])
     _log(_out_total)
