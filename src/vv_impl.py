@@ -842,7 +842,25 @@ def _phrase_hint(terms):
     split = [w_ for t in terms for w_ in t.split()]
     if len(split) == len(terms):
         return None
-    n = len(_search_hits(split, 1))
+    # Count the split-term matches with the rust engine when it is built: this
+    # is a SECOND full-vault search, and on the pure python scanner it made a
+    # zero-hit multi-word query ~230 ms against ~36 ms for a hit — the hint cost
+    # 6x the search it was explaining. VV_FROM_PY stops the engine handing back.
+    n = None
+    if use_rust():
+        import subprocess
+        try:
+            r = subprocess.run([VRUST, "search", *split, "--k", "0", "--w", "1"],
+                               capture_output=True, text=True,
+                               env=dict(os.environ, VV_FROM_PY="1"), timeout=60)
+            if r.returncode == 0:
+                m = re.search(r"\(\d+ of (\d+) matches\)", r.stdout)
+                if m:
+                    n = int(m.group(1))
+        except (OSError, subprocess.SubprocessError):
+            n = None
+    if n is None:
+        n = len(_search_hits(split, 1))
     if not n:
         return None
     return ("hint: matched as ONE phrase. Those words as separate terms match "
@@ -854,7 +872,11 @@ def cmd_search(*args):
     k, w, terms = _parse_search_args(args)
     if use_rust():
         import subprocess
-        r = subprocess.run([VRUST, "search", *args], capture_output=True, text=True)
+        # VV_FROM_PY tells the engine that PYTHON is the orchestrator here, so
+        # the zero-hit phrase hint below is ours to add. Without it the engine
+        # hands off to python itself on zero hits and the hint prints TWICE.
+        env = dict(os.environ, VV_FROM_PY="1")
+        r = subprocess.run([VRUST, "search", *args], capture_output=True, text=True, env=env)
         sys.stdout.write(r.stdout); sys.stderr.write(r.stderr)
         global _out_total
         _out_total += len(r.stdout.encode("utf-8"))

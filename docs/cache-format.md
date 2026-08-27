@@ -109,3 +109,47 @@ checkout, not a rebuild.
 `VV_PROF=1 vv backlinks <note>` prints phase timings to stderr: `stat_walk`,
 `cache_read`, `tsv_parse`, `diff`, `lex_changed`, `cache_write`, and the write's
 internal `w:format` / `w:write` / `w:fsync` / `w:rename` split.
+
+---
+
+# Appendix: replaying real sessions (2026-08-27)
+
+`bench/session_ledger.py` recovers the operations the last N sessions actually
+performed from the transcripts, then replays them through **both** engines and
+compares byte-for-byte. The metrics sink is not usable for this: 98% of
+`~/.claude/metrics/vv.jsonl` on 2026-08-26 came from four build hours, so it
+measures our own benchmarking, not usage.
+
+Two invocation forms must both be matched or the ledger silently under-reports —
+`python3 .../src/vv.py <verb>` and, since the entry flip, bare `vv <verb>`.
+
+It found three bugs the 21-suite gate did not:
+
+1. **The zero-hit phrase hint was un-shipped by the entry flip.** The hint lives
+   in python; when the native binary became the default entry it answered
+   `search` itself and printed a bare `(0 of 0 matches)`, reinstating exactly the
+   quoted-phrase silence the hint had been added to fix. The engine now hands off
+   to python on zero hits.
+2. **The snippet window sliced BYTES where python slices CHARACTERS.** `--w 500`
+   meant 500 bytes in the engine and 500 chars in python, so every snippet
+   containing multi-byte UTF-8 came back short by one char per extra byte —
+   **16 of 18** real query terms diverged. The engine-parity suite never saw it
+   because it compared only the `==` path+score headers and waived snippets as
+   "may differ at multi-byte boundaries". That waiver was hiding a systematic
+   bug, not an edge case; it is gone, the comparison is now full stdout across
+   four widths, and the fixture is deliberately multi-byte.
+3. **The first repair recursed forever.** Python's `search` shells straight back
+   to the engine, so a naive hand-off looped (a 2-minute hang). Python now sets
+   `VV_FROM_PY` when it invokes the engine; the engine hands off only when it is
+   the top-level entry. Without that flag the hint prints twice.
+
+Cost of the fix, measured: a zero-hit multi-word search went 360 ms → 267 ms →
+**144 ms** across two rounds (the last by letting the hint's own count-search use
+the engine instead of the pure python scanner). A hit is unchanged at ~36 ms.
+The miss path is inherently three scans plus the hint's second search; misses are
+rare and hits are 2x python, so the trade stands.
+
+Replay result after the fixes: **138/138 reads byte-identical**, 96 writes against
+a disposable copy with 0 crashes (41 succeeded, 55 refused cleanly — exit 1/3/4
+is the tool working). Pinned by `tests/test_search_entry.py` and the strengthened
+`tests/test_engine_parity.py`.
