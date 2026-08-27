@@ -1107,7 +1107,7 @@ def link_targets_in(text):
 #     changes and every existing DB self-invalidates.
 # Kill switch: VV_NO_INDEX=1 (also how the bench measures before/after).
 
-PARSER_VERSION = 1
+PARSER_VERSION = 2   # v2: pipes table (parse-time table-pipe lint findings)
 INDEX_ROOT = os.environ.get("VV_INDEX_ROOT") or os.path.expanduser("~/.cache/vv/index")
 
 
@@ -1147,7 +1147,8 @@ def _index_parse(fp):
     fm, _ = split_fm(text)
     props = fm_props(fm)
     links = [(i, kind, tgt) for i, kind, tgt in link_targets_in(text)]
-    return sha, json.dumps(props), links
+    pipes = _table_pipe_findings(text)
+    return sha, json.dumps(props), links, pipes
 
 
 class _Index:
@@ -1160,6 +1161,12 @@ class _Index:
     def props(self):
         for path, pj in self.con.execute("SELECT path, props FROM files ORDER BY path"):
             yield path, json.loads(pj)
+
+    def links_for(self, rel_path):
+        for line, kind, tgt in self.con.execute(
+                "SELECT l.line, l.kind, l.target FROM links l JOIN files f ON f.id = l.file_id "
+                "WHERE f.path = ? ORDER BY l.line", (rel_path,)):
+            yield os.path.join(VAULT, rel_path), line, kind, tgt
 
     def links(self, needle=None):
         q = "SELECT f.path, l.line, l.kind, l.target FROM links l JOIN files f ON f.id = l.file_id"
@@ -1212,7 +1219,7 @@ def _index_sync(scope=None):
     con.execute("PRAGMA synchronous=NORMAL")
     ver = con.execute("PRAGMA user_version").fetchone()[0]
     if ver != PARSER_VERSION:
-        con.executescript("DROP TABLE IF EXISTS links; DROP TABLE IF EXISTS files; "
+        con.executescript("DROP TABLE IF EXISTS pipes; DROP TABLE IF EXISTS links; DROP TABLE IF EXISTS files; "
                           "DROP TABLE IF EXISTS meta;")
         con.executescript("""
             CREATE TABLE files(id INTEGER PRIMARY KEY, path TEXT UNIQUE,
@@ -1220,6 +1227,9 @@ def _index_sync(scope=None):
             CREATE TABLE links(file_id INTEGER REFERENCES files(id) ON DELETE CASCADE,
                 line INTEGER, kind TEXT, target TEXT);
             CREATE INDEX links_file ON links(file_id);
+            CREATE TABLE pipes(file_id INTEGER REFERENCES files(id) ON DELETE CASCADE,
+                line INTEGER, target TEXT);
+            CREATE INDEX pipes_file ON pipes(file_id);
             CREATE TABLE meta(k TEXT PRIMARY KEY, v INTEGER);
         """)
         con.execute(f"PRAGMA user_version={PARSER_VERSION}")
@@ -1249,15 +1259,16 @@ def _index_sync(scope=None):
     if changed or gone:
         with con:                                   # one transaction
             def _drop(path):
-                con.execute("DELETE FROM links WHERE file_id IN "
-                            "(SELECT id FROM files WHERE path=?)", (path,))
+                for tbl in ("links", "pipes"):
+                    con.execute(f"DELETE FROM {tbl} WHERE file_id IN "
+                                "(SELECT id FROM files WHERE path=?)", (path,))
                 con.execute("DELETE FROM files WHERE path=?", (path,))
             for p in gone:
                 _drop(p)
             for p in changed:
                 fp = os.path.join(VAULT, p)
                 try:
-                    sha, pj, links = _index_parse(fp)
+                    sha, pj, links, pipes = _index_parse(fp)
                     st = os.stat(fp)
                 except OSError:
                     _drop(p)
@@ -1271,6 +1282,8 @@ def _index_sync(scope=None):
                 fid = cur.lastrowid
                 con.executemany("INSERT INTO links VALUES(?,?,?,?)",
                                 [(fid, i, k, tg) for i, k, tg in links])
+                con.executemany("INSERT INTO pipes VALUES(?,?,?)",
+                                [(fid, i, tg) for i, tg in pipes])
             if scope is None:   # scoped syncs never advance the racy stamp:
                 # unscoped files were not revisited, so their racy window must
                 # stay open until a FULL sync re-hashes them
@@ -1799,6 +1812,37 @@ def cmd_move(ref, dest_folder, *args):
     dest = os.path.join(dest_folder.rstrip("/"), os.path.basename(rel(fp))[:-3])
     _do_relocate(ref, dest, "--apply" in args, "move", _plan_token(args))
 
+def _table_pipe_findings(text):
+    """[(line_idx0, raw_target)] for unescaped alias pipes inside wikilinks on
+    table rows — Obsidian splits the cell at the pipe and renders NO link
+    (oracle 2026-08-26). Shared by lint --quick (live path) and the index
+    parser, so the two can never disagree."""
+    res = []
+    lines, fenced, cmask = masked_lines(text)
+    fm_end = fm_bounds(lines)
+    delim = re.compile(r"^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{3,}:?\s*)*\|?\s*$")
+    delim_rows = {i for i, l in enumerate(lines)
+                  if i >= fm_end and i not in fenced and "|" in l and delim.match(l.rstrip("\r"))}
+    table_rows = set()
+    for d in delim_rows:
+        j = d - 1
+        if j >= 0 and "|" in lines[j]:
+            table_rows.add(j)
+        j = d + 1
+        while j < len(lines) and "|" in lines[j] and j not in delim_rows:
+            table_rows.add(j); j += 1
+    for i, l in enumerate(lines):
+        if i in fenced or i not in table_rows:
+            continue
+        for m in LINK_RE.finditer(strip_inline_code(l)):
+            a2, b2 = m.start(2), m.end(2)
+            if any(a < b2 and a2 < b for a, b in cmask.get(i, [])):
+                continue
+            if re.search(r"(?<!\\)\|", m.group(2) + m.group(3)):
+                res.append((i, m.group(2).strip()))
+    return res
+
+
 def cmd_lint(*args):
     canonical = os.path.join(VAULT, ".claude/skills/vault-lint/vault_lint.py")
     if "--quick" not in args and os.path.exists(canonical):
@@ -1815,7 +1859,31 @@ def cmd_lint(*args):
     for p in sorted(glob.glob(os.path.join(VAULT, "Templates/**/*.md"), recursive=True)):
         stems.add(os.path.basename(p)[:-3].lower())
     findings = []
-    for p in md_files():
+    h = index_handle()
+    if h is not None:
+        stems2 = {os.path.basename(r)[:-3].lower() for r in h.rel_paths()} | stems
+        pipes = {}
+        for path, line, tgt in h.con.execute(
+                "SELECT f.path, p.line, p.target FROM pipes p JOIN files f ON f.id = p.file_id "
+                "ORDER BY f.path, p.line"):
+            pipes.setdefault(path, []).append((line, tgt))
+        for rp in h.rel_paths():
+            for _fp, i, kind, tgt in h.links_for(rp):
+                if kind != "wiki":
+                    continue
+                tl = tgt.strip().lower()
+                if tl.startswith(("reference-", "feedback-", "project-", "user-")):
+                    findings.append(("memory-slug", f"{rp}:{i+1}", tgt))
+                    continue
+                last = tl.split("/")[-1]
+                last = last[:-3] if last.endswith(".md") else last
+                if last not in stems2:
+                    findings.append(("broken-link", f"{rp}:{i+1}", tgt))
+            for i, tgt in pipes.get(rp, []):
+                findings.append(("table-pipe", f"{rp}:{i+1}", tgt))
+        _lint_report(findings, limit)
+        return
+    for p in sorted(md_files()):
         try:
             text = read_raw(p)
         except SystemExit:
@@ -1831,38 +1899,12 @@ def cmd_lint(*args):
             last = last[:-3] if last.endswith(".md") else last
             if last not in stems:
                 findings.append(("broken-link", f"{rel(p)}:{i+1}", tgt))
-        # an UNESCAPED alias pipe inside a wikilink on a table row: the table splits
-        # the cell at the pipe, so Obsidian renders NO link at all (oracle 2026-08-26).
-        # The fix is \| — flag it, since the note renders broken in the app.
-        lines, fenced, cmask = masked_lines(text)
-        # a line belongs to a table if a delimiter row (|---|---| etc.) is adjacent
-        # within its contiguous block — tables need no leading pipes (review 2026-08-26).
-        # A real delimiter row always contains a pipe (single-column: |---|); a bare
-        # --- is a frontmatter fence or hr, never a table — and frontmatter is
-        # excluded outright so its quoted alias pipes can't read as cells (2026-08-26)
-        fm_end = fm_bounds(lines)
-        delim = re.compile(r"^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{3,}:?\s*)*\|?\s*$")
-        delim_rows = {i for i, l in enumerate(lines)
-                      if i >= fm_end and i not in fenced and "|" in l and delim.match(l.rstrip("\r"))}
-        table_rows = set()
-        for d in delim_rows:
-            j = d - 1                      # header row above
-            if j >= 0 and "|" in lines[j]:
-                table_rows.add(j)
-            j = d + 1                      # body rows below, until a line with no pipe
-            while j < len(lines) and "|" in lines[j] and j not in delim_rows:
-                table_rows.add(j); j += 1
-        for i, l in enumerate(lines):
-            if i in fenced or i not in table_rows:
-                continue
-            for m in LINK_RE.finditer(strip_inline_code(l)):
-                a2, b2 = m.start(2), m.end(2)
-                if any(a < b2 and a2 < b for a, b in cmask.get(i, [])):
-                    continue
-                # unescaped pipe anywhere in the link ([[N|a]] AND [[N#S|a]]) — an
-                # escaped \| is fine, and \\| is an escaped backslash + escaped pipe
-                if re.search(r"(?<!\\)\|", m.group(2) + m.group(3)):
-                    findings.append(("table-pipe", f"{rel(p)}:{i+1}", m.group(2).strip()))
+        for i, tgt in _table_pipe_findings(text):
+            findings.append(("table-pipe", f"{rel(p)}:{i+1}", tgt))
+    _lint_report(findings, limit)
+
+
+def _lint_report(findings, limit):
     # output is context: report every finding's COUNT, but print at most `limit` lines
     from collections import Counter
     by_kind = Counter(f[0] for f in findings)
