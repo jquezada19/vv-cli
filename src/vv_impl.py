@@ -727,6 +727,9 @@ def cmd_board(folder, *filters):
                 props = fm_props(fm)
                 if all(props.get(k) == v for k, v in want.items()):
                     rows.append((n[:-3], props.get("status", "-"), props.get("type", "-")))
+        rows.sort()   # deterministic + identical to the indexed path on nested
+        # folders (they disagreed in walk order until 2026-08-27 — caught by the
+        # native-port fixture suite, a latent inconsistency from the index change)
     for name, status, typ in rows:
         out(f"{status}\t{typ}\t{name}")
     out(f"({len(rows)} notes)")

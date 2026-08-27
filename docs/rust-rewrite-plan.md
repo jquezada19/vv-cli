@@ -74,3 +74,17 @@ search/linkscan already native.
 Integrate module by module behind the existing dispatcher; a module ships only
 when its differential suite is green AND the full gate passes. Default entry
 remains python3 src/vv.py until the 2026-09-02 checkpoint decision.
+
+
+## Known deviations (documented, accepted 2026-08-27)
+
+- **CAS conflict becomes a silent retry** (Grok review finding): native `set`/
+  `unset`/`append` detect a concurrent write via file_sig and Fallback; python
+  then re-reads the LATEST bytes and applies — no lost update, but the exit-3
+  "another writer" warning python-only would sometimes surface is not shown.
+  Observable only during an active race with a second writer.
+- Wider Fallback nets than python's `errors="replace"` paths (non-UTF-8 note in
+  a corpus scan; non-ASCII tags values; CR-only line endings) — always in the
+  safe direction: python answers, slower.
+- `impact`, `rename`, `move`, `doctor`, `lint`, `index`, `new`, `daily-append`,
+  `patch` remain python (fallback) this phase.

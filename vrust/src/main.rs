@@ -399,7 +399,11 @@ fn main() {
         let handler: Option<fn(&str, &[String], &std::path::Path) -> readpath::Outcome> =
             match cmd {
                 "outline" | "read" | "head" | "resolve" => Some(readpath::run),
-                "backlinks" | "links" | "orphans" | "deadends" | "impact" => Some(graph::run),
+                // links reads ONE note (7.9 ms native); backlinks/orphans/deadends scan the
+                // corpus natively (~148 ms) while python answers from its SQLite index
+                // (48-84 ms) — those route to python until graph.rs grows the vvidx cache
+                // (measured 2026-08-27, E5). impact was never ported.
+                "links" => Some(graph::run),
                 "set" | "unset" | "append" | "appendsec" | "new" | "daily-append" | "patch" => Some(write::run),
                 "board" | "tags" | "props" | "show" => Some(query::run),
                 _ => None,
@@ -414,8 +418,8 @@ fn main() {
     match args.first().map(String::as_str) {
         Some("search") => cmd_search(&args[1..]),
         Some("linkscan") => cmd_linkscan(&args[1..]),
-        Some(_) if std::env::var_os("VV_NATIVE_ENTRY").is_some() => exec_python(&orig),
-        _ => {
+        Some(_) => exec_python(&orig),   // every other vv command is python's
+        None => {
             eprintln!("usage: vrust search <terms...> [--k N] [--w CHARS] | linkscan [--grep NEEDLE]");
             exit(1);
         }
