@@ -101,6 +101,34 @@ os.remove(f"{SB}/sub/VV Fixture.md")
 # --- frontmatter ---
 r = run("set", REL_FIX, "status", "in-progress")
 check("T10 set", "status: in-progress" in open(f"{SB}/VV Fixture.md").read())
+# set must never write a value that breaks the WHOLE frontmatter block.
+# Regression: on 2026-08-26 a description containing ": " went in bare and
+# Obsidian's metadataCache returned nothing for the note — invalid YAML that
+# looked like success. Frontmatter is the vault's source of truth, so this is
+# silent data loss, not cosmetics.
+run("set", REL_FIX, "description", "vv pilot: live from X to Y")
+t = open(f"{SB}/VV Fixture.md").read()
+check("T10b colon-space value is quoted",
+      'description: "vv pilot: live from X to Y"' in t, t[:200])
+run("set", REL_FIX, "description", "trailing colon:")
+t = open(f"{SB}/VV Fixture.md").read()
+check("T10c trailing-colon value is quoted", 'description: "trailing colon:"' in t, t[:200])
+run("set", REL_FIX, "description", "- leading dash")
+t = open(f"{SB}/VV Fixture.md").read()
+check("T10d leading-indicator value is quoted", 'description: "- leading dash"' in t, t[:200])
+run("set", REL_FIX, "plain", "done")
+t = open(f"{SB}/VV Fixture.md").read()
+check("T10e ordinary scalar stays bare", "plain: done" in t, t[:200])
+run("set", REL_FIX, "listy", "[a, b]")
+t = open(f"{SB}/VV Fixture.md").read()
+check("T10f flow list is left intact", "listy: [a, b]" in t, t[:200])
+run("set", REL_FIX, "prequoted", '"already quoted"')
+t = open(f"{SB}/VV Fixture.md").read()
+check("T10g pre-quoted value is not double-quoted",
+      'prequoted: "already quoted"' in t, t[:200])
+for k in ("description", "plain", "listy", "prequoted"):
+    run("unset", REL_FIX, k)
+
 r = run("unset", REL_FIX, "status")
 t = open(f"{SB}/VV Fixture.md").read()
 check("T11 unset", "status:" not in t and "type: test" in t)

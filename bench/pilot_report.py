@@ -39,7 +39,12 @@ def load(path, since, until):
                     r = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                if since <= r.get("ts", "")[:10] <= until:
+                # Compare at the precision the caller asked for: a bare date
+                # bounds by day, a full ISO stamp bounds by second. The pilot
+                # needs the latter -- the pre-suppression test fixtures share a
+                # calendar day with the start of real usage.
+                ts = r.get("ts", "")
+                if since <= ts[:len(since)] and ts[:len(until)] <= until:
                     rows.append(r)
     except OSError:
         pass

@@ -369,8 +369,38 @@ def cmd_append(ref, text):
     atomic_write(fp, cur + ("" if cur.endswith("\n") or not cur else eol) + text + eol)
     out(f"appended to {rel(fp)}")
 
+_YAML_LEAD = set("-?:,[]{}#&*!|>'\"%@`")
+
+def yaml_scalar(v):
+    """Quote a frontmatter value when leaving it bare would produce invalid YAML.
+
+    Found 2026-08-26, day one of the shadow pilot: `set description "vv pilot:
+    live from ..."` wrote the colon-space bare, which makes the WHOLE
+    frontmatter block unparseable — Obsidian's metadataCache returned nothing
+    for the note, silently dropping it out of every Bases view. Frontmatter is
+    the vault's source of truth, so a malformed write is data loss that looks
+    like success (exit 0, plausible output).
+
+    Deliberately conservative: an already-quoted value, a flow collection
+    ([a, b] / {k: v}), and ordinary bare scalars are passed through untouched
+    so existing notes and callers keep their exact formatting.
+    """
+    if not isinstance(v, str) or v == "":
+        return '""' if v == "" else v
+    if len(v) >= 2 and ((v[0] == v[-1] == '"') or (v[0] == v[-1] == "'")):
+        return v                      # caller quoted it already
+    if v[0] in "[{" and v[-1] in "]}":
+        return v                      # flow list/map, intentional structure
+    needs = (": " in v or v.endswith(":") or " #" in v
+             or v[0] in _YAML_LEAD or v != v.strip()
+             or "\n" in v or "\t" in v)
+    if not needs:
+        return v
+    return '"' + v.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
 def cmd_set(ref, key, value):
     _dirty_gate()
+    value = yaml_scalar(value)
     fp = resolve(ref)
     text = read_raw(fp)
     fm, body, tail, bom = split_fm_full(text)
