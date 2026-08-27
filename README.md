@@ -14,23 +14,26 @@ shared bug can't certify itself.
 ## Benchmarks
 
 Why use this over `grep`/`cat` or the official `obsidian` CLI? Measured on a real
-1,495-note vault (macOS, Python 3.13, median of 5 runs; reproduce with
-`python3 bench/bench.py`):
+1,500-note vault (macOS, Python 3.13, median of 5 runs; reproduce with
+`python3 bench/bench.py` — re-measured 2026-08-26):
 
 | task | shell (grep/cat) | obsidian CLI | vv |
 |---|---|---|---|
-| read ONE section of a note | 2 ms · 4,643 B (whole file) | 3 ms · 4,643 B (whole file) | 69 ms · **1,728 B** |
-| search a common term | 3,610 ms · 3,240,649 B | 24 ms · 286,065 B | 118 ms · **2,993 B** |
-| flip one frontmatter field | 17 ms · 4,644 B round-trip | n/a headless-only | 41 ms · **44 B** |
-| backlinks of a hub note | 1,722 ms · 74,591 B | **4 ms** · 2,144 B | 179 ms · 2,159 B |
+| read ONE section of a note | 3 ms · 15,965 B (whole file) | 5 ms · 15,965 B (whole file) | 105 ms · **1,442 B** |
+| search a common term | 5,800 ms · 3,505,090 B | 106 ms · 299,519 B | 152 ms · **2,993 B** |
+| flip one frontmatter field | 23 ms · 15,966 B round-trip | n/a headless-only | 57 ms · **35 B** |
+| backlinks of a hub note | 2,306 ms · 107,037 B | **6 ms** · 252 B | 238 ms · 266 B |
 
 The column that matters for an agent is **bytes**: that's the context (token)
-bill, paid on every operation, every session. On search vv returns ~1,000× fewer
-bytes than grep and ~95× fewer than the obsidian CLI at comparable latency.
-Honest caveats: `cat` beats vv on raw wall-time for single files (vv pays ~30 ms
-of Python startup per call), and the obsidian CLI wins backlinks latency
-outright — the app holds a live in-memory cache. vv's job is to be *accurate and
-cheap in context* without needing the app open at all.
+bill, paid on every operation, every session. Reading one section costs **11×
+fewer bytes** than opening the note; search returns ~1,200× fewer bytes than
+grep and ~100× fewer than the obsidian CLI at comparable latency; flipping a
+frontmatter field costs 35 bytes against a 16 KB read-modify-write.
+
+Honest caveats, unchanged by the re-measurement: `cat` beats vv on raw wall-time
+for single files (vv pays ~30 ms of Python startup per call), and the obsidian
+CLI wins backlinks outright — the app holds a live in-memory cache. vv's job is
+to be *accurate and cheap in context* without needing the app open at all.
 
 ## Why not just read the files?
 
@@ -50,8 +53,8 @@ failed lookup prints `did you mean:` suggestions).
 | command | what it does |
 |---|---|
 | `outline NOTE` | section map: id · level · title · size · sha8 anchor |
-| `read NOTE SEC` | one section, by outline id |
-| `show NOTE [--max-bytes N] [--from SEC]` | budgeted read with a continuation token when the budget runs out |
+| `read NOTE SEC` | one section — by outline id, or by heading title / `#Heading` / `(preamble)`; an ambiguous title refuses and names the ids |
+| `show NOTE [--max-bytes N] [--from SEC]` | budgeted read with a continuation token; `--max-bytes` is a **hard ceiling in UTF-8 bytes**, and a single oversized section is truncated-and-marked rather than emitted whole |
 | `head NOTE` · `resolve NAME` | frontmatter only · name → path |
 | `search TERMS [--k N] [--w C]` | ranked full-text: a note **named** for the query outranks mere mentions; a `dir/` term filters by path |
 
@@ -105,15 +108,23 @@ failed lookup prints `did you mean:` suggestions).
 
 - **Containment** — every read and write path, including rename/move
   destinations, resolves through a realpath check that refuses to leave the vault.
-- **CAS everywhere** — section patches carry a sha8 of the section they replace;
+- **CAS on every writer** — section patches carry a sha8 of the section they replace, and
+  `set`/`unset`/`append`/`appendsec`/`daily-append` capture a `(mtime_ns, size)`
+  signature at read and refuse with exit 3 if the file changed underneath. Obsidian is
+  a second writer whenever the app is open, so this is a live case, not a hypothetical;
   rename/move dry-runs print a plan digest over every affected file's bytes, and
   `--apply <digest>` refuses to execute a plan that drifted since review.
-- **Journaled refactors** — rename/move backs up every file (sha256-manifested,
-  vault-scoped) before writing. A crash mid-apply rolls back byte-identically —
-  including on Ctrl-C and non-UTF-8 surprises. Rollback *classifies* each file
-  first: bytes that are neither the original nor vv's own write belong to another
-  writer and are never clobbered. A leftover journal blocks all writes (exit 4)
-  until `doctor --rollback` or `doctor --discard`.
+- **Journaled refactors, recoverable after a HARD crash** — rename/move backs up
+  every file (sha256-manifested, vault-scoped) before writing, and the journal
+  also persists the rename endpoints, the transaction phase, and a per-file hash
+  of what this process wrote — each written before the step it describes, the
+  manifest replaced atomically with `fsync`. So recovery works whether the
+  process caught the failure or was killed outright: a kill between the rename
+  and the commit no longer leaves the note at both ends. Rollback *classifies*
+  each file first — bytes that are neither the original nor vv's own write belong
+  to another writer and are never clobbered, including an edit made **after** the
+  crash. A leftover journal blocks all writes (exit 4) until `doctor --rollback`
+  or `doctor --discard`.
 - **Line endings & encoding** — CRLF/LF, BOM, and EOF-newline are preserved
   byte-for-byte. Non-UTF-8 files are refused, never mangled.
 
@@ -129,10 +140,31 @@ an expected-vector corpus (independent of both engines), an engine parity suite,
 and an opt-in oracle test (`tests/oracle_obsidian.py`) that diffs `vv backlinks`
 against the running app — clean across 1,400+ sampled note comparisons.
 
-The full gate (`./run_tests.sh`) runs six suites on BOTH engines: 190+ checks,
+The full gate (`./run_tests.sh`) runs six suites on BOTH engines: 200+ checks,
 seeded property/fuzz invariants (sections must partition every file; crash
 injection at every write index must roll back byte-identically), and a read-only
 verification pass over the real vault.
+
+Fault injection covers two different kinds of failure, because they exercise
+different code. Catchable faults (`VV_FAULT_AFTER`, `VV_FAULT_KIND=exit`) test
+the in-process handler. `VV_FAULT_KILL_AFTER_RENAME` uses `os._exit` to bypass
+handlers, `finally` blocks and `atexit` entirely — the only way to reach the
+crash-recovery path, which every catchable injector had been quietly tidying up
+before it could run.
+
+### Replaying real usage
+
+`bench/vault_ops_replay.py` replays every vault operation the last N sessions
+actually performed — 586 from 50 sessions on its first run — against the current
+code. Reads run against the live vault; **writes run against a disposable copy**,
+so a replayed `set`/`patch`/`rename` can never touch a real note. It separates a
+legitimate refusal from a crash, ephemeral test fixtures from real notes, and a
+relocated note from a lost one.
+
+Unit tests cover what you thought to test; this covers what you actually did. It
+is what surfaced the section-addressing gap above: across 50 sessions, callers
+guessed section addressing wrong four distinct ways, and every one was correctly
+refused — the tool being right and unhelpful at the same time.
 
 ## Install
 
@@ -147,7 +179,7 @@ pure-Python fallback (same output, held identical by the parity gate).
 
 ## Design notes
 
-- Output bytes are the cost function; every op logs `{op, ms, out_bytes}` to
+- Output bytes are the cost function; every op logs `{op, ms, out_bytes, exit, kind, cf_bytes}` to
   `~/.claude/metrics/vv.jsonl` (best-effort, silent if absent).
 - Two implementations of one lexer is a standing drift risk; the mitigations are
   the parity suite, the expected vectors, and `VV_ENGINE` running the whole
@@ -162,3 +194,12 @@ pure-Python fallback (same output, held identical by the parity gate).
 Setext (`===`-underlined) headings are not sections; `.canvas` and plugin link
 formats are refused rather than guessed; angle-bracket markdown links
 (`[x](<file.md>)`) are not rewritten by rename (documented, not silent).
+
+The frontmatter reader is **YAML-shaped, not YAML**. It handles plain scalars,
+quoted values, flow lists (`[a, b]`) and dash lists; it does *not* interpret
+block scalars (`|`, `>`), nested maps, or anchors, and it keeps surrounding
+quotes verbatim. Probed against Obsidian's own parser across 16 cases: those
+divergences are values we mis-*read*, not ones Obsidian rejects — with one
+exception that matters, an unquoted `: ` in a value, which makes Obsidian reject
+the whole block and silently drop the note from every Bases view. `set` quotes
+that case on write, and the vault linter flags any pre-existing instance.
