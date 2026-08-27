@@ -6,10 +6,13 @@ by contract, edits are hash-anchored compare-and-swap, multi-file operations are
 journaled with classified rollback, and link semantics are verified against the
 Obsidian app's own metadata cache — not guessed from the docs.
 
-Python orchestrator (stdlib only) + optional std-only Rust engine for the two hot
-scans (search, link scan). Both lexers are held to identical output by a parity
-suite and to *correct* output by a hand-authored expected-vector corpus, so a
-shared bug can't certify itself.
+Two implementations, one semantics: a std-only Rust binary (the default entry)
+answers the common commands natively, and a stdlib-only Python implementation
+remains the semantic authority — the native path execs it for everything it
+doesn't handle and for any input it is unsure about. The two are held to
+identical output by differential parity suites and to *correct* output by a
+hand-authored expected-vector corpus plus a live-Obsidian oracle, so a shared
+bug can't certify itself.
 
 ## Entry points
 
@@ -26,7 +29,7 @@ suites (~300 checks) in the test gate.
 ## Benchmarks
 
 Why use this over `grep`/`cat` or the official `obsidian` CLI? Measured on a real
-1,500-note vault (macOS, Python 3.13, median of 5 runs; reproduce with
+1,500-note vault (macOS, Apple Silicon, median of 5 runs; reproduce with
 `python3 bench/bench.py` — re-measured 2026-08-27 through the DEFAULT (native)
 entry, after the full-Rust rewrite; `VV_BENCH_ENTRY=python` benches the python
 entry instead):
@@ -50,11 +53,16 @@ and the obsidian CLI still wins backlinks outright — the app holds a live
 in-memory cache and its CLI is a 133 KB socket shim into it. vv's job is to be
 *accurate and cheap in context* without needing the app open at all.
 
-## The index
+## The caches
 
-Since 2026-08-27, graph and frontmatter commands (`backlinks`, `orphans`,
-`deadends`, `impact`, `board`, `tags`, `props`, `lint --quick`) are served from a
-**persistent SQLite index** — a derived, disposable cache under
+Each entry keeps its own derived, disposable cache under `~/.cache/vv/index/`
+— they never read or write each other's, because two writers on one cache is
+how caches lie. The **native entry** keeps a TSV link cache (`.vvidx`) behind
+`backlinks`/`orphans`/`deadends`; the **python entry** keeps a SQLite index
+behind its graph and frontmatter commands and `lint --quick`. Both follow the
+same freshness contract, described here in the SQLite index's terms.
+
+The python entry's index is a **persistent SQLite cache** under
 `~/.cache/vv/index/`, never inside the vault. Freshness is per-invocation, not
 per-interval: every command stat-walks the vault (no file reads, ~10 ms), diffs
 `(mtime_ns, size, inode)` per file by **equality** against the DB, and re-parses
@@ -79,14 +87,14 @@ indexed and live paths is regression-tested on every accelerated command.
 | `lint --quick` | 1,766 ms | 87 ms |
 | search (parallel Rust scan, not the index) | 153 ms | 99 ms |
 
+(The table above is the python entry's own before/after from 2026-08-27, kept
+as the dated record; the native entry is faster still — see *Benchmarks*.)
+
 `vv index` shows status; `vv index --rebuild` forces a rebuild; `VV_NO_INDEX=1`
-disables it (also how the before/after above was measured —
-`bench/index_bench.py`). The remaining floor is CPython startup: ~22 ms of
-interpreter plus imports. The other historical cost — recompiling the main
-script's 87 KB on every run, ~13 ms, because CPython never bytecode-caches a
-script invoked by path — was removed 2026-08-27 by splitting `vv.py` into a
-launcher stub over an imported `vv_impl.py`, which does get `__pycache__`
-caching. Going below ~22 ms means a native entrypoint (parked).
+disables the SQLite index (`bench/index_bench.py` measured the before/after).
+The python entry's remaining floor is CPython startup, ~22 ms — which is why
+the native binary became the default entry; the `.vvidx` cache self-heals the
+same way (any doubt → live scan + rebuild, delete-don't-repair).
 
 ## Why not just read the files?
 
@@ -166,7 +174,10 @@ failed lookup prints `did you mean:` suggestions).
 - **CAS on every writer** — section patches carry a sha8 of the section they replace, and
   `set`/`unset`/`append`/`appendsec`/`daily-append` capture a `(mtime_ns, size)`
   signature at read and refuse with exit 3 if the file changed underneath. Obsidian is
-  a second writer whenever the app is open, so this is a live case, not a hypothetical;
+  a second writer whenever the app is open, so this is a live case, not a hypothetical.
+  One documented deviation under the native entry: a CAS conflict there falls back to
+  python, which re-reads the latest bytes and applies — no update is ever lost, but
+  during an active race the exit-3 warning is replaced by a clean retry;
   rename/move dry-runs print a plan digest over every affected file's bytes, and
   `--apply <digest>` refuses to execute a plan that drifted since review.
 - **Journaled refactors, recoverable after a HARD crash** — rename/move backs up
@@ -195,9 +206,11 @@ an expected-vector corpus (independent of both engines), an engine parity suite,
 and an opt-in oracle test (`tests/oracle_obsidian.py`) that diffs `vv backlinks`
 against the running app — clean across 1,400+ sampled note comparisons.
 
-The full gate (`./run_tests.sh`) runs six suites on BOTH engines: 200+ checks,
+The full gate (`./run_tests.sh`) runs eighteen suites — the originals on BOTH
+python engines, six native-vs-python differential suites (~300 checks), the
+phase-2 cache/patch pins, and three fuzz seeds — over 500 checks in all, with
 seeded property/fuzz invariants (sections must partition every file; crash
-injection at every write index must roll back byte-identically), and a read-only
+injection at every write index must roll back byte-identically) and a read-only
 verification pass over the real vault.
 
 Fault injection covers two different kinds of failure, because they exercise
@@ -225,20 +238,25 @@ refused — the tool being right and unhelpful at the same time.
 
 ```
 git clone https://github.com/jquezada19/vv-cli && cd vv-cli
-(cd vrust && cargo build --release)   # optional: Rust engine for hot scans
-python3 src/vv.py --vault ~/path/to/YourVault outline "Some Note.md"
+(cd vrust && cargo build --release)
+ln -s "$PWD/vrust/target/release/vrust" /opt/homebrew/bin/vv   # the native entry
+vv --vault ~/path/to/YourVault outline "Some Note.md"
 ```
 
-No Python dependencies. Without the Rust engine everything still works on the
-pure-Python fallback (same output, held identical by the parity gate).
+No Python dependencies; no crates. Skipping the Rust build (or the symlink)
+leaves the pure-Python entry: `python3 src/vv.py ...` — same output on every
+command, held identical by the parity gate, just slower.
 
 ## Design notes
 
 - Output bytes are the cost function; every op logs `{op, ms, out_bytes, exit, kind, cf_bytes}` to
   `~/.claude/metrics/vv.jsonl` (best-effort, silent if absent).
-- Two implementations of one lexer is a standing drift risk; the mitigations are
-  the parity suite, the expected vectors, and `VV_ENGINE` running the whole
-  command suite on both. Semantics (what a link *means*) live only in Python.
+- Two implementations of one semantics is a standing drift risk — accepted
+  deliberately and held in check by the differential suites, the expected
+  vectors, and the fallback contract (the native path answers only when sure;
+  python authors every error surface). The maintenance rule that follows: a
+  semantic change lands twice or not at all, and the gate is what proves the
+  twice matched.
 - Patterns adapted from [sqlx](https://github.com/transact-rs/sqlx) (validate
   against the authoritative engine; dirty-state gates; checksummed bookkeeping;
   per-backend test matrices) and rustdoc's search internals (tiered matching,
