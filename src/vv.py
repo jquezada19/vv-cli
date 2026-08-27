@@ -717,8 +717,19 @@ def cmd_daily_append(text):
     hits = glob.glob(os.path.join(VAULT, "Standups", f"*{today}*.md"))
     if not hits:
         die(f"not-found: no standup note for {today} under Standups/ — next: create it, then re-run")
-    cur = open(hits[0]).read()
-    atomic_write(hits[0], cur + ("" if cur.endswith("\n") else "\n") + text + "\n")
+    # Three defects lived in this one line (Codex review 2026-08-26), and this is
+    # the most-used writer in the tool:
+    #   1. no CAS -- the "every writer is guarded" claim skipped daily-append;
+    #   2. plain open() translates newlines, so appending to a CRLF standup
+    #      rewrote the WHOLE note as LF while reporting a one-line append;
+    #   3. a non-UTF-8 note raised a traceback instead of the documented exit 5.
+    # read_raw + file_sig fixes all three by using the same path as every other
+    # writer, which is the actual lesson.
+    _sig = file_sig(hits[0])
+    cur = read_raw(hits[0])
+    eol = eol_of(cur)
+    sep = "" if cur.endswith(("\n", "\r\n")) else eol
+    atomic_write(hits[0], cur + sep + text + eol, expect_sig=_sig)
     out(f"appended to {rel(hits[0])}")
 
 # ================= v1.5: show / deadends / impact / rename / move / lint / doctor =================

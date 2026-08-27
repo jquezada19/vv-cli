@@ -171,6 +171,45 @@ check("oversized first section is marked truncated, not dumped",
       "[truncated" in run("show", "Sandbox/vvtest/VV Big.md", "--max-bytes", "500").stdout)
 os.remove(_bigd)
 
+# --- daily-append (2026-08-26) --------------------------------------------
+# There were NO tests for this command, and it is the most-used writer in the
+# tool. A review seat found three defects in its single write line: no CAS
+# guard (the "every writer" claim skipped it), plain open() translating newlines
+# so appending one line silently rewrote a CRLF note as LF, and a non-UTF-8 note
+# raising a traceback instead of the documented exit 5.
+import datetime as _dt, glob as _glob
+_sd = os.path.expanduser("~/Documents/Obsidian Vault/Standups")
+_today = _dt.date.today().isoformat()
+_had_standup = bool(_glob.glob(os.path.join(_sd, f"*{_today}*.md")))
+if not _had_standup:
+    check("daily-append: skipped (no standup note for today)", True)
+else:
+    # Never write to the real standup: exercise the same code path in a temp vault.
+    import tempfile as _tf
+    _tv = _tf.mkdtemp(prefix="vv-daily-")
+    os.makedirs(os.path.join(_tv, "Standups"))
+    _p = os.path.join(_tv, "Standups", f"Standup {_today}.md")
+
+    def _da(*args):
+        return subprocess.run([sys.executable, VV, "--vault", _tv, "daily-append", *args],
+                              capture_output=True, text=True)
+
+    open(_p, "wb").write(b"---\r\ntype: standup\r\n---\r\n\r\n# Today\r\n")
+    _da("- crlf entry")
+    _raw = open(_p, "rb").read()
+    check("daily-append preserves CRLF line endings",
+          _raw.count(b"\r\n") == _raw.count(b"\n"), _raw[:60])
+
+    open(_p, "wb").write(b"---\ntype: standup\n---\n\n\xff\xfe binary\n")
+    _r = _da("- entry")
+    check("daily-append: non-UTF-8 exits 5, no traceback",
+          _r.returncode == 5 and "Traceback" not in _r.stderr, _r.stderr[:80])
+
+    open(_p, "w").write("---\ntype: standup\n---\n\n# Today\n")
+    _r = _da("- appended line")
+    check("daily-append appends", _r.returncode == 0 and "appended line" in open(_p).read())
+    shutil.rmtree(_tv, ignore_errors=True)
+
 r = run("unset", REL_FIX, "status")
 t = open(f"{SB}/VV Fixture.md").read()
 check("T11 unset", "status:" not in t and "type: test" in t)
