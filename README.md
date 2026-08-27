@@ -27,15 +27,16 @@ suites (~300 checks) in the test gate.
 
 Why use this over `grep`/`cat` or the official `obsidian` CLI? Measured on a real
 1,500-note vault (macOS, Python 3.13, median of 5 runs; reproduce with
-`python3 bench/bench.py` — re-measured 2026-08-27, after the persistent index
-and the parallel Rust scan landed):
+`python3 bench/bench.py` — re-measured 2026-08-27 through the DEFAULT (native)
+entry, after the full-Rust rewrite; `VV_BENCH_ENTRY=python` benches the python
+entry instead):
 
 | task | shell (grep/cat) | obsidian CLI | vv |
 |---|---|---|---|
-| read ONE section of a note | 2 ms · 15,965 B (whole file) | 4 ms · 15,965 B (whole file) | 56 ms · **1,442 B** |
-| search a common term | 5,825 ms · 3,505,090 B | 112 ms · 299,519 B | **84 ms** · **2,993 B** |
-| flip one frontmatter field | 23 ms · 15,966 B round-trip | n/a headless-only | 37 ms · **35 B** |
-| backlinks of a hub note | 2,300 ms · 107,037 B | **5 ms** · 252 B | 61 ms · 266 B |
+| read ONE section of a note | 3 ms · 16,125 B (whole file) | 4 ms · 16,125 B (whole file) | 10 ms · **1,442 B** |
+| search a common term | 5,857 ms · 3,505,090 B | 123 ms · 299,519 B | **36 ms** · **2,993 B** |
+| flip one frontmatter field | 24 ms · 16,126 B round-trip | n/a headless-only | **6 ms** · **35 B** |
+| backlinks of a hub note | 2,299 ms · 107,037 B | **5 ms** · 252 B | 24 ms · 266 B |
 
 The column that matters for an agent is **bytes**: that's the context (token)
 bill, paid on every operation, every session. Reading one section costs **11×
@@ -43,11 +44,11 @@ fewer bytes** than opening the note; search returns ~1,200× fewer bytes than
 grep and ~100× fewer than the obsidian CLI at comparable latency; flipping a
 frontmatter field costs 35 bytes against a 16 KB read-modify-write.
 
-Honest caveats: `cat` still beats vv on raw wall-time for single files (vv pays
-~27 ms of Python startup per call — see *The index*, below), and the obsidian
-CLI still wins backlinks outright — the app holds a live in-memory cache and its
-CLI is a 133 KB socket shim into it. vv's job is to be *accurate and cheap in
-context* without needing the app open at all.
+Honest caveats: `cat` still edges vv on a bare single-file read (3 vs 10 ms —
+the residue is vv's resolve + section parse, no longer interpreter startup),
+and the obsidian CLI still wins backlinks outright — the app holds a live
+in-memory cache and its CLI is a 133 KB socket shim into it. vv's job is to be
+*accurate and cheap in context* without needing the app open at all.
 
 ## The index
 
