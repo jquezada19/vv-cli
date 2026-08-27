@@ -30,6 +30,10 @@ FIXTURES = {
  "indented-fence.md": "   ```\n# masked by 3-space fence\n   ```\n# ok\n",
  "empty-sections.md": "# A\n# B\n# C\n",
  "fm-dash-body.md": "---\nk: v\n---\ntext\n---\nmore\n",
+ # mini graph for the --limit pins: L2 and L3 both link L1; L1 links both.
+ "Wk/L1.md": "---\nstatus: open\ntype: t1\ntags: [alpha, beta]\n---\n[[L2]] [[L3]]\n",
+ "Wk/L2.md": "---\nstatus: open\ntype: t1\ntags: [alpha]\n---\n[[L1]]\n",
+ "Wk/L3.md": "---\nstatus: done\ntype: t2\ntags: [beta]\n---\n[[L1]]\n",
 }
 
 def main():
@@ -39,7 +43,9 @@ def main():
     fails = []
     try:
         for name, content in FIXTURES.items():
-            open(os.path.join(tv, name), "w", newline="").write(content)
+            fp = os.path.join(tv, name)
+            os.makedirs(os.path.dirname(fp), exist_ok=True)
+            open(fp, "w", newline="").write(content)
         env = dict(os.environ, VV_NO_METRICS="1", VV_VAULT=tv)
         n = 0
         for name in sorted(FIXTURES):
@@ -160,6 +166,33 @@ def main():
         paths = [l for l in r.stdout.splitlines() if l.endswith(".md")]
         if len(paths) != 1 or "(1 of " not in r.stdout:
             fails.append(("files-k", r.stdout[:90]))
+        # --- P2b: --limit on every enumerator ----------------------------
+        # Shape: first N entries + "(N of M <noun>)" trailer when truncated;
+        # byte-identical across engines; untruncated output is covered by the
+        # existing suites and must not change.
+        lim_cases = [
+            (["backlinks", "L1", "--limit", "1"], "of 2 backlinks)"),
+            (["links", "L1", "--limit", "1"], "of 2 links)"),
+            (["orphans", "--limit", "1"], "orphans)"),
+            (["deadends", "--limit", "1"], "deadends)"),
+            (["board", "Wk", "--limit", "1"], "of 3 notes)"),
+            (["tags", "--limit", "1"], "of 3 tags)"),
+            (["props", "status", "--limit", "1"], "notes with status)"),
+        ]
+        for cargs, want_trailer in lim_cases:
+            pair = []
+            for label, cmd in (("rust", [VR]), ("python", [sys.executable, VV])):
+                r = subprocess.run(cmd + cargs, capture_output=True, text=True, env=env)
+                n += 1
+                lines = r.stdout.rstrip("\n").split("\n")
+                # exactly 1 entry line + 1 trailer line, and an honest K-of-M
+                if (r.returncode != 0 or len(lines) != 2
+                        or want_trailer not in lines[-1]
+                        or "(1 of " not in lines[-1]):
+                    fails.append(("limit", label, cargs[0], r.stdout[:80] + r.stderr[:40]))
+                pair.append(r.stdout)
+            if pair[0] != pair[1]:
+                fails.append(("limit-parity", cargs[0], [o[:50] for o in pair]))
         if fails:
             for f in fails[:8]:
                 print("FAIL", f)
