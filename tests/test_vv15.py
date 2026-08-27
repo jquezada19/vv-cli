@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """v1.5 tests: rename/move corpus, impact, show continuation, deadends, lint --quick, doctor."""
 import subprocess, sys, os, shutil, glob
+_VAULT = os.environ.get("VV_VAULT") or os.path.expanduser("~/Documents/Obsidian Vault")
 
-SB = os.path.expanduser("~/Documents/Obsidian Vault/Sandbox/vv15test")
+SB = os.path.join(_VAULT, "Sandbox/vv15test")
 VV = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src", "vv.py")
 
 def run(*args, stdin=None):

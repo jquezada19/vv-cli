@@ -13,7 +13,7 @@ Exit codes: 0 ok, 1 not found/usage, 3 hash mismatch (stale — re-outline).
 """
 import sys, os, re, hashlib
 
-VAULT = os.path.expanduser("~/Documents/Obsidian Vault")
+VAULT = os.environ.get("VV_VAULT") or os.path.expanduser("~/Documents/Obsidian Vault")
 
 def full(p):
     fp = os.path.join(VAULT, p)

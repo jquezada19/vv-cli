@@ -2,8 +2,9 @@
 """vv prototype test suite — section ops (ported from vnote2) + new command coverage.
 Fixtures live under Sandbox/vvtest/ and are removed on exit."""
 import subprocess, sys, os, shutil
+_VAULT = os.environ.get("VV_VAULT") or os.path.expanduser("~/Documents/Obsidian Vault")
 
-SB = os.path.expanduser("~/Documents/Obsidian Vault/Sandbox/vvtest")
+SB = os.path.join(_VAULT, "Sandbox/vvtest")
 VV = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src", "vv.py")
 
 def run(*args, stdin=None):
@@ -201,7 +202,7 @@ os.remove(_bigd)
 # so appending one line silently rewrote a CRLF note as LF, and a non-UTF-8 note
 # raising a traceback instead of the documented exit 5.
 import datetime as _dt, glob as _glob
-_sd = os.path.expanduser("~/Documents/Obsidian Vault/Standups")
+_sd = os.path.join(_VAULT, "Standups")
 _today = _dt.date.today().isoformat()
 # These used to be skipped when the REAL vault had no standup for today --
 # unrelated state deciding whether a test runs (Codex review 2026-08-26). The
@@ -282,7 +283,10 @@ check("T19 new refuses overwrite", run("new", "Sandbox/vvtest/VV Created").retur
 # --- search: Sandbox exclusion by design + positive control on real content ---
 r = run("search", "zzqxvv", "--k", "3")
 check("T20a search excludes Sandbox", "(0 of 0 matches)" in r.stdout, r.stdout)
-r = run("search", "tenant", "check", "--k", "3")
+# terms must occur in a note OUTSIDE Sandbox/ in the vault under test; the
+# default is the author's vault, CI points this at its own fixture corpus
+_terms = os.environ.get("VV_TEST_SEARCH_TERMS", "tenant check").split()
+r = run("search", *_terms, "--k", "3")
 check("T20b search positive control", "== " in r.stdout and "(0 of" not in r.stdout, r.stdout)
 
 # --- errors ---

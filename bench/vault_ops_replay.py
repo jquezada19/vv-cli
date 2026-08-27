@@ -21,8 +21,8 @@ import sweepguard as sg
 import vvops
 
 PROJ = os.path.expanduser("~/.claude/projects/-Users-jxq-Documents-Obsidian-Vault")
-VAULT = os.path.expanduser("~/Documents/Obsidian Vault")
-VV = os.path.expanduser("~/Desktop/Git/vv-cli/src/vv.py")
+VAULT = os.environ.get("VV_VAULT") or os.path.expanduser("~/Documents/Obsidian Vault")
+VV = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src", "vv.py")
 ASK = os.path.join(VAULT, ".claude/skills/vault-ask/vault_ask.py")
 
 READ_VERBS = {"read", "outline", "show", "head", "resolve", "search", "backlinks",

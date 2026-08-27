@@ -27,7 +27,7 @@ import sweepguard as sg
 import vvops
 
 PROJ = os.path.expanduser("~/.claude/projects/-Users-jxq-Documents-Obsidian-Vault")
-VAULT = os.path.expanduser("~/Documents/Obsidian Vault")
+VAULT = os.environ.get("VV_VAULT") or os.path.expanduser("~/Documents/Obsidian Vault")
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PYENTRY = [sys.executable, os.path.join(REPO, "src/vv.py")]
 NATIVE = [os.path.join(REPO, "vrust/target/release/vrust")]
