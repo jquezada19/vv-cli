@@ -487,6 +487,24 @@ fn main() {
         exit(0);
     }
     let orig: Vec<String> = args.clone();
+    // --limit N before dispatch, mirroring vv.py (orig keeps it: a python
+    // fallback re-parses the full argv itself)
+    if let Some(i) = args.iter().position(|a| a == "--limit") {
+        let ok = args
+            .get(i + 1)
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|n| *n >= 1);
+        match ok {
+            Some(n) => {
+                let _ = readpath::LIMIT.set(n);
+                args.drain(i..=i + 1);
+            }
+            None => {
+                eprintln!("usage: --limit requires a positive integer");
+                exit(1);
+            }
+        }
+    }
     // --vault PATH before dispatch, mirroring vv.py
     if let Some(i) = args.iter().position(|a| a == "--vault") {
         if i + 1 < args.len() {

@@ -176,7 +176,7 @@ def main():
             (["orphans", "--limit", "1"], "orphans)"),
             (["deadends", "--limit", "1"], "deadends)"),
             (["board", "Wk", "--limit", "1"], "of 3 notes)"),
-            (["tags", "--limit", "1"], "of 3 tags)"),
+            (["tags", "--limit", "1"], "of 2 tags)"),  # alpha+beta distinct
             (["props", "status", "--limit", "1"], "notes with status)"),
         ]
         for cargs, want_trailer in lim_cases:
