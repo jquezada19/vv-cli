@@ -51,7 +51,9 @@ Uniform on every enumerator (`search`, `backlinks`, `links`, `orphans`,
 - `search --files` — matching paths only, rg's `-l`. For an agent deciding
   what to read next this is the cheapest possible answer; likely the single
   highest-value byte-saver in the release.
-- `search --max-count N` per file.
+- ~~`search --max-count N`~~ — withdrawn during implementation: rg's `-m`
+  caps matches *per file*, but vv already emits one snippet per note, so there
+  is nothing for it to cap. A survey-copied flag with no referent here.
 
 ## P3 — structured output, named honestly
 
