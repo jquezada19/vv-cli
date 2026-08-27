@@ -36,6 +36,24 @@ _op = sys.argv[1] if len(sys.argv) > 1 else "?"
 
 _cf_bytes = 0  # counterfactual: what a whole-file read of the touched notes would cost
 
+def _metrics_src():
+    """Provenance label for this invocation, or None for ordinary usage.
+
+    The pilot report has to answer "did a HUMAN-driven session use this", and a
+    benchmark loop writes rows indistinguishable from an agent session. On
+    2026-08-27 that made the report claim `adoption: 100%` over 118,726 ops of
+    which 99% were our own benchmark traffic. Suppressing bench rows would hide
+    the volume instead of explaining it, so they are MARKED and separated at
+    read time.
+
+    Sanitised hard: the native logger builds its JSON by string formatting, so
+    an unescaped quote in this label would corrupt every subsequent row.
+    """
+    v = os.environ.get("VV_METRICS_SRC", "")
+    v = "".join(c for c in v if c.isalnum() or c in "-_")[:24]
+    return v or None
+
+
 def _log(out_bytes, exit_code=0, kind=None):
     # Test suites (VV_JOURNAL_ROOT) and explicit opt-out don't pollute the
     # day-to-day usage log the shadow pilot reads.
@@ -46,6 +64,9 @@ def _log(out_bytes, exit_code=0, kind=None):
         rec = {"ts": datetime.datetime.now().isoformat(timespec="seconds"),
                "op": _op, "ms": round((time.perf_counter() - _t0) * 1000),
                "out_bytes": out_bytes, "exit": exit_code}
+        src = _metrics_src()
+        if src:
+            rec["src"] = src
         if kind:
             rec["kind"] = kind
         if _cf_bytes:

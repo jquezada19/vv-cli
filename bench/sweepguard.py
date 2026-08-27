@@ -36,6 +36,24 @@ currently returns.
 import sys
 
 
+def mark_bench(label="bench"):
+    """Tag every vv invocation this process spawns as benchmark traffic.
+
+    Sets VV_METRICS_SRC in os.environ so child processes inherit it, which is
+    why it must run BEFORE any subprocess is launched. The pilot report then
+    separates these rows by provenance instead of guessing from arrival rate.
+
+    This covers the bench scripts. It CANNOT cover an ad-hoc measurement loop
+    typed into a shell or a heredoc -- and that is exactly what produced the
+    117,312 contaminating rows on 2026-08-27. The rate heuristic therefore stays
+    as a backstop, and the pilot report shows how much machine-paced traffic
+    arrived UNMARKED, so a forgotten mark is visible rather than silent.
+    """
+    import os
+    os.environ["VV_METRICS_SRC"] = label
+    return label
+
+
 class SweepError(RuntimeError):
     """A sweep could not establish that it was working. Never a normal result."""
 

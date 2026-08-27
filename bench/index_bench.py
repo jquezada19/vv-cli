@@ -9,6 +9,11 @@ the run (exit 1), no partial row is written.
 """
 import json, os, statistics, subprocess, sys, time
 
+import sys as _sys, os as _os
+_sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+import sweepguard as _sg
+_sg.mark_bench("index-bench")   # tag this run's vv rows as benchmark traffic
+
 VV = os.path.expanduser("~/Desktop/Git/vv-cli/src/vv.py")
 SINK = os.path.expanduser("~/.claude/metrics/vv-index-bench.jsonl")
 REPS = 7

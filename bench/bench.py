@@ -18,6 +18,11 @@ vault. Reported numbers depend on your vault's size; the point is the ratio.
 """
 import argparse, os, shutil, statistics, subprocess, sys, tempfile, time
 
+import sys as _sys, os as _os
+_sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+import sweepguard as _sg
+_sg.mark_bench("bench")   # tag this run's vv rows as benchmark traffic
+
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # Default entry since 2026-08-27: the native binary (falls back to python
 # itself). VV_BENCH_ENTRY=python measures the python entry instead.
