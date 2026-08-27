@@ -1903,9 +1903,12 @@ def cmd_lint(*args):
         r = subprocess.run([sys.executable, canonical] + [a for a in args], cwd=VAULT)
         _log(_out_total, r.returncode); sys.exit(r.returncode)
     # --quick: native broken-wikilink scan (fence/inline-code aware, path-style by last segment)
-    limit = 50
-    if "--limit" in args:
-        limit = int(args[list(args).index("--limit") + 1])
+    # --limit is stripped globally in main() into _LIMIT (it collided with
+    # this command's own flag parsing when the global strip landed — the flag
+    # never reached us and the default silently reasserted itself; caught by
+    # the real-vault gate, which has >50 findings where the fixture vault has
+    # none). Same semantic, one owner.
+    limit = _LIMIT if _LIMIT is not None else 50
     idx = basename_index()
     stems = set(idx.keys())
     import glob
