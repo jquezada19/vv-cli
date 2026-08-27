@@ -20,10 +20,10 @@ and the parallel Rust scan landed):
 
 | task | shell (grep/cat) | obsidian CLI | vv |
 |---|---|---|---|
-| read ONE section of a note | 3 ms · 15,965 B (whole file) | 5 ms · 15,965 B (whole file) | 82 ms · **1,442 B** |
-| search a common term | 5,842 ms · 3,505,090 B | 118 ms · 299,519 B | **97 ms** · **2,993 B** |
-| flip one frontmatter field | 23 ms · 15,966 B round-trip | n/a headless-only | 50 ms · **35 B** |
-| backlinks of a hub note | 2,293 ms · 107,037 B | **5 ms** · 252 B | 74 ms · 266 B |
+| read ONE section of a note | 2 ms · 15,965 B (whole file) | 4 ms · 15,965 B (whole file) | 56 ms · **1,442 B** |
+| search a common term | 5,825 ms · 3,505,090 B | 112 ms · 299,519 B | **84 ms** · **2,993 B** |
+| flip one frontmatter field | 23 ms · 15,966 B round-trip | n/a headless-only | 37 ms · **35 B** |
+| backlinks of a hub note | 2,300 ms · 107,037 B | **5 ms** · 252 B | 61 ms · 266 B |
 
 The column that matters for an agent is **bytes**: that's the context (token)
 bill, paid on every operation, every session. Reading one section costs **11×
