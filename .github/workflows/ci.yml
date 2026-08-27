@@ -55,10 +55,4 @@ jobs:
         with:
           workspaces: vrust
       - run: cargo fmt --manifest-path vrust/Cargo.toml --check
-      # Advisory, not blocking: there is a real backlog of clippy lints in the
-      # engine (style and indexing patterns, no correctness findings). Fixing
-      # them is a change to a parity-pinned implementation, so it lands as its
-      # own reviewed PR rather than riding along with repo scaffolding. Flip
-      # continue-on-error off once the backlog is clear.
       - run: cargo clippy --manifest-path vrust/Cargo.toml --all-targets -- -D warnings
-        continue-on-error: true

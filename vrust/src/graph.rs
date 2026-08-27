@@ -189,11 +189,7 @@ pub fn active_links(text: &str) -> Vec<(char, String)> {
                     (j + 2..b.len().saturating_sub(1)).find(|&k| b[k] == ']' && b[k + 1] == ']')
                 {
                     let inner: String = b[j + 2..end].iter().collect();
-                    let seg = inner
-                        .split(|c| c == '|' || c == '#')
-                        .next()
-                        .unwrap_or("")
-                        .trim();
+                    let seg = inner.split(['|', '#']).next().unwrap_or("").trim();
                     let target = seg
                         .strip_suffix('\\')
                         .map(str::trim_end)
