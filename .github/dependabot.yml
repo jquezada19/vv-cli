@@ -1,0 +1,11 @@
+version: 2
+updates:
+  # vv has no crate dependencies by design; this keeps the CI actions current.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: monthly
+  - package-ecosystem: cargo
+    directory: "/vrust"
+    schedule:
+      interval: monthly

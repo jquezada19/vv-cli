@@ -1,120 +1,69 @@
 # vv — a fast, terse, agent-friendly CLI for Obsidian vaults
 
-`vv` (**Verified Vault**) reads, writes, and edits an Obsidian vault headlessly, built for AI-agent
-workflows where **every output byte enters the model's context**. Output is terse
-by contract, edits are hash-anchored compare-and-swap, multi-file operations are
-journaled with classified rollback, and link semantics are verified against the
-Obsidian app's own metadata cache — not guessed from the docs.
+[![CI](https://github.com/jquezada19/vv-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/jquezada19/vv-cli/actions/workflows/ci.yml)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 
-Two implementations, one semantics: a std-only Rust binary (the default entry)
-answers the common commands natively, and a stdlib-only Python implementation
-remains the semantic authority — the native path execs it for everything it
-doesn't handle and for any input it is unsure about. The two are held to
-identical output by differential parity suites and to *correct* output by a
-hand-authored expected-vector corpus plus a live-Obsidian oracle, so a shared
-bug can't certify itself.
+`vv` (**Verified Vault**) reads, writes, and edits an Obsidian vault headlessly,
+built for AI-agent workflows where **every output byte enters the model's
+context**. Output is terse by contract, edits are hash-anchored compare-and-swap,
+multi-file operations are journaled with classified rollback, and link semantics
+are verified against the Obsidian app's own metadata cache — not guessed from the
+docs.
 
-## Entry points
+Reading one section of a note costs **11× fewer bytes** than opening it. Search
+returns **~1,200× fewer bytes** than `grep`. Flipping one frontmatter field costs
+35 bytes instead of a 16 KB read-modify-write. That is the whole point:
+[the numbers are below](#benchmarks), measured on a real 1,500-note vault.
 
-Since 2026-08-27 the default entry is the **native binary** (`vv` on PATH →
-`vrust/target/release/vrust`): the four read commands, all graph commands, the
-frontmatter/query commands, and the common writes (`set`/`unset`/`append`/
-`appendsec`/`patch`) are answered natively in 3-26 ms; every other command —
-and any input the native path is unsure about — execs `python3 src/vv.py`
-with the original argv, so error text, suggestions, and exit codes are the
-Python implementation's, byte-for-byte. `python3 src/vv.py` remains a fully
-supported entry forever. Parity between the two is pinned by six differential
-suites (~300 checks) in the test gate.
+## Demo
 
-## Benchmarks
+```console
+$ vv outline Hub.md
+H0	-	(preamble)	52B	69e4e87e
+H1	#	Hub	72B	40631b2c
+H2	##	Details	61B	71a265ae
+H3	##	Second section	76B	31890858
 
-Why use this over `grep`/`cat` or the official `obsidian` CLI? Measured on a real
-1,500-note vault (macOS, Apple Silicon, median of 5 runs; reproduce with
-`python3 bench/bench.py` — re-measured 2026-08-27 through the DEFAULT (native)
-entry, after the full-Rust rewrite; `VV_BENCH_ENTRY=python` benches the python
-entry instead):
+$ vv read Hub.md H2
+## Details
 
-| task | shell (grep/cat) | obsidian CLI | vv |
-|---|---|---|---|
-| read ONE section of a note | 3 ms · 16,125 B (whole file) | 4 ms · 16,125 B (whole file) | 10 ms · **1,442 B** |
-| search a common term | 5,857 ms · 3,505,090 B | 123 ms · 299,519 B | **36 ms** · **2,993 B** |
-| flip one frontmatter field | 24 ms · 16,126 B round-trip | n/a headless-only | **6 ms** · **35 B** |
-| backlinks of a hub note | 2,299 ms · 107,037 B | **5 ms** · 252 B | 24 ms · 266 B |
+Every query needs a tenant check before it runs.
 
-The column that matters for an agent is **bytes**: that's the context (token)
-bill, paid on every operation, every session. Reading one section costs **11×
-fewer bytes** than opening the note; search returns ~1,200× fewer bytes than
-grep and ~100× fewer than the obsidian CLI at comparable latency; flipping a
-frontmatter field costs 35 bytes against a 16 KB read-modify-write.
+--sha8:71a265ae
 
-Honest caveats: `cat` still edges vv on a bare single-file read (3 vs 10 ms —
-the residue is vv's resolve + section parse, no longer interpreter startup),
-and the obsidian CLI still wins backlinks outright — the app holds a live
-in-memory cache and its CLI is a 133 KB socket shim into it. vv's job is to be
-*accurate and cheap in context* without needing the app open at all.
+$ printf '## Details\n\nRewritten body.\n' | vv patch Hub.md H2 71a265ae
+patched H2 in Hub.md (61B -> 27B)
 
-## The caches
+$ printf 'again\n' | vv patch Hub.md H2 71a265ae     # someone else moved first
+stale: H2 is a658c3af, expected 71a265ae — re-outline
+$ echo $?
+3
 
-Each entry keeps its own derived, disposable cache under `~/.cache/vv/index/`
-— they never read or write each other's, because two writers on one cache is
-how caches lie. The **native entry** keeps a TSV link cache (`.vvidx`) behind
-`backlinks`/`orphans`/`deadends`; the **python entry** keeps a SQLite index
-behind its graph and frontmatter commands and `lint --quick`. Both follow the
-same freshness contract, described here in the SQLite index's terms.
+$ vv rename Beta.md "Beta Renamed"
+plan d351fd67: rename Beta.md -> Beta Renamed.md
+files to rewrite: 1 (1 link occurrences)
+  1	Hub.md
+(dry-run — apply with: --apply, or --apply d351fd67 to bind to THIS plan)
+```
 
-The `.vvidx` cache additionally carries an **integrity footer** (body length +
-checksum), because the freshness contract alone is not enough to make it safe.
-Per-file `(mtime, size, ino)` equality proves each surviving record still
-describes its file — it cannot prove that record's own link rows survived a
-crash, so a record-aligned partial write would pass every structural check and
-silently serve *missing links*. The footer makes that state detectable, which is
-what lets the write skip `fsync` (a crash can lose the newest cache; it cannot
-produce one that lies). Both halves are pinned by `tests/test_cache_integrity.py`
-and were confirmed by disabling each and watching the suite fail. Format,
-reproduction, and the measured case against backing this with SQLite instead:
-[docs/cache-format.md](docs/cache-format.md).
+Read a section, patch it against the hash you read, and every writer refuses if
+the bytes moved underneath you. Refactors show their blast radius before they
+touch anything.
 
-The python entry's index is a **persistent SQLite cache** under
-`~/.cache/vv/index/`, never inside the vault. Freshness is per-invocation, not
-per-interval: every command stat-walks the vault (no file reads, ~10 ms), diffs
-`(mtime_ns, size, inode)` per file by **equality** against the DB, and re-parses
-only changed files — so a just-edited note is reflected on the very next
-command, with no daemon and no file watcher. Git's "racily clean" rule
-(re-hash anything whose mtime ties the index's own commit stamp) closes the
-same-tick rewrite hole. Raw link targets are stored, never resolved
-destinations — bare-link winners depend on the current duplicate-basename
-population, so resolution happens at query time.
+## Install
 
-The index is an accelerator, not an authority: on any doubt (corruption, torn
-read, version mismatch) vv falls back to the live scan and the DB is deleted
-and rebuilt — never repaired, never served partially. Byte-parity between the
-indexed and live paths is regression-tested on every accelerated command.
+```
+git clone https://github.com/jquezada19/vv-cli && cd vv-cli
+(cd vrust && cargo build --release)
+ln -s "$PWD/vrust/target/release/vrust" /opt/homebrew/bin/vv   # the native entry
+vv --vault ~/path/to/YourVault outline "Some Note.md"
+```
 
-| | before | after |
-|---|--:|--:|
-| backlinks | 242 ms | 77 ms |
-| orphans | 254 ms | 83 ms |
-| impact | 260 ms | 101 ms |
-| tags | 176 ms | 64 ms |
-| `lint --quick` | 1,766 ms | 87 ms |
-| search (parallel Rust scan, not the index) | 153 ms | 99 ms |
+No Python dependencies; no crates. Skipping the Rust build (or the symlink)
+leaves the pure-Python entry: `python3 src/vv.py ...` — same output on every
+command, held identical by the parity gate, just slower.
 
-(The table above is the python entry's own before/after from 2026-08-27, kept
-as the dated record; the native entry is faster still — see *Benchmarks*.)
-
-`vv index` shows status; `vv index --rebuild` forces a rebuild; `VV_NO_INDEX=1`
-disables the SQLite index (`bench/index_bench.py` measured the before/after).
-The python entry's remaining floor is CPython startup, ~22 ms — which is why
-the native binary became the default entry; the `.vvidx` cache self-heals the
-same way (any doubt → live scan + rebuild, delete-don't-repair).
-
-## Why not just read the files?
-
-Measured before building: agents reading whole notes to change one line burned
-~49% of their read bytes on edit-enablement alone. Section-addressed reads + CAS
-patches cut per-edit context cost by 60–91%. And a vault is not plain text —
-wikilinks resolve through duplicate-basename rules, escaped pipes, HTML comments,
-and fence masking that `grep` silently gets wrong (see *Correctness*, below).
+Set `VV_VAULT` once (`export VV_VAULT=~/path/to/YourVault`) and drop the flag.
 
 ## Commands
 
@@ -178,6 +127,118 @@ failed lookup prints `did you mean:` suggestions).
 | `VV_NO_INDEX=1` / `VV_INDEX_ROOT` | disable the index · relocate it (tests) |
 | exit `0 · 1 · 3 · 4 · 5` | ok · usage/not-found · stale hash or plan · dirty journal · not UTF-8 |
 | errors | grep-stable: `kind: message — next: <command>` |
+
+## Why not just read the files?
+
+Measured before building: agents reading whole notes to change one line burned
+~49% of their read bytes on edit-enablement alone. Section-addressed reads + CAS
+patches cut per-edit context cost by 60–91%. And a vault is not plain text —
+wikilinks resolve through duplicate-basename rules, escaped pipes, HTML comments,
+and fence masking that `grep` silently gets wrong (see *Correctness*, below).
+
+## Benchmarks
+
+Why use this over `grep`/`cat` or the official `obsidian` CLI? Measured on a real
+1,500-note vault (macOS, Apple Silicon, median of 5 runs; reproduce with
+`python3 bench/bench.py` — re-measured 2026-08-27 through the DEFAULT (native)
+entry, after the full-Rust rewrite; `VV_BENCH_ENTRY=python` benches the python
+entry instead):
+
+| task | shell (grep/cat) | obsidian CLI | vv |
+|---|---|---|---|
+| read ONE section of a note | 3 ms · 16,125 B (whole file) | 4 ms · 16,125 B (whole file) | 10 ms · **1,442 B** |
+| search a common term | 5,857 ms · 3,505,090 B | 123 ms · 299,519 B | **36 ms** · **2,993 B** |
+| flip one frontmatter field | 24 ms · 16,126 B round-trip | n/a headless-only | **6 ms** · **35 B** |
+| backlinks of a hub note | 2,299 ms · 107,037 B | **5 ms** · 252 B | 24 ms · 266 B |
+
+The column that matters for an agent is **bytes**: that's the context (token)
+bill, paid on every operation, every session. Reading one section costs **11×
+fewer bytes** than opening the note; search returns ~1,200× fewer bytes than
+grep and ~100× fewer than the obsidian CLI at comparable latency; flipping a
+frontmatter field costs 35 bytes against a 16 KB read-modify-write.
+
+Honest caveats: `cat` still edges vv on a bare single-file read (3 vs 10 ms —
+the residue is vv's resolve + section parse, no longer interpreter startup),
+and the obsidian CLI still wins backlinks outright — the app holds a live
+in-memory cache and its CLI is a 133 KB socket shim into it. vv's job is to be
+*accurate and cheap in context* without needing the app open at all.
+
+## How it works
+
+Two implementations, one semantics: a std-only Rust binary (the default entry)
+answers the common commands natively, and a stdlib-only Python implementation
+remains the semantic authority — the native path execs it for everything it
+doesn't handle and for any input it is unsure about. The two are held to
+identical output by differential parity suites and to *correct* output by a
+hand-authored expected-vector corpus plus a live-Obsidian oracle, so a shared
+bug can't certify itself.
+
+### Entry points
+
+Since 2026-08-27 the default entry is the **native binary** (`vv` on PATH →
+`vrust/target/release/vrust`): the four read commands, all graph commands, the
+frontmatter/query commands, and the common writes (`set`/`unset`/`append`/
+`appendsec`/`patch`) are answered natively in 3-26 ms; every other command —
+and any input the native path is unsure about — execs `python3 src/vv.py`
+with the original argv, so error text, suggestions, and exit codes are the
+Python implementation's, byte-for-byte. `python3 src/vv.py` remains a fully
+supported entry forever. Parity between the two is pinned by six differential
+suites (~300 checks) in the test gate.
+
+### The caches
+
+Each entry keeps its own derived, disposable cache under `~/.cache/vv/index/`
+— they never read or write each other's, because two writers on one cache is
+how caches lie. The **native entry** keeps a TSV link cache (`.vvidx`) behind
+`backlinks`/`orphans`/`deadends`; the **python entry** keeps a SQLite index
+behind its graph and frontmatter commands and `lint --quick`. Both follow the
+same freshness contract, described here in the SQLite index's terms.
+
+The `.vvidx` cache additionally carries an **integrity footer** (body length +
+checksum), because the freshness contract alone is not enough to make it safe.
+Per-file `(mtime, size, ino)` equality proves each surviving record still
+describes its file — it cannot prove that record's own link rows survived a
+crash, so a record-aligned partial write would pass every structural check and
+silently serve *missing links*. The footer makes that state detectable, which is
+what lets the write skip `fsync` (a crash can lose the newest cache; it cannot
+produce one that lies). Both halves are pinned by `tests/test_cache_integrity.py`
+and were confirmed by disabling each and watching the suite fail. Format,
+reproduction, and the measured case against backing this with SQLite instead:
+[docs/cache-format.md](docs/cache-format.md).
+
+The python entry's index is a **persistent SQLite cache** under
+`~/.cache/vv/index/`, never inside the vault. Freshness is per-invocation, not
+per-interval: every command stat-walks the vault (no file reads, ~10 ms), diffs
+`(mtime_ns, size, inode)` per file by **equality** against the DB, and re-parses
+only changed files — so a just-edited note is reflected on the very next
+command, with no daemon and no file watcher. Git's "racily clean" rule
+(re-hash anything whose mtime ties the index's own commit stamp) closes the
+same-tick rewrite hole. Raw link targets are stored, never resolved
+destinations — bare-link winners depend on the current duplicate-basename
+population, so resolution happens at query time.
+
+The index is an accelerator, not an authority: on any doubt (corruption, torn
+read, version mismatch) vv falls back to the live scan and the DB is deleted
+and rebuilt — never repaired, never served partially. Byte-parity between the
+indexed and live paths is regression-tested on every accelerated command.
+
+| | before | after |
+|---|--:|--:|
+| backlinks | 242 ms | 77 ms |
+| orphans | 254 ms | 83 ms |
+| impact | 260 ms | 101 ms |
+| tags | 176 ms | 64 ms |
+| `lint --quick` | 1,766 ms | 87 ms |
+| search (parallel Rust scan, not the index) | 153 ms | 99 ms |
+
+(The table above is the python entry's own before/after from 2026-08-27, kept
+as the dated record; the native entry is faster still — see *Benchmarks*.)
+
+`vv index` shows status; `vv index --rebuild` forces a rebuild; `VV_NO_INDEX=1`
+disables the SQLite index (`bench/index_bench.py` measured the before/after).
+The python entry's remaining floor is CPython startup, ~22 ms — which is why
+the native binary became the default entry; the `.vvidx` cache self-heals the
+same way (any doubt → live scan + rebuild, delete-don't-repair).
 
 ## Safety model
 
@@ -246,19 +307,6 @@ is what surfaced the section-addressing gap above: across 50 sessions, callers
 guessed section addressing wrong four distinct ways, and every one was correctly
 refused — the tool being right and unhelpful at the same time.
 
-## Install
-
-```
-git clone https://github.com/jquezada19/vv-cli && cd vv-cli
-(cd vrust && cargo build --release)
-ln -s "$PWD/vrust/target/release/vrust" /opt/homebrew/bin/vv   # the native entry
-vv --vault ~/path/to/YourVault outline "Some Note.md"
-```
-
-No Python dependencies; no crates. Skipping the Rust build (or the symlink)
-leaves the pure-Python entry: `python3 src/vv.py ...` — same output on every
-command, held identical by the parity gate, just slower.
-
 ## Design notes
 
 - Output bytes are the cost function; every op logs `{op, ms, out_bytes, exit, kind, cf_bytes}` to
@@ -288,3 +336,22 @@ divergences are values we mis-*read*, not ones Obsidian rejects — with one
 exception that matters, an unquoted `: ` in a value, which makes Obsidian reject
 the whole block and silently drop the note from every Bases view. `set` quotes
 that case on write, and the vault linter flags any pre-existing instance.
+
+## Contributing
+
+`vv` keeps two implementations of one semantics, so a semantic change lands
+twice or not at all — see [CONTRIBUTING.md](CONTRIBUTING.md) for the gate, how
+to run it against your own vault, and what a good change looks like. Bugs and
+proposals go through the [issue templates](.github/ISSUE_TEMPLATE); security
+issues go [privately](SECURITY.md).
+
+## License
+
+Dual-licensed under either of
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
+- MIT license ([LICENSE-MIT](LICENSE-MIT))
+
+at your option. Unless you explicitly state otherwise, any contribution
+intentionally submitted for inclusion in this work by you shall be dual-licensed
+as above, without any additional terms or conditions.

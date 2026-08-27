@@ -1,0 +1,45 @@
+name: Bug report
+description: vv did something wrong to a note, a query, or an exit code
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        If this is a **data-loss or containment** issue (a note lost content, a
+        write escaped the vault root), please report it privately instead —
+        see [SECURITY.md](../blob/main/SECURITY.md).
+  - type: textarea
+    id: command
+    attributes:
+      label: The exact command
+      description: Include the flags, and the note or section you targeted.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected vs what happened
+      description: Paste stdout/stderr and the exit code (`echo $?`).
+    validations:
+      required: true
+  - type: dropdown
+    id: engine
+    attributes:
+      label: Which engine?
+      description: >
+        Try the other one — `VV_ENGINE=python` and `VV_ENGINE=rust`. A
+        difference between them is itself a high-value bug report.
+      options:
+        - Both (same behavior)
+        - Only the native/Rust engine
+        - Only the Python engine
+        - Haven't tried the other one
+    validations:
+      required: true
+  - type: textarea
+    id: env
+    attributes:
+      label: Environment
+      description: OS, `python3 --version`, and `vv doctor` output if you can.
+      render: shell
