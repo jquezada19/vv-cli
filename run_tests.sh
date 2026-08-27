@@ -5,6 +5,13 @@
 set -uo pipefail
 cd "$(dirname "$0")"
 
+# No suite may write to the day-to-day usage log. Per-suite opt-in was the old
+# design and it leaked: engine-parity, real-vault verification, and the oracle
+# never set it, so a single gate run wrote ~300 ops into the shadow pilot's
+# window (found 2026-08-26, hour one of the pilot). One export covers every
+# child process, including any suite added later.
+export VV_NO_METRICS=1
+
 fail=0
 run() {  # run <label> <cmd...>
   local label="$1"; shift
