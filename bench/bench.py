@@ -19,7 +19,11 @@ vault. Reported numbers depend on your vault's size; the point is the ratio.
 import argparse, os, shutil, statistics, subprocess, sys, tempfile, time
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-VV = [sys.executable, os.path.join(REPO, "src", "vv.py")]
+# Default entry since 2026-08-27: the native binary (falls back to python
+# itself). VV_BENCH_ENTRY=python measures the python entry instead.
+VV = ([sys.executable, os.path.join(REPO, "src", "vv.py")]
+      if os.environ.get("VV_BENCH_ENTRY") == "python"
+      else [os.path.join(REPO, "vrust", "target", "release", "vrust")])
 VAULT = os.environ.get("VV_VAULT") or os.path.expanduser("~/Documents/Obsidian Vault")
 
 def timed(cmd, runs, stdin=None, env=None):
