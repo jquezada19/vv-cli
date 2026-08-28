@@ -1548,6 +1548,9 @@ def cmd_batch():
     JSONL regardless of --jsonl; a bad op yields its own error record and the
     batch continues (exit 0 = the batch ran; per-op exits live in the records)."""
     import io, contextlib
+    if sys.stdin.isatty():
+        # No piped ops: refuse instead of blocking silently at the terminal.
+        die('usage: batch reads JSONL ops from stdin — next: printf \'{"cmd":"tags","args":[]}\\n\' | vv batch')
     for i, line in enumerate(sys.stdin):
         line = line.strip()
         if not line:
