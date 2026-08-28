@@ -2320,11 +2320,91 @@ def _list_out(rows, total, noun, cmd=None, fmt=None):
     else:
         out(f"({total} {noun})")
 
+
+# Declarative command table — the single source --generate renders from. The
+# gate pins it equal to CMDS in both directions, so generated docs can neither
+# describe a command the dispatcher lacks nor miss one it has.
+COMMAND_TABLE = [
+    {"name": "outline",      "args": "NOTE",                    "summary": "section map: id, level, title, bytes, sha8 anchor"},
+    {"name": "read",         "args": "NOTE SEC",                "summary": "one section, by outline id or heading title"},
+    {"name": "show",         "args": "NOTE [--max-bytes N] [--from SEC]", "summary": "budgeted read with a continuation token"},
+    {"name": "head",         "args": "NOTE",                    "summary": "frontmatter only"},
+    {"name": "resolve",      "args": "NAME",                    "summary": "name to vault-relative path"},
+    {"name": "search",       "args": "TERMS [--k N] [--w CHARS] [--files]", "summary": "ranked full-text; --files prints paths only"},
+    {"name": "patch",        "args": "NOTE SEC SHA8 <stdin",    "summary": "replace one section, compare-and-swap on its sha8"},
+    {"name": "append",       "args": "NOTE TEXT",               "summary": "append at end of note (CAS-guarded)"},
+    {"name": "appendsec",    "args": "NOTE SEC TEXT",           "summary": "append inside a section (CAS-guarded)"},
+    {"name": "prepend",      "args": "NOTE TEXT",               "summary": "insert after frontmatter (CAS-guarded)"},
+    {"name": "set",          "args": "NOTE KEY VALUE",          "summary": "frontmatter field flip, body untouched"},
+    {"name": "unset",        "args": "NOTE KEY",                "summary": "remove a frontmatter field"},
+    {"name": "new",          "args": "PATH [--template T] [--key v ...]", "summary": "create from a vault template"},
+    {"name": "daily-append", "args": "TEXT",                    "summary": "append to today's daily note"},
+    {"name": "rename",       "args": "NOTE NEWNAME [--apply [SHA8]]", "summary": "link-aware journaled rename; dry-run by default"},
+    {"name": "move",         "args": "NOTE FOLDER [--apply [SHA8]]",  "summary": "link-aware journaled move; dry-run by default"},
+    {"name": "trash",        "args": "NOTE [--apply SHA8]",     "summary": "journaled removal to .trash/; reports links that will break"},
+    {"name": "backlinks",    "args": "NOTE",                    "summary": "notes linking here"},
+    {"name": "links",        "args": "NOTE",                    "summary": "outgoing wiki links"},
+    {"name": "impact",       "args": "NOTE",                    "summary": "blast radius before a refactor"},
+    {"name": "orphans",      "args": "[FOLDER]",                "summary": "nothing links in"},
+    {"name": "deadends",     "args": "",                        "summary": "nothing links out"},
+    {"name": "unresolved",   "args": "",                        "summary": "wiki links whose target resolves to no note"},
+    {"name": "board",        "args": "FOLDER [k=v ...]",        "summary": "frontmatter table with filters"},
+    {"name": "tags",         "args": "[--counts]",              "summary": "tag census"},
+    {"name": "props",        "args": "KEY [FOLDER]",            "summary": "one frontmatter field across notes"},
+    {"name": "templates",    "args": "",                        "summary": "list template stems (ambiguity-marked)"},
+    {"name": "changed",      "args": "--since <epoch|ISO>",     "summary": "paths changed since a timestamp"},
+    {"name": "batch",        "args": "< ops.jsonl",             "summary": "JSONL read-ops on stdin, one process"},
+    {"name": "lint",         "args": "[--quick [--check]]",     "summary": "broken links and render breaks; --check exits 1 on findings"},
+    {"name": "index",        "args": "[--rebuild]",             "summary": "index status or a forced rebuild"},
+    {"name": "doctor",       "args": "[--rollback | --discard]", "summary": "vault/engine/journal status; journal recovery"},
+]
+
+GLOBAL_FLAGS = [
+    ("--vault PATH", "target vault (VV_VAULT)"),
+    ("--limit N", "cap any enumerator at N entries; trailer announces truncation"),
+    ("--jsonl", "opt-in JSON Lines output; structured errors on stderr"),
+    ("--version", "print the version"),
+    ("--generate KIND", "man | complete-bash | complete-zsh | complete-fish"),
+]
+
+def _generate(kind):
+    if kind == "man":
+        L = [".TH VV 1 \"\" \"vv " + _version() + "\" \"vv manual\"",
+             ".SH NAME", "vv \\- fast, terse, agent-friendly CLI for Obsidian vaults",
+             ".SH SYNOPSIS", ".B vv", "[\\fIGLOBAL FLAGS\\fR] \\fICOMMAND\\fR [\\fIARGS\\fR]",
+             ".SH COMMANDS"]
+        for c in COMMAND_TABLE:
+            L += [".TP", f"\\fB{c['name']}\\fR {c['args']}".rstrip(), c["summary"]]
+        L += [".SH GLOBAL FLAGS"]
+        for f, d in GLOBAL_FLAGS:
+            L += [".TP", f"\\fB{f}\\fR", d]
+        L += [".SH EXIT STATUS",
+              "0 ok; 1 not-found/usage; 3 stale hash or drifted plan; 4 pending journal; 5 not UTF-8."]
+        print("\n".join(L)); return
+    names = " ".join(c["name"] for c in COMMAND_TABLE)
+    if kind == "complete-bash":
+        print(f'complete -W "{names}" vv'); return
+    if kind == "complete-zsh":
+        L = ["#compdef vv", "local -a cmds", "cmds=("]
+        for c in COMMAND_TABLE:
+            L.append(f"  '{c['name']}:{c['summary'].replace(chr(39), chr(39)+chr(92)+chr(39)+chr(39))}'")
+        L += [")", "_describe 'command' cmds"]
+        print("\n".join(L)); return
+    if kind == "complete-fish":
+        L = [f"complete -c vv -f -n '__fish_use_subcommand' -a {c['name']} -d '{c['summary'].replace(chr(39), '')}'"
+             for c in COMMAND_TABLE]
+        print("\n".join(L)); return
+    die(f"usage: unknown --generate kind '{kind}' — next: vv --generate man|complete-bash|complete-zsh|complete-fish")
+
 def main():
     global VAULT, _VAULT_REAL, _op
     a = sys.argv[1:]
     if a and a[0] in ("--version", "version"):
         print(f"vv {_version()}"); sys.exit(0)
+    if a and a[0] == "--generate":
+        if len(a) < 2:
+            die("usage: --generate needs a kind — next: vv --generate man|complete-bash|complete-zsh|complete-fish")
+        _generate(a[1]); sys.exit(0)
     if "--jsonl" in a:
         global _JSONL
         _JSONL = True

@@ -37,6 +37,11 @@ jobs:
           cp vrust/target/release/vrust "dist/$PKG/vv"
           cp src/vv.py src/vv_impl.py "dist/$PKG/src/"
           cp VERSION README.md CHANGELOG.md LICENSE-MIT LICENSE-APACHE "dist/$PKG/"
+          python3 src/vv.py --generate man > "dist/$PKG/vv.1"
+          mkdir -p "dist/$PKG/completions"
+          for s in bash zsh fish; do
+            python3 src/vv.py --generate "complete-$s" > "dist/$PKG/completions/vv.$s"
+          done
           tar -C dist -czf "dist/$PKG.tar.gz" "$PKG"
           echo "PKG=$PKG" >> "$GITHUB_ENV"
 
