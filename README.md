@@ -52,6 +52,18 @@ touch anything.
 
 ## Install
 
+Grab an archive from the [releases page](https://github.com/jquezada19/vv-cli/releases)
+(macOS arm64/x86_64, Linux x86_64/arm64 — the binary AND the python engine
+travel together; unpacking them apart loses most of the surface):
+
+```
+tar xzf vv-*-<target>.tar.gz && cd vv-*/
+./vv --vault ~/path/to/YourVault outline "Some Note.md"
+# put it on PATH keeping the layout: ln -s "$PWD/vv" /opt/homebrew/bin/vv
+```
+
+Or build from a checkout:
+
 ```
 git clone https://github.com/jquezada19/vv-cli && cd vv-cli
 (cd vrust && cargo build --release)

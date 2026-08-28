@@ -92,6 +92,7 @@ run "jsonl surface"      python3 tests/test_jsonl.py
 run "batch + changed"    python3 tests/test_batch.py
 run "surface5"           python3 tests/test_surface5.py
 run "trash"              python3 tests/test_trash.py
+run "packaged layout"    python3 tests/test_packaged.py
 run "cache torture"      python3 tests/test_torture_cache.py
 run "concurrency torture" python3 tests/test_torture_concurrent.py
 

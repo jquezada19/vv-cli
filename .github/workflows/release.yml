@@ -1,0 +1,74 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-latest,      target: aarch64-apple-darwin }
+          - { os: macos-13,          target: x86_64-apple-darwin }
+          - { os: ubuntu-latest,     target: x86_64-unknown-linux-gnu }
+          - { os: ubuntu-24.04-arm,  target: aarch64-unknown-linux-gnu }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build
+        run: cargo build --release --manifest-path vrust/Cargo.toml
+
+      - name: Assemble archive (both engines — a rust-only artifact loses most
+              of the surface; the packaged suite below proves the layout)
+        run: |
+          VER=$(cat VERSION)
+          PKG="vv-${VER}-${{ matrix.target }}"
+          mkdir -p "dist/$PKG/src"
+          cp vrust/target/release/vrust "dist/$PKG/vv"
+          cp src/vv.py src/vv_impl.py "dist/$PKG/src/"
+          cp VERSION README.md CHANGELOG.md LICENSE-MIT LICENSE-APACHE "dist/$PKG/"
+          tar -C dist -czf "dist/$PKG.tar.gz" "$PKG"
+          echo "PKG=$PKG" >> "$GITHUB_ENV"
+
+      - name: Packaged-install smoke test (unpacked archive, bare temp dir)
+        run: |
+          SMOKE=$(mktemp -d)
+          tar -C "$SMOKE" -xzf "dist/$PKG.tar.gz"
+          # run the packaged pin suite against the UNPACKED archive binary
+          cp "$SMOKE/$PKG/vv" vrust/target/release/vrust
+          python3 tests/test_packaged.py
+          # and one end-to-end from the archive itself, outside any checkout
+          V=$(mktemp -d); printf '# T\nbody\n' > "$V/T.md"
+          "$SMOKE/$PKG/vv" --vault "$V" outline T.md | grep -q 'H1' || exit 1
+          "$SMOKE/$PKG/vv" --vault "$V" lint --quick | grep -q 'findings' || exit 1
+
+      - uses: actions/upload-artifact@v4
+        with: { name: '${{ matrix.target }}', path: 'dist/*.tar.gz' }
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { path: dist, merge-multiple: true }
+      - name: Checksums
+        run: cd dist && shasum -a 256 *.tar.gz > SHA256SUMS
+      - name: Attach to release
+        env: { GH_TOKEN: '${{ github.token }}' }
+        run: |
+          # a bare `git push origin vX.Y.Z` has no release yet — create it then
+          gh release view "${{ github.ref_name }}" --repo "${{ github.repository }}" >/dev/null 2>&1 \
+            || gh release create "${{ github.ref_name }}" --repo "${{ github.repository }}" \
+                 --title "${{ github.ref_name }}" --generate-notes
+          gh release upload "${{ github.ref_name }}" dist/*.tar.gz dist/SHA256SUMS \
+            --repo "${{ github.repository }}" --clobber
