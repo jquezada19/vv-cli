@@ -10,6 +10,7 @@ Relocate rename NOTE NEWNAME [--apply [SHA8]] · move NOTE DESTFOLDER [--apply [
          exactly that reviewed plan (exit 3 if the plan drifted). Never bare `mv`.
 Graph:   backlinks NOTE · links NOTE · impact NOTE · orphans [FOLDER] · deadends
 Query:   board FOLDER [k=v ...] · tags [--counts] · props KEY [FOLDER]
+Agent:   changed --since <epoch|ISO> · batch  (JSONL read-ops on stdin, one process)
 Daily:   daily-append TEXT   (today's standup note; creates from convention if missing)
 Health:  doctor [--rollback | --discard] · lint [--quick [--limit N]] · index [--rebuild]
 
@@ -1503,6 +1504,81 @@ def cmd_deadends():
                 entries.append({"path": p})
     _list_out(entries, len(entries), "deadends", cmd="deadends")
 
+def cmd_changed(*args):
+    """Paths changed since a timestamp — the cheap "what moved" answer that
+    replaces whole-vault rescans in agent loops. Strictly newer than --since;
+    mtime desc then path, so the freshest note is always line one."""
+    since = None
+    al = list(args)
+    if "--since" in al and al.index("--since") + 1 < len(al):
+        raw = al[al.index("--since") + 1]
+        if raw.isdigit():
+            since = float(raw)
+        else:
+            import datetime
+            try:
+                since = datetime.datetime.fromisoformat(raw).timestamp()
+            except ValueError:
+                die(f"usage: --since {raw} is neither epoch seconds nor ISO — next: vv changed --since 2026-08-27")
+    if since is None:
+        die("usage: changed requires --since <epoch|ISO> — next: vv changed --since 2026-08-27")
+    hits = []
+    for p_ in md_files():
+        try:
+            mt = os.stat(p_).st_mtime
+        except OSError:
+            continue
+        if mt > since:
+            hits.append((mt, rel(p_)))
+    hits.sort(key=lambda x: (-x[0], x[1]))
+    import datetime
+    rows = [{"path": rp, "mtime": datetime.datetime.fromtimestamp(mt).isoformat(timespec="seconds")}
+            for mt, rp in hits]
+    _list_out(rows, len(rows), "changed", cmd="changed")
+
+# Read/query commands batch may run — writers stay one-invocation-one-op so
+# every write keeps its own CAS/exit-code surface.
+_BATCH_READS = {"outline", "read", "head", "resolve", "search", "show",
+                "backlinks", "links", "impact", "orphans", "deadends",
+                "board", "tags", "props", "changed"}
+
+def cmd_batch():
+    """JSONL ops on stdin, one process, one result record per op — startup and
+    the vault stat-walk are paid once instead of N times. Output is always
+    JSONL regardless of --jsonl; a bad op yields its own error record and the
+    batch continues (exit 0 = the batch ran; per-op exits live in the records)."""
+    import io, contextlib
+    for i, line in enumerate(sys.stdin):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            op = json.loads(line)
+            cmd, cargs = op["cmd"], [str(x) for x in op.get("args", [])]
+            if cmd not in _BATCH_READS:
+                raise ValueError(f"'{cmd}' is not a batch-able read command")
+            fn = CMDS[cmd]
+        except Exception as e:
+            print(json.dumps({"i": i, "exit": 1, "error": f"bad-op: {e}"}, ensure_ascii=False))
+            continue
+        o, e_ = io.StringIO(), io.StringIO()
+        code = 0
+        try:
+            with contextlib.redirect_stdout(o), contextlib.redirect_stderr(e_):
+                _check_arity(cmd, fn, cargs)
+                fn(*cargs)
+        except SystemExit as ex:
+            code = ex.code if isinstance(ex.code, int) else 1
+        except Exception as ex:
+            code = 1
+            e_.write(f"internal: {ex!r}")
+        rec = {"i": i, "exit": code}
+        if code == 0:
+            rec["out"] = o.getvalue().rstrip("\n")
+        else:
+            rec["error"] = (e_.getvalue() or o.getvalue()).rstrip("\n")
+        print(json.dumps(rec, ensure_ascii=False))
+
 def _git(args_):
     import subprocess
     return subprocess.run(["git", "-C", VAULT] + args_, capture_output=True, text=True).stdout.strip()
@@ -2048,7 +2124,7 @@ CMDS = {
     "patch": cmd_patch, "appendsec": cmd_appendsec, "append": cmd_append,
     "set": cmd_set, "unset": cmd_unset, "new": cmd_new,
     "backlinks": cmd_backlinks, "links": cmd_links, "orphans": cmd_orphans,
-    "board": cmd_board, "tags": cmd_tags, "props": cmd_props,
+    "board": cmd_board, "tags": cmd_tags, "props": cmd_props, "changed": cmd_changed, "batch": cmd_batch,
     "search": cmd_search, "daily-append": cmd_daily_append,
     "show": cmd_show, "deadends": cmd_deadends, "impact": cmd_impact,
     "rename": cmd_rename, "move": cmd_move, "lint": cmd_lint, "doctor": cmd_doctor, "index": cmd_index,
