@@ -2101,7 +2101,13 @@ def _list_out(rows, total, noun, cmd=None, fmt=None):
         _jrec({"v": 1, "cmd": cmd or noun})
         for r in shown:
             _jrec(r)
-        _jrec({"total": total, "shown": len(shown)})
+        # "total" keeps the text trailer's semantics (notes for props, distinct
+        # tags for tags), so its units can differ from "shown" — truncation is
+        # therefore an EXPLICIT field, never an inference from shown < total.
+        tr = {"total": total, "shown": len(shown)}
+        if _LIMIT is not None and len(rows) > _LIMIT:
+            tr["truncated"] = True
+        _jrec(tr)
         return
     for r in shown:
         out(fmt(r))

@@ -84,10 +84,21 @@ try:
         r = run(entry, "tags", "--jsonl", "--limit", "1")
         try:
             recs = parse_jsonl(r.stdout)
-            ok = recs[-1] == {"total": 2, "shown": 1}
+            ok = recs[-1] == {"total": 2, "shown": 1, "truncated": True}
         except Exception as e:
             ok = False
         check(f"J6/{entry_label} --jsonl + --limit trailer", ok, r.stdout[:120])
+        # shown<total WITHOUT truncation (props counts notes, rows are distinct
+        # values) must NOT carry truncated — truncation is explicit, never inferred
+        open(os.path.join(tv, "Wk/D.md"), "w").write("---\nstatus: open\n---\nx\n")
+        r = run(entry, "props", "status", "--jsonl")
+        try:
+            recs = parse_jsonl(r.stdout)
+            ok = recs[-1]["total"] == 3 and recs[-1]["shown"] == 2 and "truncated" not in recs[-1]
+        except Exception:
+            ok = False
+        check(f"J6b/{entry_label} units differ without truncated flag", ok, r.stdout[:120])
+        os.remove(os.path.join(tv, "Wk/D.md"))
         # structured error on stderr, still one JSON object, exit preserved
         r = run(entry, "backlinks", "NoSuchNote", "--jsonl")
         try:
