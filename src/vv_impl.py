@@ -85,7 +85,15 @@ def out(s=""):
     print(s)
 
 def die(msg, code=1):
-    sys.stderr.write(msg + "\n")
+    if _JSONL:
+        # kind: everything before the first ":"; next: the trailing "— next: ..."
+        head, _, rest = msg.partition(": ")
+        body, _, nxt = rest.partition(" — next: ")
+        sys.stderr.write(json.dumps(
+            {"kind": head.split("\n")[0], "message": body or rest,
+             "next": nxt, "exit": code}, ensure_ascii=False) + "\n")
+    else:
+        sys.stderr.write(msg + "\n")
     first = msg.split("\n", 1)[0].split(" ", 1)[0]
     # Error text enters the caller's context too — bill it, don't log a zero.
     _log(_out_total + len(msg.encode("utf-8")) + 1, code,
@@ -676,7 +684,7 @@ def cmd_backlinks(ref):
             continue
         if link_matches(p, kind, t, fp, tgt_base, tgt_rel_noext, idx):
             hits.append(p)
-    _list_out([rel(p) for p in sorted(hits)], len(hits), "backlinks")
+    _list_out([{"path": rel(p)} for p in sorted(hits)], len(hits), "backlinks", cmd="backlinks")
 
 def cmd_links(ref):
     fp = resolve(ref)
@@ -684,7 +692,7 @@ def cmd_links(ref):
     for _, kind, t in link_targets_in(read_raw(fp)):
         if kind == "wiki" and t not in seen:
             seen.append(t)
-    _list_out(seen, len(seen), "links")
+    _list_out([{"path": l} for l in seen], len(seen), "links", cmd="links")
 
 def cmd_orphans(folder=""):
     root = contain(folder) if folder else VAULT
@@ -718,8 +726,8 @@ def cmd_orphans(folder=""):
         linked = rel_noext in path_targets or \
             any(src != p and bare_resolves(src, p, idx) for src in bare_by_name.get(base, ()))
         if not linked:
-            entries.append(rel(p))
-    _list_out(entries, len(entries), "orphans")
+            entries.append({"path": rel(p)})
+    _list_out(entries, len(entries), "orphans", cmd="orphans")
 
 def cmd_board(folder, *filters):
     want = dict(f.split("=", 1) for f in filters)
@@ -751,7 +759,9 @@ def cmd_board(folder, *filters):
         rows.sort()   # deterministic + identical to the indexed path on nested
         # folders (they disagreed in walk order until 2026-08-27 — caught by the
         # native-port fixture suite, a latent inconsistency from the index change)
-    _list_out([f"{status}\t{typ}\t{name}" for name, status, typ in rows], len(rows), "notes")
+    _list_out([{"name": n_, "status": s_, "type": ty} for n_, s_, ty in rows],
+              len(rows), "notes", cmd="board",
+              fmt=lambda r: f"{r['status']}\t{r['type']}\t{r['name']}")
 
 def cmd_tags(*args):
     from collections import Counter
@@ -765,9 +775,10 @@ def cmd_tags(*args):
         for tag in re.findall(r"[\w/-]+", t):
             c[tag] += 1
     counted = "--counts" in args
-    entries = [f"{n}\t{tag}" if counted else tag
+    entries = [{"tag": tag, "count": n}
                for tag, n in c.most_common(40 if counted else 9999)]
-    _list_out(entries, len(c), "tags")
+    _list_out(entries, len(c), "tags", cmd="tags",
+              fmt=(lambda r: f"{r['count']}\t{r['tag']}") if counted else (lambda r: r["tag"]))
 
 def cmd_props(key, folder=""):
     root = contain(folder) if folder else VAULT
@@ -784,8 +795,9 @@ def cmd_props(key, folder=""):
         v = props.get(key)
         if v:
             c[v] += 1
-    entries = [f"{n}\t{v}" for v, n in c.most_common()]
-    _list_out(entries, sum(c.values()), f"notes with {key}")
+    entries = [{"value": v, "count": n} for v, n in c.most_common()]
+    _list_out(entries, sum(c.values()), f"notes with {key}", cmd="props",
+              fmt=lambda r: f"{r['count']}\t{r['value']}")
 
 def _parse_search_args(args):
     # a global --limit (stripped in main) acts as --k unless --k is explicit —
@@ -892,6 +904,17 @@ def _phrase_hint(terms):
 
 def cmd_search(*args):
     k, w, files_only, terms = _parse_search_args(args)
+    if _JSONL:
+        # python owns the schema: never shell to the engine here (the child
+        # would treat the query as plain text search and return TSV).
+        if not terms:
+            die("usage: search needs a query — next: vv search <terms> [--k N] [--w CHARS]")
+        hits = _search_hits(terms, w)
+        rows = [{"path": r_, "score": s_} if files_only
+                else {"path": r_, "score": s_, "snippet": sn}
+                for s_, r_, sn in hits[:k]]
+        _list_out(rows, len(hits), "matches", cmd="search")
+        return
     if use_rust():
         import subprocess
         # VV_FROM_PY tells the engine that PYTHON is the orchestrator here, so
@@ -1473,12 +1496,12 @@ def cmd_deadends():
     if h is not None:
         linked = {r[0] for r in h.con.execute(
             "SELECT DISTINCT f.path FROM links l JOIN files f ON f.id = l.file_id")}
-        entries = [rp for rp in h.rel_paths() if rp not in linked]
+        entries = [{"path": rp} for rp in h.rel_paths() if rp not in linked]
     else:
         for p in sorted(rel(p) for p in md_files()):
             if not any(True for _ in link_targets_in(open(os.path.join(VAULT, p), errors="replace").read())):
-                entries.append(p)
-    _list_out(entries, len(entries), "deadends")
+                entries.append({"path": p})
+    _list_out(entries, len(entries), "deadends", cmd="deadends")
 
 def _git(args_):
     import subprocess
@@ -1905,6 +1928,7 @@ def _table_pipe_findings(text):
 def cmd_lint(*args):
     canonical = os.path.join(VAULT, ".claude/skills/vault-lint/vault_lint.py")
     if "--quick" not in args and os.path.exists(canonical):
+        args = tuple(x for x in args if x != "--check")  # --check is --quick's; CI uses --quick
         import subprocess
         r = subprocess.run([sys.executable, canonical] + [a for a in args], cwd=VAULT)
         _log(_out_total, r.returncode); sys.exit(r.returncode)
@@ -1943,7 +1967,7 @@ def cmd_lint(*args):
                     findings.append(("broken-link", f"{rp}:{i+1}", tgt))
             for i, tgt in pipes.get(rp, []):
                 findings.append(("table-pipe", f"{rp}:{i+1}", tgt))
-        _lint_report(findings, limit)
+        _lint_report(findings, limit, check="--check" in args)
         return
     for p in sorted(md_files()):
         try:
@@ -1963,19 +1987,29 @@ def cmd_lint(*args):
                 findings.append(("broken-link", f"{rel(p)}:{i+1}", tgt))
         for i, tgt in _table_pipe_findings(text):
             findings.append(("table-pipe", f"{rel(p)}:{i+1}", tgt))
-    _lint_report(findings, limit)
+    _lint_report(findings, limit, check="--check" in args)
 
 
-def _lint_report(findings, limit):
+def _lint_report(findings, limit, check=False):
     # output is context: report every finding's COUNT, but print at most `limit` lines
     from collections import Counter
     by_kind = Counter(f[0] for f in findings)
-    for kind, loc, tgt in findings[:limit]:
-        out(f"{kind}\t{loc}\t[[{tgt}]]")
-    summary = " ".join(f"{k}={v}" for k, v in sorted(by_kind.items()))
-    shown = min(len(findings), limit)
-    more = f" — {len(findings) - shown} more, raise with --limit N" if len(findings) > shown else ""
-    out(f"({len(findings)} findings: {summary or 'none'}; showing {shown}{more})")
+    if _JSONL:
+        _jrec({"v": 1, "cmd": "lint"})
+        for kind, loc, tgt in findings[:limit]:
+            path, _, line = loc.rpartition(":")
+            _jrec({"kind": kind, "path": path, "line": int(line), "target": tgt})
+        _jrec({"total": len(findings), "shown": min(len(findings), limit)})
+    else:
+        for kind, loc, tgt in findings[:limit]:
+            out(f"{kind}\t{loc}\t[[{tgt}]]")
+        summary = " ".join(f"{k}={v}" for k, v in sorted(by_kind.items()))
+        shown = min(len(findings), limit)
+        more = f" — {len(findings) - shown} more, raise with --limit N" if len(findings) > shown else ""
+        out(f"({len(findings)} findings: {summary or 'none'}; showing {shown}{more})")
+    if check and findings:
+        # --check: findings are a failure, for CI. Reported first, then refused.
+        sys.exit(1)
 
 def cmd_doctor(*args):
     js = _pending_journals()
@@ -2047,17 +2081,37 @@ def _version():
 USAGE_LINE = "usage: vv COMMAND [ARGS] — next: vv --help for the command list"
 
 _LIMIT = None  # set from a global --limit N in main(); enumerators honor it
+_JSONL = False  # set from a global --jsonl in main(); python owns this surface
 
-def _list_out(entries, total, noun):
-    """Emit an enumerator's entry lines + count trailer, honoring --limit.
+def _jrec(obj):
+    out(json.dumps(obj, ensure_ascii=False, separators=(",", ":")))
 
-    total may exceed len(entries) even without --limit (tags --counts shows the
-    top 40 while the trailer counts every distinct tag) — the trailer always
-    reports the true total, and truncation is announced, never silent."""
-    shown = entries if _LIMIT is None else entries[:_LIMIT]
-    for e in shown:
-        out(e)
-    if _LIMIT is not None and len(entries) > _LIMIT:
+def _list_out(rows, total, noun, cmd=None, fmt=None):
+    """Emit an enumerator's entries + count trailer, honoring --limit/--jsonl.
+
+    rows: list of dicts (the --jsonl records); fmt(row) renders the default
+    text line (defaults to the row's "path"). total may exceed len(rows) even
+    without --limit (tags --counts shows the top 40 while the trailer counts
+    every distinct tag) — the trailer always reports the true total, and
+    truncation is announced, never silent. Under --jsonl the stream is
+    {"v":1,"cmd":..} · one record per row · {"total":N,"shown":K}."""
+    fmt = fmt or (lambda r: r["path"])
+    shown = rows if _LIMIT is None else rows[:_LIMIT]
+    if _JSONL:
+        _jrec({"v": 1, "cmd": cmd or noun})
+        for r in shown:
+            _jrec(r)
+        # "total" keeps the text trailer's semantics (notes for props, distinct
+        # tags for tags), so its units can differ from "shown" — truncation is
+        # therefore an EXPLICIT field, never an inference from shown < total.
+        tr = {"total": total, "shown": len(shown)}
+        if _LIMIT is not None and len(rows) > _LIMIT:
+            tr["truncated"] = True
+        _jrec(tr)
+        return
+    for r in shown:
+        out(fmt(r))
+    if _LIMIT is not None and len(rows) > _LIMIT:
         out(f"({len(shown)} of {total} {noun})")
     else:
         out(f"({total} {noun})")
@@ -2067,6 +2121,10 @@ def main():
     a = sys.argv[1:]
     if a and a[0] in ("--version", "version"):
         print(f"vv {_version()}"); sys.exit(0)
+    if "--jsonl" in a:
+        global _JSONL
+        _JSONL = True
+        a = [x for x in a if x != "--jsonl"]
     if "--limit" in a:
         i = a.index("--limit")
         if i + 1 >= len(a) or not a[i + 1].isdigit() or int(a[i + 1]) < 1:

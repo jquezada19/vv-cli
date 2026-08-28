@@ -488,6 +488,11 @@ fn main() {
         exit(0);
     }
     let orig: Vec<String> = args.clone();
+    // --jsonl is python's surface entirely (one schema author); hand off
+    // before any native handler can answer in TSV.
+    if args.iter().any(|a| a == "--jsonl") {
+        exec_python(&orig);
+    }
     // --limit N before dispatch, mirroring vv.py (orig keeps it: a python
     // fallback re-parses the full argv itself)
     if let Some(i) = args.iter().position(|a| a == "--limit") {
