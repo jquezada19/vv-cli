@@ -66,5 +66,9 @@ jobs:
       - name: Attach to release
         env: { GH_TOKEN: '${{ github.token }}' }
         run: |
+          # a bare `git push origin vX.Y.Z` has no release yet — create it then
+          gh release view "${{ github.ref_name }}" --repo "${{ github.repository }}" >/dev/null 2>&1 \
+            || gh release create "${{ github.ref_name }}" --repo "${{ github.repository }}" \
+                 --title "${{ github.ref_name }}" --generate-notes
           gh release upload "${{ github.ref_name }}" dist/*.tar.gz dist/SHA256SUMS \
             --repo "${{ github.repository }}" --clobber
