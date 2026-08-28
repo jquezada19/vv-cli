@@ -91,6 +91,7 @@ run "metrics provenance" python3 tests/test_metrics_provenance.py
 run "jsonl surface"      python3 tests/test_jsonl.py
 run "batch + changed"    python3 tests/test_batch.py
 run "surface5"           python3 tests/test_surface5.py
+run "trash"              python3 tests/test_trash.py
 run "cache torture"      python3 tests/test_torture_cache.py
 run "concurrency torture" python3 tests/test_torture_concurrent.py
 
