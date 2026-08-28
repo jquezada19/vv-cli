@@ -618,8 +618,13 @@ def cmd_new(*args):
         if not hits:
             die(f"not-found: no template matching '{template}' under Templates/")
         exact = [h for h in hits if os.path.basename(h)[:-3] == template]
-        if exact:
+        if len(exact) == 1:
             hits = exact  # an exact stem beats prefix ambiguity
+        elif exact:
+            # the same stem exists in more than one Templates/ subfolder — the
+            # exact-match rule must not become a silent lexicographic pick
+            names = " | ".join(os.path.relpath(h, os.path.join(VAULT, "Templates"))[:-3] for h in exact[:5])
+            die(f"ambiguous: template '{template}' exists as {names} — next: vv templates")
         elif len(hits) > 1:
             # never silently take the first lexicographic hit (it did, until 2026-08-27)
             names = " | ".join(os.path.basename(h)[:-3] for h in hits[:5])
@@ -1570,10 +1575,20 @@ def cmd_unresolved():
 
 def cmd_templates():
     import glob
-    stems = sorted(os.path.basename(p_)[:-3] for p_ in
-                   glob.glob(os.path.join(VAULT, "Templates/**/*.md"), recursive=True))
-    _list_out([{"name": s} for s in stems], len(stems), "templates",
-              cmd="templates", fmt=lambda r: r["name"])
+    from collections import Counter
+    paths = sorted(glob.glob(os.path.join(VAULT, "Templates/**/*.md"), recursive=True))
+    troot = os.path.join(VAULT, "Templates")
+    stems = [os.path.basename(p_)[:-3] for p_ in paths]
+    dup = {s for s, n in Counter(stems).items() if n > 1}
+    # a stem present in more than one subfolder is marked with its location —
+    # `new --template` refuses these, and the listing must say why
+    rows = [({"name": s, "ambiguous": True,
+              "path": os.path.relpath(p_, troot)[:-3]} if s in dup
+             else {"name": s})
+            for s, p_ in zip(stems, paths)]
+    rows.sort(key=lambda r: (r["name"], r.get("path", "")))
+    _list_out(rows, len(rows), "templates", cmd="templates",
+              fmt=lambda r: f"{r['name']}\t(ambiguous: {r['path']})" if "ambiguous" in r else r["name"])
 
 def cmd_prepend(ref, text):
     """Insert TEXT after the frontmatter (Obsidian-CLI semantics) — or at the

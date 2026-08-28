@@ -72,6 +72,17 @@ try:
         check(f"T4/{label} exact match beats prefix ambiguity",
               r.returncode == 0 and "weekly" not in open(os.path.join(tv, "Zz3.md")).read(), r.stderr[:80])
         os.remove(os.path.join(tv, "Zz3.md"))
+        # duplicated EXACT stem across subfolders: refused, and the listing marks it
+        os.makedirs(os.path.join(tv, "Templates/sub"), exist_ok=True)
+        open(os.path.join(tv, "Templates/sub/todo.md"), "w").write("---\ntype: sub\n---\n")
+        r = run(entry, "new", "Zz4", "--template", "todo")
+        check(f"T5/{label} duplicated exact stem refused",
+              r.returncode == 1 and "ambiguous" in r.stderr and "sub/todo" in r.stderr
+              and not os.path.exists(os.path.join(tv, "Zz4.md")), r.stderr[:100])
+        r = run(entry, "templates")
+        check(f"T6/{label} duplicate stems carry ambiguity markers",
+              r.stdout.count("(ambiguous:") == 2 and "sub/todo" in r.stdout, r.stdout[:120])
+        shutil.rmtree(os.path.join(tv, "Templates/sub"))
 
         # prepend: after fm; body-only at top; CRLF preserved
         for name, before, expect in (
@@ -90,5 +101,5 @@ try:
 finally:
     shutil.rmtree(tv, ignore_errors=True)
 
-print(f"\n{len(fails)} failures: {fails}" if fails else "\nALL PASS (surface5: 20)")
+print(f"\n{len(fails)} failures: {fails}" if fails else "\nALL PASS (surface5: 24)")
 sys.exit(1 if fails else 0)
