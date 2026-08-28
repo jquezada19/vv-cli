@@ -7,6 +7,44 @@ and exit codes. A change that makes existing output unparseable is a major chang
 
 ## [Unreleased]
 
+## [1.1.0] — 2026-08-27
+
+The agent-ergonomics release: byte budgets, structured output, invocation
+amortization, a safe removal verb, and archives that actually work.
+
+### Fixed
+- **Size labels were characters, not bytes** — `outline`/`patch` under-reported
+  multibyte sections in BOTH engines (parity agreed on the same wrong number);
+  now true UTF-8 byte counts, pinned by hand-computed Unicode vectors.
+
+### Added
+- `--version` (byte-identical across entries); terse one-line no-args usage;
+  one-suggestion command typo hints; help cleanup.
+- `search --files` (paths only) and a global `--limit N` on every enumerator
+  with an honest `(K of M …)` trailer; `search` folds `--limit` into `--k`.
+- `--jsonl`: JSON Lines from the enumerators, `search`, and `lint` (`{"v":1}`
+  first record, per-command fields, explicit `"truncated"` flag), structured
+  `{"kind","message","next","exit"}` errors on stderr; `lint --quick --check`
+  exits 1 on findings for CI. Measured 1.05–2.5× the bytes of the terse
+  default — which is why it is opt-in.
+- `batch` (JSONL read-ops on stdin, one process — measured 5.2× vs separate
+  invocations) and `changed --since <epoch|ISO>`.
+- `unresolved`, `templates` (ambiguity-marked), `prepend` (after-frontmatter,
+  CAS-guarded); `new --template` refuses ambiguous prefixes and duplicated
+  exact stems instead of silently picking one.
+- `trash NOTE`: journaled removal to `.trash/` with a dry-run blast-radius
+  report and plan digest — replaces the v1.0 "no delete" non-goal.
+- `--generate man|complete-bash|complete-zsh|complete-fish`, rendered from a
+  declarative command table gate-pinned to the dispatcher in both directions.
+
+### Distribution
+- Release archives bundle BOTH engines (the v1.0 binary lost most of its
+  surface outside a checkout); python-entry resolution knows the archive
+  layout, `VV_PYTHON`/`VV_PY_ENTRY` override, missing engines are grep-stable
+  errors, and a VERSION skew between engines warns once. Four platforms
+  (macOS arm64/x86_64, Linux x86_64/arm64), each archive smoke-tested unpacked
+  before it ships, with man page + completions included.
+
 ## [1.0.0] — 2026-08-27
 
 First public release. `vv` reads, writes, and refactors an Obsidian vault
@@ -81,5 +119,6 @@ rather than guessed; angle-bracket markdown links are not rewritten by `rename`.
 The frontmatter reader is YAML-*shaped*, not YAML — no block scalars, nested
 maps, or anchors.
 
-[Unreleased]: https://github.com/jquezada19/vv-cli/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/jquezada19/vv-cli/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/jquezada19/vv-cli/releases/tag/v1.1.0
 [1.0.0]: https://github.com/jquezada19/vv-cli/releases/tag/v1.0.0
