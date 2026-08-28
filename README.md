@@ -123,6 +123,9 @@ failed lookup prints `did you mean:` suggestions).
 |  |  |
 |---|---|
 | `--vault PATH` / `VV_VAULT` | target vault (flag wins) |
+| `--limit N` | cap any enumerator at N entries; the trailer turns into `(N of M …)` so truncation is never silent. `search` folds it into `--k` |
+| `--jsonl` | opt-in JSON Lines from the enumerators, `search`, and `lint`: `{"v":1,"cmd":…}` first, one record per entry (`path`/`score`/`snippet`, `tag`+`count`, `value`+`count`, `name`+`status`+`type`), `{"total":N,"shown":K}` last; errors become `{"kind","message","next","exit"}` on stderr. Measured 1.05–2.5× the bytes of the default output on a real vault — which is why it is opt-in and the terse forms stay the default |
+| `lint --quick --check` | exit 1 when there are findings — the CI form |
 | `VV_ENGINE=rust\|python` | force an engine — the test gate runs both |
 | `VV_NO_INDEX=1` / `VV_INDEX_ROOT` | disable the index · relocate it (tests) |
 | exit `0 · 1 · 3 · 4 · 5` | ok · usage/not-found · stale hash or plan · dirty journal · not UTF-8 |

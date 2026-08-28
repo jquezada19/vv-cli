@@ -88,6 +88,7 @@ run "link needle filter"  python3 tests/test_link_needle.py
 run "search entry points"  python3 tests/test_search_entry.py
 run "sweep guards"        python3 tests/test_sweepguard.py
 run "metrics provenance" python3 tests/test_metrics_provenance.py
+run "jsonl surface"      python3 tests/test_jsonl.py
 run "cache torture"      python3 tests/test_torture_cache.py
 run "concurrency torture" python3 tests/test_torture_concurrent.py
 
