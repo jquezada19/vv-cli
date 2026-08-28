@@ -3,12 +3,12 @@
 
 Read:    outline NOTE · read NOTE SEC · head NOTE · show NOTE [--max-bytes N] [--from SEC]
          resolve NAME · search TERMS [--k N] [--w CHARS] [--files]
-Write:   patch NOTE SEC SHA8 <stdin · appendsec NOTE SEC TEXT · append NOTE TEXT
+Write:   patch NOTE SEC SHA8 <stdin · appendsec NOTE SEC TEXT · append NOTE TEXT · prepend NOTE TEXT
          set NOTE KEY VALUE · unset NOTE KEY · new PATH [--template T] [--k v ...]
 Relocate rename NOTE NEWNAME [--apply [SHA8]] · move NOTE DESTFOLDER [--apply [SHA8]]
          link-aware + journaled. Dry-run prints a plan SHA8; --apply SHA8 executes
          exactly that reviewed plan (exit 3 if the plan drifted). Never bare `mv`.
-Graph:   backlinks NOTE · links NOTE · impact NOTE · orphans [FOLDER] · deadends
+Graph:   backlinks NOTE · links NOTE · impact NOTE · orphans [FOLDER] · deadends · unresolved\nMisc:    templates
 Query:   board FOLDER [k=v ...] · tags [--counts] · props KEY [FOLDER]
 Agent:   changed --since <epoch|ISO> · batch  (JSONL read-ops on stdin, one process)
 Daily:   daily-append TEXT   (today's standup note; creates from convention if missing)
@@ -617,6 +617,18 @@ def cmd_new(*args):
         hits = sorted(glob.glob(os.path.join(VAULT, "Templates", "**", template + "*.md"), recursive=True))
         if not hits:
             die(f"not-found: no template matching '{template}' under Templates/")
+        exact = [h for h in hits if os.path.basename(h)[:-3] == template]
+        if len(exact) == 1:
+            hits = exact  # an exact stem beats prefix ambiguity
+        elif exact:
+            # the same stem exists in more than one Templates/ subfolder — the
+            # exact-match rule must not become a silent lexicographic pick
+            names = " | ".join(os.path.relpath(h, os.path.join(VAULT, "Templates"))[:-3] for h in exact[:5])
+            die(f"ambiguous: template '{template}' exists as {names} — next: vv templates")
+        elif len(hits) > 1:
+            # never silently take the first lexicographic hit (it did, until 2026-08-27)
+            names = " | ".join(os.path.basename(h)[:-3] for h in hits[:5])
+            die(f"ambiguous: template '{template}' matches {names} — next: vv templates")
         content = read_raw(hits[0])
     missing = []
     for k, v in kv.items():
@@ -1536,11 +1548,73 @@ def cmd_changed(*args):
             for mt, rp in hits]
     _list_out(rows, len(rows), "changed", cmd="changed")
 
+def cmd_unresolved():
+    """Wiki links whose target resolves to no note. Resolution mirrors what the
+    graph commands actually do — last-segment stem in the basename index, or an
+    exact vault-relative path — plus Templates/ stems (lint's rule: a link to a
+    template is a real target). Markdown links are out of scope (rename doesn't
+    rewrite them either; documented limit)."""
+    idx = basename_index()
+    stems = set(idx.keys())
+    import glob
+    for p_ in glob.glob(os.path.join(VAULT, "Templates/**/*.md"), recursive=True):
+        stems.add(os.path.basename(p_)[:-3].lower())
+    relset = {rel(p_).lower()[:-3] for p_ in md_files()}
+    rows = []
+    for p_, i, kind, tgt in scan_links():
+        if kind != "wiki":
+            continue
+        tl = tgt.strip().lower()
+        tl = tl[:-3] if tl.endswith(".md") else tl
+        if tl.split("/")[-1] in stems or tl in relset:
+            continue
+        rows.append({"from": rel(p_), "line": i + 1, "target": tgt})
+    rows.sort(key=lambda r: (r["from"], r["line"]))
+    _list_out(rows, len(rows), "unresolved", cmd="unresolved",
+              fmt=lambda r: f"{r['from']}\t{r['line']}\t{r['target']}")
+
+def cmd_templates():
+    import glob
+    from collections import Counter
+    paths = sorted(glob.glob(os.path.join(VAULT, "Templates/**/*.md"), recursive=True))
+    troot = os.path.join(VAULT, "Templates")
+    stems = [os.path.basename(p_)[:-3] for p_ in paths]
+    dup = {s for s, n in Counter(stems).items() if n > 1}
+    # a stem present in more than one subfolder is marked with its location —
+    # `new --template` refuses these, and the listing must say why
+    rows = [({"name": s, "ambiguous": True,
+              "path": os.path.relpath(p_, troot)[:-3]} if s in dup
+             else {"name": s})
+            for s, p_ in zip(stems, paths)]
+    rows.sort(key=lambda r: (r["name"], r.get("path", "")))
+    _list_out(rows, len(rows), "templates", cmd="templates",
+              fmt=lambda r: f"{r['name']}\t(ambiguous: {r['path']})" if "ambiguous" in r else r["name"])
+
+def cmd_prepend(ref, text):
+    """Insert TEXT after the frontmatter (Obsidian-CLI semantics) — or at the
+    very top when there is none; an unterminated fm block is body and stays
+    untouched below the insertion. CAS-guarded like append; BOM, CRLF and
+    EOF-newline preserved byte-for-byte."""
+    _dirty_gate()
+    fp = resolve(ref)
+    _sig = file_sig(fp)
+    cur = read_raw(fp)
+    eol = eol_of(cur)
+    fm, body, tail, bom = split_fm_full(cur)
+    ins = text.replace("\r\n", "\n").replace("\n", eol) + eol
+    if fm is None:
+        new = bom + ins + cur[len(bom):]
+    else:
+        head_len = len(cur) - len(body)
+        new = cur[:head_len] + ins + body
+    atomic_write(fp, new, expect_sig=_sig)
+    out(f"prepended to {rel(fp)}")
+
 # Read/query commands batch may run — writers stay one-invocation-one-op so
 # every write keeps its own CAS/exit-code surface.
 _BATCH_READS = {"outline", "read", "head", "resolve", "search", "show",
                 "backlinks", "links", "impact", "orphans", "deadends",
-                "board", "tags", "props", "changed"}
+                "board", "tags", "props", "changed", "unresolved", "templates"}
 
 def cmd_batch():
     """JSONL ops on stdin, one process, one result record per op — startup and
@@ -2128,6 +2202,7 @@ CMDS = {
     "set": cmd_set, "unset": cmd_unset, "new": cmd_new,
     "backlinks": cmd_backlinks, "links": cmd_links, "orphans": cmd_orphans,
     "board": cmd_board, "tags": cmd_tags, "props": cmd_props, "changed": cmd_changed, "batch": cmd_batch,
+    "unresolved": cmd_unresolved, "templates": cmd_templates, "prepend": cmd_prepend,
     "search": cmd_search, "daily-append": cmd_daily_append,
     "show": cmd_show, "deadends": cmd_deadends, "impact": cmd_impact,
     "rename": cmd_rename, "move": cmd_move, "lint": cmd_lint, "doctor": cmd_doctor, "index": cmd_index,
