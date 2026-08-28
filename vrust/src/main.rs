@@ -458,21 +458,66 @@ fn cmd_linkscan(args: &[String]) {
 fn exec_python(argv: &[String]) -> ! {
     // fall through to the Python implementation — the semantic authority for
     // every command the native path doesn't (or declines to) handle.
-    let vv = std::env::var("VV_PY_ENTRY").unwrap_or_else(|_| {
-        let me = env::current_exe()
-            .ok()
-            .and_then(|p| std::fs::canonicalize(p).ok())
-            .and_then(|p| p.ancestors().nth(4).map(|a| a.to_path_buf())); // exe -> release -> target -> vrust -> REPO
-        me.map(|r| r.join("src/vv.py").to_string_lossy().into_owned())
-            .unwrap_or_else(|| "vv.py".into())
+    // Resolution order: VV_PY_ENTRY, then src/vv.py BESIDE the executable (the
+    // archive layout: vv + src/ + VERSION in one directory), then the repo
+    // layout — first that exists. v1.0 knew only the repo layout, and a
+    // standalone binary lost most of its surface (roadmap review, 4/4 seats).
+    let exe = env::current_exe()
+        .ok()
+        .and_then(|p| std::fs::canonicalize(p).ok());
+    let vv = std::env::var("VV_PY_ENTRY").ok().or_else(|| {
+        let candidates = [
+            exe.as_ref()
+                .and_then(|p| p.parent())
+                .map(|d| d.join("src/vv.py")), // archive: sibling src/
+            exe.as_ref()
+                .and_then(|p| p.ancestors().nth(4).map(|a| a.to_path_buf()))
+                .map(|r| r.join("src/vv.py")), // repo: exe -> release -> target -> vrust -> REPO
+        ];
+        candidates
+            .into_iter()
+            .flatten()
+            .find(|c| c.exists())
+            .map(|c| c.to_string_lossy().into_owned())
     });
-    let err = std::process::Command::new("python3")
+    let vv = match vv {
+        Some(v) => v,
+        None => {
+            eprintln!("engine: python entry (src/vv.py) not found beside the binary or in a checkout — next: set VV_PY_ENTRY, or reinstall the archive intact");
+            exit(1);
+        }
+    };
+    // Engine-skew handshake: the VERSION beside the resolved entry must match
+    // the binary's baked version. One warning, not a wall — the python side is
+    // the semantic authority either way, but silent skew is how two-engine
+    // deployments rot.
+    if let Some(vdir) = Path::new(&vv).parent().and_then(|s| s.parent()) {
+        if let Ok(v) = std::fs::read_to_string(vdir.join("VERSION")) {
+            if v.trim() != VERSION.trim() {
+                eprintln!(
+                    "warning: engine skew — binary {} but python entry is {} (from {})",
+                    VERSION.trim(),
+                    v.trim(),
+                    vdir.join("VERSION").display()
+                );
+            }
+        }
+    }
+    let python = std::env::var("VV_PYTHON").unwrap_or_else(|_| "python3".into());
+    match std::process::Command::new(&python)
         .arg(&vv)
         .args(argv)
         .status()
-        .map(|s| exit(s.code().unwrap_or(1)));
-    eprintln!("run: could not exec python3 {}: {:?}", vv, err.err());
-    exit(1);
+    {
+        Ok(s) => exit(s.code().unwrap_or(1)),
+        Err(_) => {
+            eprintln!(
+                "engine: python engine unavailable ({} not runnable) — next: install python3, or set VV_PYTHON",
+                python
+            );
+            exit(1);
+        }
+    }
 }
 
 // Baked at build; the gate pins VERSION == Cargo.toml so the two cannot skew.
