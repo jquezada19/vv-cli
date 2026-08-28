@@ -1,6 +1,7 @@
 # vv v1.1 spec — rev 2, after cross-model review
 
-Status: REVIEWED DRAFT. Rev 1 went to a four-seat adversarial review
+Status: IMPLEMENTED — every phase shipped 2026-08-27 (PRs #5–#14; `tasks`
+stays deferred to v1.2). Rev 1 went to a four-seat adversarial review
 (three independent model families + one source-verifying seat) on 2026-08-27;
 every seat returned "accept with changes" or "rework". This revision is the
 synthesis. Where rev 1's claims about the code were found false, they are
