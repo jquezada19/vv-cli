@@ -146,13 +146,18 @@ except OSError as e:
     print(f"SKIP F11 symlink (unsupported: {e})")
 
 # ---- F12: template selection is deterministic ----
+# Since 2026-08-27 an AMBIGUOUS prefix is refused outright (it used to silently
+# take the first lexicographic hit — this pin held that; refusal is the
+# stronger determinism). An exact stem still resolves through the ambiguity.
 w("Templates/T-a.md", "---\ntype: a\n---\n")
 w("Templates/sub/T-b.md", "---\ntype: b\n---\n")
 r1 = run("new", "N1", "--template", "T-")
-r2 = run("new", "N2", "--template", "T-")
-c1 = open(os.path.join(VAULT, "N1.md")).read()
-c2 = open(os.path.join(VAULT, "N2.md")).read()
-check("F12 template pick deterministic", c1 == c2, f"{c1!r} vs {c2!r}")
+check("F12a ambiguous template prefix refused",
+      r1.returncode == 1 and "ambiguous" in r1.stderr
+      and not os.path.exists(os.path.join(VAULT, "N1.md")), r1.stderr[:80])
+r2 = run("new", "N2", "--template", "T-a")
+check("F12b exact stem resolves", r2.returncode == 0
+      and "type: a" in open(os.path.join(VAULT, "N2.md")).read(), r2.stderr[:80])
 
 # ---- F14: [[Note.md]] wikilinks are rewritten on rename, style preserved ----
 w("ExtR2.md", "Links [[ExtT.md]] and [[ExtT]] and [[ExtT.md|a]].\n")
