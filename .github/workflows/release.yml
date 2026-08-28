@@ -16,7 +16,10 @@ jobs:
       matrix:
         include:
           - { os: macos-latest,      target: aarch64-apple-darwin }
-          - { os: macos-13,          target: x86_64-apple-darwin }
+          # x86_64-apple-darwin dropped 2026-08-27: macos-13 Intel runners queue
+          # for tens of minutes in the free pool and blocked the whole publish
+          # job on v1.1.0's first run, for a target nobody here uses. Restore it
+          # (or macos-14-large) if an Intel-mac user actually appears.
           - { os: ubuntu-latest,     target: x86_64-unknown-linux-gnu }
           - { os: ubuntu-24.04-arm,  target: aarch64-unknown-linux-gnu }
     steps:
