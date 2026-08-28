@@ -5,7 +5,7 @@ Read:    outline NOTE · read NOTE SEC · head NOTE · show NOTE [--max-bytes N]
          resolve NAME · search TERMS [--k N] [--w CHARS] [--files]
 Write:   patch NOTE SEC SHA8 <stdin · appendsec NOTE SEC TEXT · append NOTE TEXT · prepend NOTE TEXT
          set NOTE KEY VALUE · unset NOTE KEY · new PATH [--template T] [--k v ...]
-Relocate rename NOTE NEWNAME [--apply [SHA8]] · move NOTE DESTFOLDER [--apply [SHA8]]
+Relocate rename NOTE NEWNAME [--apply [SHA8]] · move NOTE DESTFOLDER [--apply [SHA8]] · trash NOTE [--apply SHA8]
          link-aware + journaled. Dry-run prints a plan SHA8; --apply SHA8 executes
          exactly that reviewed plan (exit 3 if the plan drifted). Never bare `mv`.
 Graph:   backlinks NOTE · links NOTE · impact NOTE · orphans [FOLDER] · deadends · unresolved\nMisc:    templates
@@ -1548,6 +1548,56 @@ def cmd_changed(*args):
             for mt, rp in hits]
     _list_out(rows, len(rows), "changed", cmd="changed")
 
+def cmd_trash(ref, *args):
+    """Journaled removal. Rewrites NOTHING — rewriting would repoint links into
+    .trash/ — so the dry-run reports the files whose links will BREAK, and the
+    plan digest binds --apply to exactly that reviewed blast radius. The note
+    lands in .trash/ (a dot-dir: invisible to every scan, so it leaves the
+    graph the moment it moves). A duplicate-basename source is refused for the
+    same reason move refuses it: removing one silently repoints the survivors'
+    bare links. Recovery: the same journal endpoints as rename/move — a crash
+    between the move and the commit is reversed by doctor --rollback."""
+    fp = resolve(ref)
+    src_rel = rel(fp)
+    hits, ambiguous = occurrences(fp, include_bare=True)
+    if ambiguous:
+        die("refused: source basename is ambiguous in vault — next: resolve duplicate notes first")
+    base = os.path.basename(src_rel)
+    dest_rel = os.path.join(".trash", base)
+    n = 2
+    while os.path.exists(os.path.join(VAULT, dest_rel)):
+        dest_rel = os.path.join(".trash", f"{base[:-3]}-{n}.md")
+        n += 1
+    canon = ["trash", src_rel, dest_rel]
+    for p_ in sorted(hits, key=rel):
+        with open(p_, "rb") as f:
+            canon.append(f"{rel(p_)}:{hits[p_]}:{hashlib.sha256(f.read()).hexdigest()}")
+    plan_id = sha8("\n".join(canon))
+    out(f"plan {plan_id}: trash {src_rel} -> {dest_rel}")
+    out(f"files with links that will BREAK: {len(hits)} ({sum(hits.values())} occurrences)")
+    for p_, n_ in sorted(hits.items()):
+        out(f"  {n_}\t{rel(p_)}")
+    if "--apply" not in args:
+        out(f"(dry-run — apply with: --apply {plan_id} to bind to THIS plan)")
+        return
+    expect = _plan_token(args)
+    if expect and expect != plan_id:
+        die(f"stale: plan is now {plan_id}, you reviewed {expect} — next: re-run the dry-run", 3)
+    _dirty_gate()
+    jdir = _journal_start("trash", [fp], src=src_rel, dest=dest_rel)
+    try:
+        os.makedirs(os.path.join(VAULT, ".trash"), exist_ok=True)
+        _journal_phase(jdir, "renaming")
+        os.rename(fp, os.path.join(VAULT, dest_rel))
+        _journal_phase(jdir, "renamed")
+        if os.environ.get("VV_FAULT_KILL_AFTER_RENAME"):
+            os._exit(137)  # same hard-kill injector as relocate: bypasses handlers entirely
+        _journal_done(jdir)
+    except BaseException:
+        _journal_rollback(jdir)
+        raise
+    out(f"trashed {src_rel} -> {dest_rel} ({len(hits)} file(s) now hold broken links)")
+
 def cmd_unresolved():
     """Wiki links whose target resolves to no note. Resolution mirrors what the
     graph commands actually do — last-segment stem in the basename index, or an
@@ -2202,7 +2252,7 @@ CMDS = {
     "set": cmd_set, "unset": cmd_unset, "new": cmd_new,
     "backlinks": cmd_backlinks, "links": cmd_links, "orphans": cmd_orphans,
     "board": cmd_board, "tags": cmd_tags, "props": cmd_props, "changed": cmd_changed, "batch": cmd_batch,
-    "unresolved": cmd_unresolved, "templates": cmd_templates, "prepend": cmd_prepend,
+    "unresolved": cmd_unresolved, "templates": cmd_templates, "prepend": cmd_prepend, "trash": cmd_trash,
     "search": cmd_search, "daily-append": cmd_daily_append,
     "show": cmd_show, "deadends": cmd_deadends, "impact": cmd_impact,
     "rename": cmd_rename, "move": cmd_move, "lint": cmd_lint, "doctor": cmd_doctor, "index": cmd_index,
