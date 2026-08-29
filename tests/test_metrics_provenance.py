@@ -84,7 +84,7 @@ def main():
     fails = []
     checks_run = 0
     def diagnostic(info):
-        """Keep failure evidence printable even under an ASCII parent locale."""
+        """ASCII-escape bounded test evidence; callers must repr raw external text."""
         return str(info).encode("ascii", "backslashreplace").decode("ascii")[:180]
 
     def check(lbl, ok, info=""):
@@ -98,6 +98,10 @@ def main():
     escaped = diagnostic("·—")
     check("failure diagnostics are ASCII-safe",
           escaped == r"\xb7\u2014", escaped)
+    bounded = diagnostic("·" * 200)
+    check("failure diagnostics stay bounded after escaping",
+          len(bounded) == 180 and bounded.isascii(),
+          f"len={len(bounded)}; tail={bounded[-20:]!r}")
     if not os.path.exists(VR):
         print("SKIP: binary not built (native-engine checks not run)")
         print(("ALL PASS (metrics provenance report-only: %d)" % checks_run) if not fails
