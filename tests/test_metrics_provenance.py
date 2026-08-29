@@ -15,6 +15,9 @@ a forgotten mark is visible rather than silent.
 The label reaches a record that the native engine builds by STRING FORMATTING,
 so it is sanitised to [A-Za-z0-9_-]; an unescaped quote would corrupt every
 subsequent row in the log.
+
+The report must also keep its two input cohorts distinct: rate-burst diagnostics
+must never replace the independently loaded legacy-route adoption denominator.
 """
 import json, os, shutil, subprocess, sys, tempfile
 
@@ -22,15 +25,88 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 VR = os.path.join(REPO, "vrust/target/release/vrust")
 VV = os.path.join(REPO, "src/vv.py")
 sys.path.insert(0, os.path.join(REPO, "bench"))
+import pilot_report as pr
+
+
+def check_report_preserves_legacy_denominator(check):
+    """Exercise the Python-only report contract even on a cold checkout."""
+    with tempfile.TemporaryDirectory(prefix="vv-prov-report-") as report_home:
+        report_metrics = os.path.join(report_home, ".claude/metrics")
+        os.makedirs(report_metrics)
+        burst_n = pr.MACHINE_OPS_PER_MIN + 1
+        vv_rows = [
+            {"ts": "2026-08-27T11:00:00", "op": "backlinks", "exit": 0,
+             "ms": 1, "out_bytes": 1}
+            for _ in range(burst_n)
+        ] + [
+            {"ts": "2026-08-27T12:00:00", "op": "read", "exit": 0,
+             "ms": 2, "out_bytes": 10}
+        ]
+        legacy_rows = [
+            {"ts": "2026-08-27T12:00:01", "op": "read", "note_bytes": 100},
+            {"ts": "2026-08-27T12:00:02", "op": "edit", "note_bytes": 200},
+        ]
+        for name, records in (("vv.jsonl", vv_rows), ("vv-legacy.jsonl", legacy_rows)):
+            with open(os.path.join(report_metrics, name), "w") as f:
+                for record in records:
+                    f.write(json.dumps(record) + "\n")
+
+        report = subprocess.run(
+            [sys.executable, os.path.join(REPO, "bench/pilot_report.py"),
+             "--since", "2026-08-27T10:00", "--until", "2026-08-27T13:00"],
+            capture_output=True, text=True, encoding="utf-8",
+            env={"HOME": report_home, "USERPROFILE": report_home, "PYTHONUTF8": "1"})
+        lines = report.stdout.splitlines()
+        adoption = next((line for line in lines if line.startswith("adoption: ")), "")
+        funnel = next((line.strip() for line in lines if "funnel[pilot]:" in line), "")
+        rate_line = next((line.strip() for line in lines
+                          if "predate provenance stamping" in line), "")
+        legacy_mix = {token for token in adoption.rpartition(" — ")[2].split(", ")
+                      if token}
+        stderr_lines = report.stderr.strip().splitlines()
+        error_line = stderr_lines[-1] if stderr_lines else ""
+        adoption_info = (f"rc={report.returncode}; adoption={adoption!r}; "
+                         f"stderr={error_line[:100]!r}")
+        diagnostic_info = f"rate={rate_line[:80]!r}; funnel={funnel[-80:]!r}"
+        check("pilot report preserves the real legacy adoption cohort",
+              report.returncode == 0 and
+              adoption.startswith(
+                  "adoption: vv handled 1 of 3 logged vault ops (33%) · legacy 2 — ") and
+              legacy_mix == {"read:1", "edit:1"},
+              adoption_info)
+        check("pilot report keeps the pre-provenance burst diagnostic-only",
+              rate_line.startswith(f"{burst_n:,} predate provenance stamping") and
+              funnel.endswith(f"legacy_in_window={len(legacy_rows)}"),
+              diagnostic_info)
 
 
 def main():
-    if not os.path.exists(VR):
-        print("SKIP: binary not built"); return 0
     fails = []
+    checks_run = 0
+    def diagnostic(info):
+        """ASCII-escape bounded test evidence; callers must repr raw external text."""
+        return str(info).encode("ascii", "backslashreplace").decode("ascii")[:180]
+
     def check(lbl, ok, info=""):
-        print(("PASS " if ok else "FAIL ") + lbl + ("" if ok else f"  [{str(info)[:180]}]"))
+        nonlocal checks_run
+        checks_run += 1
+        print(("PASS " if ok else "FAIL ") + lbl +
+              ("" if ok else f"  [{diagnostic(info)}]"))
         if not ok: fails.append(lbl)
+
+    check_report_preserves_legacy_denominator(check)
+    escaped = diagnostic("·—")
+    check("failure diagnostics are ASCII-safe",
+          escaped == r"\xb7\u2014", escaped)
+    bounded = diagnostic("·" * 200)
+    check("failure diagnostics stay bounded after escaping",
+          len(bounded) == 180 and bounded.isascii(),
+          f"len={len(bounded)}; tail={bounded[-20:]!r}")
+    if not os.path.exists(VR):
+        print("SKIP: binary not built (native-engine checks not run)")
+        print(("ALL PASS (metrics provenance report-only: %d)" % checks_run) if not fails
+              else "FAILURES: " + ", ".join(fails))
+        return 1 if fails else 0
 
     vault = tempfile.mkdtemp(prefix="vv-prov-v-")
     home = tempfile.mkdtemp(prefix="vv-prov-h-")
@@ -102,7 +178,6 @@ def main():
         else: os.environ["VV_METRICS_SRC"] = keep
 
     # --- the report prefers provenance over the rate heuristic --------------
-    import pilot_report as pr
     marked_rows = [{"ts": "2026-08-27T10:00:00", "op": "read", "src": "bench"}] * 5
     slow_human = [{"ts": f"2026-08-27T10:0{i}:00", "op": "read"} for i in range(1, 6)]
     burst = [{"ts": "2026-08-27T11:00:00", "op": "read"}] * (pr.MACHINE_OPS_PER_MIN + 1)
@@ -133,7 +208,7 @@ def main():
           all(r["ts"] >= pr.PROVENANCE_SINCE for r in unm_new))
 
     shutil.rmtree(vault, ignore_errors=True); shutil.rmtree(home, ignore_errors=True)
-    print(("ALL PASS (metrics provenance: %d)" % (19 - len(fails))) if not fails
+    print(("ALL PASS (metrics provenance: %d)" % checks_run) if not fails
           else "FAILURES: " + ", ".join(fails))
     return 1 if fails else 0
 
