@@ -59,16 +59,23 @@ def check_report_preserves_legacy_denominator(check):
         lines = report.stdout.splitlines()
         adoption = next((line for line in lines if line.startswith("adoption: ")), "")
         funnel = next((line.strip() for line in lines if "funnel[pilot]:" in line), "")
+        rate_line = next((line.strip() for line in lines
+                          if "predate provenance stamping" in line), "")
+        legacy_mix = {token for token in adoption.rpartition(" — ")[2].split(", ")
+                      if token}
+        adoption_info = (f"rc={report.returncode}; adoption={adoption!r}; "
+                         f"stderr={report.stderr.strip()[:60]!r}")
+        diagnostic_info = f"rate={rate_line[:80]!r}; funnel={funnel[-80:]!r}"
         check("pilot report preserves the real legacy adoption cohort",
               report.returncode == 0 and
               adoption.startswith(
                   "adoption: vv handled 1 of 3 logged vault ops (33%) · legacy 2 — ") and
-              "read:1" in adoption and "edit:1" in adoption,
-              report.stderr + report.stdout)
+              legacy_mix == {"read:1", "edit:1"},
+              adoption_info)
         check("pilot report keeps the pre-provenance burst diagnostic-only",
-              f"{burst_n:,} predate provenance stamping" in report.stdout and
+              rate_line.startswith(f"{burst_n:,} predate provenance stamping") and
               funnel.endswith(f"legacy_in_window={len(legacy_rows)}"),
-              report.stdout)
+              diagnostic_info)
 
 
 def main():
