@@ -33,7 +33,10 @@ def main():
     if not os.path.exists(VR):
         print("SKIP: binary not built"); return 0
     fails = []
+    checks_run = 0
     def check(lbl, ok, info=""):
+        nonlocal checks_run
+        checks_run += 1
         print(("PASS " if ok else "FAIL ") + lbl + ("" if ok else f"  [{str(info)[:180]}]"))
         if not ok: fails.append(lbl)
 
@@ -163,8 +166,9 @@ def main():
          "--since", "2026-08-27T10:00", "--until", "2026-08-27T13:00"],
         capture_output=True, text=True, env=dict(os.environ, HOME=report_home))
     check("pilot report preserves the real legacy adoption cohort",
+          report.returncode == 0 and
           "adoption: vv handled 1 of 3 logged vault ops (33%) · legacy 2 — read:1, edit:1"
-          in report.stdout, report.stdout)
+          in report.stdout, report.stderr + report.stdout)
     check("pilot report keeps the pre-provenance burst diagnostic-only",
           f"{burst_n} predate provenance stamping" in report.stdout and
           f"legacy_in_window={len(legacy_rows)}" in report.stdout,
@@ -172,7 +176,7 @@ def main():
     shutil.rmtree(report_home, ignore_errors=True)
 
     shutil.rmtree(vault, ignore_errors=True); shutil.rmtree(home, ignore_errors=True)
-    print(("ALL PASS (metrics provenance: %d)" % (21 - len(fails))) if not fails
+    print(("ALL PASS (metrics provenance: %d)" % checks_run) if not fails
           else "FAILURES: " + ", ".join(fails))
     return 1 if fails else 0
 
