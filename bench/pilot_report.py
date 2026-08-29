@@ -164,12 +164,13 @@ def main():
         print(f"\n  provenance: {len(marked):,} op(s) are self-declared synthetic "
               f"({', '.join(f'{k}={v:,}' for k, v in labels.most_common())}) — excluded.")
     if unmarked_machine:
-        legacy = [r for r in unmarked_machine if r.get("ts", "") < PROVENANCE_SINCE]
+        pre_provenance = [r for r in unmarked_machine
+                          if r.get("ts", "") < PROVENANCE_SINCE]
         recent = [r for r in unmarked_machine if r.get("ts", "") >= PROVENANCE_SINCE]
         print(f"\n  machine-paced, excluded by RATE: {len(unmarked_machine):,} op(s) "
               f"across {len(hot_min)} minute(s) at >={MACHINE_OPS_PER_MIN}/min.")
-        if legacy:
-            print(f"     {len(legacy):,} predate provenance stamping "
+        if pre_provenance:
+            print(f"     {len(pre_provenance):,} predate provenance stamping "
                   f"({PROVENANCE_SINCE}) — they could not have been marked. No action.")
         if recent:
             print(f"     !! {len(recent):,} were written AFTER stamping landed and still "

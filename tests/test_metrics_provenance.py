@@ -15,6 +15,11 @@ a forgotten mark is visible rather than silent.
 The label reaches a record that the native engine builds by STRING FORMATTING,
 so it is sanitised to [A-Za-z0-9_-]; an unescaped quote would corrupt every
 subsequent row in the log.
+
+The report must also keep its two input cohorts distinct. A 2026-08-28 pilot
+read-out rebound the loaded legacy-route rows to the pre-provenance rate-burst
+cohort, turning 250 real legacy operations into 1,552 synthetic `backlinks`
+operations and changing adoption from 80% to 39%.
 """
 import json, os, shutil, subprocess, sys, tempfile
 
@@ -132,8 +137,42 @@ def main():
           all(r["ts"] < pr.PROVENANCE_SINCE for r in unm_old) and
           all(r["ts"] >= pr.PROVENANCE_SINCE for r in unm_new))
 
+    # --- report integration: diagnostics must not replace the denominator ---
+    report_home = tempfile.mkdtemp(prefix="vv-prov-report-")
+    report_metrics = os.path.join(report_home, ".claude/metrics")
+    os.makedirs(report_metrics)
+    burst_n = pr.MACHINE_OPS_PER_MIN + 1
+    vv_rows = [
+        {"ts": "2026-08-27T11:00:00", "op": "backlinks", "exit": 0,
+         "ms": 1, "out_bytes": 1}
+        for _ in range(burst_n)
+    ] + [
+        {"ts": "2026-08-27T12:00:00", "op": "read", "exit": 0,
+         "ms": 2, "out_bytes": 10}
+    ]
+    legacy_rows = [
+        {"ts": "2026-08-27T12:00:01", "op": "read", "note_bytes": 100},
+        {"ts": "2026-08-27T12:00:02", "op": "edit", "note_bytes": 200},
+    ]
+    for name, records in (("vv.jsonl", vv_rows), ("vv-legacy.jsonl", legacy_rows)):
+        with open(os.path.join(report_metrics, name), "w") as f:
+            for record in records:
+                f.write(json.dumps(record) + "\n")
+    report = subprocess.run(
+        [sys.executable, os.path.join(REPO, "bench/pilot_report.py"),
+         "--since", "2026-08-27T10:00", "--until", "2026-08-27T13:00"],
+        capture_output=True, text=True, env=dict(os.environ, HOME=report_home))
+    check("pilot report preserves the real legacy adoption cohort",
+          "adoption: vv handled 1 of 3 logged vault ops (33%) · legacy 2 — read:1, edit:1"
+          in report.stdout, report.stdout)
+    check("pilot report keeps the pre-provenance burst diagnostic-only",
+          f"{burst_n} predate provenance stamping" in report.stdout and
+          f"legacy_in_window={len(legacy_rows)}" in report.stdout,
+          report.stdout)
+    shutil.rmtree(report_home, ignore_errors=True)
+
     shutil.rmtree(vault, ignore_errors=True); shutil.rmtree(home, ignore_errors=True)
-    print(("ALL PASS (metrics provenance: %d)" % (19 - len(fails))) if not fails
+    print(("ALL PASS (metrics provenance: %d)" % (21 - len(fails))) if not fails
           else "FAILURES: " + ", ".join(fails))
     return 1 if fails else 0
 
