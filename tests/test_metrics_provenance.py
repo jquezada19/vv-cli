@@ -54,7 +54,7 @@ def check_report_preserves_legacy_denominator(check):
         report = subprocess.run(
             [sys.executable, os.path.join(REPO, "bench/pilot_report.py"),
              "--since", "2026-08-27T10:00", "--until", "2026-08-27T13:00"],
-            capture_output=True, text=True,
+            capture_output=True, text=True, encoding="utf-8",
             env={"HOME": report_home, "USERPROFILE": report_home, "PYTHONUTF8": "1"})
         lines = report.stdout.splitlines()
         adoption = next((line for line in lines if line.startswith("adoption: ")), "")
