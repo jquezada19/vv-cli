@@ -63,8 +63,10 @@ def check_report_preserves_legacy_denominator(check):
                           if "predate provenance stamping" in line), "")
         legacy_mix = {token for token in adoption.rpartition(" — ")[2].split(", ")
                       if token}
+        stderr_lines = report.stderr.strip().splitlines()
+        error_line = stderr_lines[-1] if stderr_lines else ""
         adoption_info = (f"rc={report.returncode}; adoption={adoption!r}; "
-                         f"stderr={report.stderr.strip()[:60]!r}")
+                         f"stderr={error_line[:100]!r}")
         diagnostic_info = f"rate={rate_line[:80]!r}; funnel={funnel[-80:]!r}"
         check("pilot report preserves the real legacy adoption cohort",
               report.returncode == 0 and
