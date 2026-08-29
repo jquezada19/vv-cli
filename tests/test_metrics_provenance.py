@@ -83,13 +83,21 @@ def check_report_preserves_legacy_denominator(check):
 def main():
     fails = []
     checks_run = 0
+    def diagnostic(info):
+        """Keep failure evidence printable even under an ASCII parent locale."""
+        return str(info).encode("ascii", "backslashreplace").decode("ascii")[:180]
+
     def check(lbl, ok, info=""):
         nonlocal checks_run
         checks_run += 1
-        print(("PASS " if ok else "FAIL ") + lbl + ("" if ok else f"  [{str(info)[:180]}]"))
+        print(("PASS " if ok else "FAIL ") + lbl +
+              ("" if ok else f"  [{diagnostic(info)}]"))
         if not ok: fails.append(lbl)
 
     check_report_preserves_legacy_denominator(check)
+    escaped = diagnostic("·—")
+    check("failure diagnostics are ASCII-safe",
+          escaped == r"\xb7\u2014", escaped)
     if not os.path.exists(VR):
         print("SKIP: binary not built (native-engine checks not run)")
         print(("ALL PASS (metrics provenance report-only: %d)" % checks_run) if not fails
