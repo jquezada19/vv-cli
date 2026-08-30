@@ -3,7 +3,7 @@
 [![CI](https://github.com/jquezada19/vv-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/jquezada19/vv-cli/actions/workflows/ci.yml)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 
-`vv` (**Verified Vault**) reads, writes, and edits an Obsidian vault headlessly,
+`vv` (**Velocity Vault**) reads, writes, and edits an Obsidian vault headlessly,
 built for AI-agent workflows where **every output byte enters the model's
 context**. Output is terse by contract, edits are hash-anchored compare-and-swap,
 multi-file operations are journaled with classified rollback, and link semantics
