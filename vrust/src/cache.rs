@@ -30,8 +30,8 @@ struct Row {
 
 fn cache_path(vault: &Path) -> Option<PathBuf> {
     // Two of python's isolation knobs: VV_NO_INDEX disables the cache and
-    // VV_INDEX_ROOT relocates it (the test gate exports one throwaway dir for
-    // both engines, so fixture vaults no longer litter ~/.cache/vv/index —
+    // VV_INDEX_ROOT relocates it (a test suite can point both engines at one
+    // throwaway dir so its fixture vaults do not litter ~/.cache/vv/index —
     // hundreds of stale .vvidx files by 2026-09). Python's third rule (journal
     // root set ⇒ no index) is NOT mirrored: the cache-torture suite relies
     // on a HOME-redirected native cache under exactly that condition.

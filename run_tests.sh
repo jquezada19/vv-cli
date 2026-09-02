@@ -11,12 +11,10 @@ cd "$(dirname "$0")"
 # window (found 2026-08-26, hour one of the pilot). One export covers every
 # child process, including any suite added later.
 export VV_NO_METRICS=1
-# Every suite's fixture vaults keep BOTH engines' caches in one throwaway dir
-# instead of littering the runner's real ~/.cache/vv/index (a lone suite
-# wrote a .sqlite and a .vvidx there per run). Suites that must exercise the
-# HOME-derived native cache redirect HOME themselves (cache torture).
-export VV_INDEX_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/vv-gate-index.XXXXXX")"
-trap 'rm -rf "$VV_INDEX_ROOT"' EXIT
+# NOT exported gate-wide: VV_INDEX_ROOT. Three cache suites (phase2, cache
+# integrity, cache torture) deliberately exercise the HOME-derived native
+# cache path and go red with it set; a suite that wants both engines' caches
+# in a throwaway dir sets it itself (the read-out suite does).
 
 # src/vv_impl.py uses PEP 701 multi-line f-string expressions (3.12+). On an
 # older interpreter the python oracle dies at import, and the differential
