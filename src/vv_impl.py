@@ -434,6 +434,13 @@ def cmd_resolve(ref):
 def cmd_patch(ref, sid, expect):
     _dirty_gate()
     fp = resolve(ref)
+    # File-signature CAS in addition to the section hash. The section hash
+    # proves the SECTION is what the caller reviewed; it says nothing about
+    # the rest of the file, so a second writer (Obsidian saving another
+    # section) landing between this read and os.replace() was silently
+    # overwritten until 2026-09-02 -- patch was the one writer without the
+    # guard every other writer carries. tests/test_write_safety.py W1.
+    _sig = file_sig(fp)
     lines, secs = parse(read_raw(fp))
     s = find_sec(lines, secs, sid)
     if sid == "H0" and s["end"] > 0 and lines and lines[0].rstrip("\r") == "---":
@@ -446,7 +453,7 @@ def cmd_patch(ref, sid, expect):
     if body.endswith("\n"):
         body = body[:-1]   # strip the one newline the caller's shell/`read` framing adds
     body_lines = [] if (body == "" and s["end"] == s["start"]) else body.split("\n")
-    atomic_write(fp, splice(lines, s["start"], s["end"], body_lines))
+    atomic_write(fp, splice(lines, s["start"], s["end"], body_lines), expect_sig=_sig)
     out(f"patched {sid} in {rel(fp)} ({len(cur.encode('utf-8'))}B -> {len(body.encode('utf-8'))}B)")
 
 def cmd_appendsec(ref, sid, text):

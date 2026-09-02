@@ -7,6 +7,20 @@ and exit codes. A change that makes existing output unparseable is a major chang
 
 ## [Unreleased]
 
+### Fixed
+- `patch` now carries the same file-signature compare-and-swap as every other
+  writer: the section hash proved the section was what the caller reviewed,
+  but a second writer (Obsidian saving a different section) landing between
+  patch's read and its write was silently overwritten. Both engines; the
+  native CAS failure re-feeds the body to python, which re-reads fresh.
+  Pinned deterministically in `tests/test_write_safety.py`.
+
+### Verified (no code change)
+- `rename`/`move --apply <sha8>` already refuse when a backlink is written
+  between the dry-run and the apply: the plan digest is recomputed from a
+  fresh link scan at apply time, so a late link changes the digest. Pinned so
+  a future cache shortcut cannot remove the property.
+
 ## [1.1.0] — 2026-08-27
 
 The agent-ergonomics release: byte budgets, structured output, invocation

@@ -623,6 +623,13 @@ fn cmd_patch(vault: &Path, args: &[String]) -> Outcome {
         None => return Outcome::Fallback,
     };
     let cf = fs::metadata(&fp).map(|m| m.len()).unwrap_or(0);
+    // Signature BEFORE the read (same order as every other writer here): a
+    // second writer between this read and the replace must fail the CAS, and
+    // the failure re-feeds the captured body to python, which re-reads fresh.
+    let sig = match file_sig(&fp) {
+        Some(s) => s,
+        None => return Outcome::Fallback,
+    };
     let bytes = match fs::read(&fp) {
         Ok(b) => b,
         Err(_) => return Outcome::Fallback,
@@ -662,7 +669,7 @@ fn cmd_patch(vault: &Path, args: &[String]) -> Outcome {
         body.split('\n').map(|x| x.to_string()).collect()
     };
     let new_text = splice(&lines, s.start, s.end, &body_lines);
-    if !atomic_write(&fp, &new_text, None) {
+    if !atomic_write(&fp, &new_text, Some(sig)) {
         return exec_python_with_stdin(vault, args, &raw);
     }
     let rel = fp
