@@ -38,6 +38,11 @@ fn vault() -> PathBuf {
 
 /// `exclude_sandbox` is a SEARCH-relevance choice, never a graph-correctness one:
 /// link/graph scans must see every note the Python side sees.
+/// python's SKIP_DIRS (src/vv_impl.py:33), mirrored WHOLE so a future
+/// non-dot member cannot drift the engines apart (query.rs::walk_board reads
+/// the same list). Every member but graphify-out is a dot-dir today.
+pub const SKIP_DIRS: [&str; 5] = [".git", ".obsidian", ".claude", ".trash", "graphify-out"];
+
 pub fn walk_ex(dir: &Path, out: &mut Vec<PathBuf>, exclude_sandbox: bool) {
     if let Ok(rd) = fs::read_dir(dir) {
         for e in rd.flatten() {
@@ -48,7 +53,7 @@ pub fn walk_ex(dir: &Path, out: &mut Vec<PathBuf>, exclude_sandbox: bool) {
             let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
             if is_dir {
                 if name.starts_with('.')
-                    || name == "graphify-out"
+                    || SKIP_DIRS.contains(&name.as_str())
                     || (exclude_sandbox && name == "Sandbox")
                 {
                     continue;

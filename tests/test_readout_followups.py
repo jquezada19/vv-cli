@@ -5,8 +5,9 @@ The week's friction was the AFFORDANCE class — vv was right and unhelpful at
 the same time. Each pin below names what motivated it.
 
 Window: 2026-08-26T21:06 → 2026-09-02 (the pilot register's window).
-Checks suffixed "(control)" pass on pre-fix code by design; every other check
-was watched to fail with its fix reverted (mutation pass, 2026-09-02).
+Checks suffixed "(control…)" pass on pre-fix code by design and "(setup)"
+checks only gate what follows; every other check was watched to fail with its
+fix reverted (mutation pass, 2026-09-02).
 
 R1  `board FOLDER status open` (space, not `=`) died as a bare Python
     traceback: exit 1, no usage line, no `next:`, no metrics row. Found by
@@ -32,7 +33,8 @@ R7  the shadow PRODUCER writes `legacy-error` (not a normal verdict) when the
     exit 1 normally — exercised in-process with a stubbed runner.
 RN  the three affordance errors are identical through the native entry.
 """
-import io, json, os, shutil, subprocess, sys, tempfile
+import io, json, os, shutil, signal, subprocess, sys, tempfile
+signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))   # a SIGTERM runs finally + atexit, even mid-fixture-move
 
 _VAULT = os.environ.get("VV_VAULT") or os.path.expanduser("~/Documents/Obsidian Vault")
 SB = os.path.join(_VAULT, "Sandbox/vvreadout")
@@ -66,10 +68,12 @@ _kept = None
 if os.path.lexists(SB):                     # even an EMPTY pre-existing dir is the user's
     # NOT registered in _TMP: the holding dir must outlive the temp sweep so a
     # failing run can never delete the user's data (security seat, round 2).
-    _kept = os.path.join(tempfile.mkdtemp(prefix="vv-kept-vvreadout-"), "vvreadout")
+    _hold = os.path.expanduser("~/.cache/vv/test-holding")     # not the OS-purged temp dir
+    os.makedirs(_hold, exist_ok=True)
+    _kept = os.path.join(tempfile.mkdtemp(prefix="vv-kept-vvreadout-", dir=_hold), "vvreadout")
     shutil.move(SB, _kept)
     print(f"note: pre-existing {SB} set aside at {_kept}; restored at exit")
-    import atexit, signal
+    import atexit
     def _restore_on_exit():
         # belt-and-braces for an exit that skips the finally (SystemExit from a
         # signal handler, an exception before the try): if the original is
@@ -78,7 +82,7 @@ if os.path.lexists(SB):                     # even an EMPTY pre-existing dir is 
             shutil.move(_kept, SB)
             print(f"note: restored pre-existing {SB} at exit")
     atexit.register(_restore_on_exit)
-    signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))   # let atexit run on SIGTERM
+
 NOTE = "Sandbox/vvreadout/Readout Note.md"
 
 def affordance_checks(tag, runner):
@@ -177,11 +181,28 @@ try:
         check("RI2x root query retires a deleted note's index row", r.returncode == 0 and "gone-fixture" not in r.stdout
               and "vvreadout-root-fixture" in r.stdout, (r.stdout + r.stderr)[:300])
         r = vv("board", "Sub", "type=vvreadout-fixture", env=ienv)
-        check("RI2c control: a real subfolder still filters", r.returncode == 0 and "sub-fixture" in r.stdout
+        check("RI2c a real subfolder still filters (control)", r.returncode == 0 and "sub-fixture" in r.stdout
               and "vvreadout-root-fixture" not in r.stdout, (r.stdout + r.stderr)[:300])
-        r = vv("props", "type", "Sub/sub-fixture.md", env=ienv)
-        check("RI2f props with a FILE scope is refused, not a silent zero", r.returncode == 1
-              and r.stderr.startswith("not-found: no such folder"), r.stdout + r.stderr)
+        for label, runner in (("python", lambda *a: vv(*a, env=ienv)),
+                              ("native", lambda *a: subprocess.run([VRUST, *a], capture_output=True, text=True,
+                                                                   env=dict(os.environ, VV_VAULT=TV)))):
+            if label == "native" and not os.path.exists(VRUST):
+                continue
+            r = runner("props", "type", "Sub/sub-fixture.md")
+            check(f"RI2f {label} props with a FILE scope is refused, not a silent zero", r.returncode == 1
+                  and r.stderr.startswith("not-found: no such folder"), r.stdout + r.stderr)
+            r = runner("orphans", "NoSuchFolder")
+            check(f"RI2n {label} orphans on a missing folder is refused, not a clean zero", r.returncode == 1
+                  and r.stderr.startswith("not-found: no such folder"), r.stdout + r.stderr)
+        os.symlink(os.path.join(TV, "Sub"), os.path.join(TV, "Link"))
+        for label, runner in (("python", lambda *a: vv(*a, env=ienv)),
+                              ("native", lambda *a: subprocess.run([VRUST, *a], capture_output=True, text=True,
+                                                                   env=dict(os.environ, VV_VAULT=TV)))):
+            if label == "native" and not os.path.exists(VRUST):
+                continue
+            r = runner("orphans", "Link")
+            check(f"RI2s {label} orphans through an in-vault symlink resolves the folder (was 0)",
+                  r.returncode == 0 and "sub-fixture" in r.stdout, (r.stdout + r.stderr)[:300])
         # generated dir parity: graphify-out/ is excluded by the index; the
         # walk and the native engine must exclude it too (three seats, round 3)
         for label, runner in (("indexed", lambda *a: vv(*a, env=ienv)),
@@ -201,7 +222,7 @@ try:
             if label == "native" and not os.path.exists(VRUST):
                 continue
             r = runner("orphans", "Sub/..")
-            check(f"RI2d {label} orphans Sub/.. resolves to the root", r.returncode == 0
+            check(f"RI2d {label} orphans Sub/.. resolves to the root" + (" (control)" if label == "python" else ""), r.returncode == 0
                   and "vvreadout-root-fixture" in r.stdout and "(0 orphans" not in r.stdout, (r.stdout + r.stderr)[:300])
     finally:
         pass   # TV is in _TMP; removed at exit
@@ -270,6 +291,10 @@ try:
         {"kind": "adjudication", "op": "head", "args": ["U.md"], "who": "sure", "reason": "?"},
         # a ruling made under an older harness: honoured but labelled
         {"kind": "adjudication", "hv": HARNESS_VERSION - 1, "op": "tags", "who": "vv-correct", "reason": "old instrument"},
+        # a disagreement whose only ruling has a valid `who` but NO reason
+        dict(base, op="show", args=["N.md"], legacy_ms=5.0, legacy_bytes=0, legacy_exit=0,
+             verdict="differ", vv_only=["n"], legacy_only=[]),
+        {"kind": "adjudication", "op": "show", "args": ["N.md"], "who": "vv-correct"},
     ]
     def write_sink(rs):
         with open(sink, "w") as f:
@@ -300,24 +325,26 @@ try:
     check("R5b grep exit 2 counted as a harness error", "harness errors: 3" in out and "[links] A.md legacy_exit=2" in out, out)
     check("R5c harness error not listed as a disagreement", "[links]" not in out.split("disagreements:")[-1], out)
     check("R5d grep exit 1 is an answer: scored, not a harness error",
-          "paired reads: 9" in out and "[backlinks] Z.md → vv-superset" in out, out)
+          "paired reads: 10" in out and "[backlinks] Z.md → vv-superset" in out, out)
     check("R5e byte totals exclude the failed pair on BOTH sides",
-          "vv 900 B vs old way 1,900 B" in out, out)
-    check("R5g funnel shows the split", "reads=12 -> scored=9" in out, out)
+          "vv 1,000 B vs old way 1,900 B" in out, out)
+    check("R5g funnel shows the split (unscored is paired, not scored)", "reads=13 -> scored=9" in out, out)
+    check("R5p unscored rows leave the quality column", "1 unscored" in out and "0/0 agree" not in out, out)
     check("R5k stale legacy-error verdict on a grep exit 1 is not a harness error and not a measured difference",
           "unscored: 1" in out and "[backlinks] R1.md" in out.split("unscored:")[1].split("\n\n")[0]
           and "R1.md → legacy-error" not in out and "harness errors: 3" in out, out)
     check("R6o unknown `who` does not adjudicate", "[head] U.md → differ  (UNADJUDICATED)" in out, out)
+    check("R6q a ruling without a reason does not adjudicate", "[show] N.md → differ  (UNADJUDICATED)" in out, out)
     check("R5i older-harness record set aside, not pooled (control: pre-existing)",
           "set aside 1 record(s)" in out and "Old.md" not in out and "9,999" not in out, out)
     check("R5j report prints the override banner", "VV_SHADOW_SINK override" in out, out)
     check("R6d exact ruling labelled as a case ruling", "E.md → differ  (both-defensible, case ruling)" in out, out)
     check("R6e op-level ruling labelled as reused", "A.md → differ  (vv-correct, op-level ruling reused)" in out, out)
     check("R6f only the unknown-`who` case is left unadjudicated",
-          out.count("UNADJUDICATED") == 3 and "2 disagreement(s) UNADJUDICATED" in out, out)
+          out.count("UNADJUDICATED") == 4 and "3 disagreement(s) UNADJUDICATED" in out, out)
     check("R6i malformed adjudication row skipped, not fatal (control)", "Traceback" not in out, out)
     check("R6m case-only ruling closes its case", "[props] status → differ  (vv-correct, case ruling)" in out, out)
-    check("R6p repeated disagreement counted once as a case", "disagreements: 7 (6 distinct cases)" in out, out)
+    check("R6p repeated disagreement counted once as a case", "disagreements: 8 (7 distinct cases)" in out, out)
     check("R5l unbuildable args on a grep analog: exit 1 still scored", "[props]  → differ" in out, out)
     check("R5m unbuildable args on a strict analog: exit 1 is a harness error", "[head]  legacy_exit=1" in out, out)
     check("R5n builder-less op with a stray exit: harness error", "[deadends]  legacy_exit=2" in out, out)
@@ -331,8 +358,8 @@ try:
     r = run(SHADOW_REPORT, "2026-09-01", "2026-09-01", env=env)
     out = r.stdout + r.stderr
     check("R5f control: same record with exit 0 IS a disagreement",
-          "harness errors: 2" in out and "[links] A.md → vv-superset" in out and "paired reads: 10" in out
-          and "vv 1,000 B vs old way 2,400 B" in out, out)
+          "harness errors: 2" in out and "[links] A.md → vv-superset" in out and "paired reads: 11" in out
+          and "vv 1,100 B vs old way 2,400 B" in out, out)
     # a ruling made under an older harness is honoured but labelled
     rows.append(dict(base, op="tags", args=[], legacy_ms=10.0, legacy_bytes=10, legacy_exit=0,
                      verdict="differ", vv_only=["t"], legacy_only=[]))
@@ -384,27 +411,24 @@ try:
           r.stderr[-200:] + str(rec))
 finally:
     def set_aside_fixture():
-        """Move the test fixture out of SB; never into or through a symlink.
-        SB-failed-fixture is a name this suite owns: it holds only the previous
-        failing run's fixture and is replaced, never set aside."""
-        aside = SB + "-failed-fixture"
-        if os.path.islink(aside):
-            os.unlink(aside)
-        shutil.rmtree(aside, ignore_errors=True)
-        if os.path.exists(aside):        # rmtree failed silently: refuse to move onto it
-            raise RuntimeError(f"cannot clear {aside}")
+        """Move the test fixture out of SB — OUTSIDE the vault (a leftover
+        inside the vault is git-visible to its auto-commit; security seat,
+        round 7). Never into or through a symlink."""
+        hold = os.path.expanduser("~/.cache/vv/test-holding")
+        os.makedirs(hold, exist_ok=True)
+        aside = os.path.join(tempfile.mkdtemp(prefix="vv-failed-fixture-", dir=hold), "vvreadout")
         shutil.move(SB, aside)
+        print(f"note: failed fixture kept at {aside} for inspection")
     try:
         if not fails:
             shutil.rmtree(SB, ignore_errors=True)
-        else:
-            print(f"note: fixture kept at {SB}-failed-fixture for inspection")
         if os.path.lexists(SB):
             # Never move the original INTO a leftover dir (POSIX move nests it
             # as SB/vvreadout — buddy seat, round 3). Set the leftover aside.
             set_aside_fixture()
     except Exception as e:                                             # noqa: BLE001
-        print(f"note: fixture teardown failed ({e}); restoring the original regardless")
+        print(f"FAIL teardown: fixture set-aside failed ({e}); restoring the original regardless")
+        fails.append("teardown")        # never a green exit with a displaced original
     if _kept:
         if os.path.lexists(SB):
             print(f"note: {SB} still present; original left at {_kept}")

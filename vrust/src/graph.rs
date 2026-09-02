@@ -525,9 +525,27 @@ fn cmd_orphans(folder: &str, vault: &Path, t0: Instant) -> Outcome {
         {
             return Outcome::Fallback;
         }
-        match readpath::contain(vault, folder) {
-            Some(p) => p.components().collect(),
+        // Resolve like python's _scope: canonicalize, strip the canonical vault,
+        // re-join onto `vault` so the prefix matches walk_ex's own paths. An
+        // in-vault symlinked folder used to answer a silent 0 natively while
+        // python answered correctly (two seats, round 7). A missing folder is
+        // python's `not-found` to print.
+        let joined = match readpath::contain(vault, folder) {
+            Some(p) => p,
             None => return Outcome::Fallback,
+        };
+        if !joined.is_dir() {
+            return Outcome::Fallback;
+        }
+        match (fs::canonicalize(&joined), fs::canonicalize(vault)) {
+            (Ok(real), Ok(vreal)) => match real.strip_prefix(&vreal) {
+                // an empty rel is the root itself: never vault.join("") (a
+                // trailing separator that no walked path shares)
+                Ok(rel) if rel.as_os_str().is_empty() => vault.to_path_buf(),
+                Ok(rel) => vault.join(rel),
+                Err(_) => return Outcome::Fallback,
+            },
+            _ => return Outcome::Fallback,
         }
     };
     let mut files = Vec::new();

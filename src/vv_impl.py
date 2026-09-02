@@ -707,13 +707,30 @@ def cmd_links(ref):
             seen.append(t)
     _list_out([{"path": l} for l in seen], len(seen), "links", cmd="links")
 
+def _scope(folder):
+    """The resolved, vault-relative scope of a folder argument — "" for the
+    vault root. One rule for board/props/orphans (the engines drifted three
+    times on it in one review, 2026-09-02):
+      * contained (an escape dies here), and must be a directory (a FILE as a
+        sync scope retired that file's own index row);
+      * resolved, not lexical: `<in-vault symlink>/..` relpaths to "."
+        lexically while its real root is a subfolder; an in-vault symlink
+        resolves to its real folder;
+      * "." (the root) is "" — no indexed path starts with "./", and a "."
+        SYNC scope matched nothing, reparsed every note per call and never
+        retired rows."""
+    if not folder:
+        return ""
+    root = contain(folder)
+    if not os.path.isdir(root):
+        die(f"not-found: no such folder: {folder}")
+    rel_ = os.path.relpath(os.path.realpath(root), _VAULT_REAL)
+    return "" if rel_ == "." else rel_
+
 def cmd_orphans(folder=""):
-    # Resolved like board/props (contain(".") is "<vault>/." and no walked path
-    # starts with "<vault>/./"; an in-vault symlink resolves to its real
-    # folder), then re-joined onto VAULT so the prefix compares against the
-    # walk's own absolute paths even when VAULT itself is a symlink.
-    root = (os.path.normpath(os.path.join(VAULT, os.path.relpath(os.path.realpath(contain(folder)), _VAULT_REAL)))
-            if folder else VAULT)
+    # re-joined onto VAULT so the prefix compares against the walk's own
+    # absolute paths even when VAULT itself is a symlink
+    root = os.path.normpath(os.path.join(VAULT, _scope(folder))) if folder else VAULT
     files = list(md_files())
     idx = basename_index()
     # a note is linked if ANY note resolves a link to it — using the SAME winner
@@ -762,28 +779,16 @@ def cmd_board(folder, *filters):
         die(f"usage: board filters are KEY=VALUE, got {shlex.quote(bad[0])} — "
             f"next: vv board {shlex.quote(folder)} {shlex.quote(bad[0] + '=VALUE')}")
     want = dict(f.split("=", 1) for f in filters)
-    # Same containment as every other path argument: `board ../x` must not
-    # walk frontmatter outside the vault (security seat, 2026-09-02).
-    root = contain(folder)
-    if not os.path.isdir(root):
-        die(f"not-found: no such folder: {folder}")
-    rows = []
-    # Resolved, not lexical: `<in-vault symlink>/..` relpaths to "." lexically
-    # while its real root is a subfolder (security seat, round 3).
-    rroot0 = os.path.relpath(os.path.realpath(root), _VAULT_REAL)
-    # relpath of the vault root is "." — no indexed path starts with "./", so
     # `board .` / `board ""` returned ZERO rows on the indexed path while the
     # walk and the native engine returned every note (third-model seat,
-    # 2026-09-02). A "." SCOPE is equally wrong for the sync itself: the
-    # freshness query would match nothing, reparse every note each call, and
-    # never retire rows an earlier scoped call inserted — so the root syncs
-    # unscoped (independent secondary review, round 3).
-    at_root = rroot0 == "."
-    h = index_handle(scope=None if at_root else rroot0)
+    # 2026-09-02) — see _scope for the rule that fixed it for every sibling.
+    rroot = _scope(folder or ".")
+    root = os.path.join(VAULT, rroot) if rroot else VAULT
+    rows = []
+    h = index_handle(scope=rroot or None)
     if h is not None:
-        rroot = rroot0
         for rp, props in h.props():
-            if not at_root and not (rp == rroot or rp.startswith(rroot + os.sep)):
+            if rroot and not (rp == rroot or rp.startswith(rroot + os.sep)):
                 continue
             if all(props.get(k) == v for k, v in want.items()):
                 rows.append((os.path.basename(rp)[:-3], props.get("status", "-"),
@@ -827,15 +832,7 @@ def cmd_tags(*args):
               fmt=(lambda r: f"{r['count']}\t{r['tag']}") if counted else (lambda r: r["tag"]))
 
 def cmd_props(key, folder=""):
-    root = contain(folder) if folder else VAULT
-    if folder and not os.path.isdir(root):
-        # A FILE as the sync scope retired that file's own index row (the
-        # scoped stat-walk of a file yields nothing, so the row looked gone);
-        # board already refused, props did not (security seat, 2026-09-02).
-        die(f"not-found: no such folder: {folder}")
-    rroot = os.path.relpath(os.path.realpath(root), _VAULT_REAL) if folder else ""
-    if rroot == ".":
-        rroot = ""              # `props KEY .` is the vault root: unscoped sync, no prefix filter
+    rroot = _scope(folder)      # "" = whole vault; a FILE or a missing folder dies here
     from collections import Counter
     c = Counter()
     h = index_handle(scope=rroot or None)
@@ -843,9 +840,6 @@ def cmd_props(key, folder=""):
         (rel(p), fm_props(split_fm(open(p, errors="replace").read())[0]))
         for p in sorted(md_files()))
     for rp, props in rows:
-        # (the "." case is normalised to "" above — the same defect `board`
-        # had: relpath gives "." and no indexed path starts with "./";
-        # standards seat, 2026-09-02)
         if rroot and not (rp == rroot or rp.startswith(rroot + os.sep)):
             continue
         v = props.get(key)

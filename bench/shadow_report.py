@@ -12,9 +12,9 @@ Answers the three questions the 2026-09-02 checkpoint has to close on:
 import collections, json, os, statistics, sys
 
 SINK = os.environ.get("VV_SHADOW_SINK") or os.path.expanduser("~/.claude/metrics/vv-shadow.jsonl")
-RULINGS = ("vv-correct", "legacy-correct", "both-defensible", "unresolved")
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import sweepguard as sg
+from shadow import RULINGS   # one source for the four ruling values
 if os.environ.get("VV_SHADOW_SINK"):
     print(f"shadow: sink {SINK} (VV_SHADOW_SINK override)", file=sys.stderr)
 
@@ -112,7 +112,8 @@ def main():
             # would bias the read-out against vv (3 such pairs on 2026-09-02).
             herr.append(r)
             continue
-        funnel.bump("scored")
+        if r.get("verdict") != "unscored":
+            funnel.bump("scored")    # an unscored pair is paired (bytes count) but not scored
         reads.append(r)
     funnel.report()
     if stale:
@@ -144,10 +145,13 @@ def main():
         lm = statistics.median([r["legacy_ms"] for r in paired])
         lb = statistics.median([r["legacy_bytes"] for r in paired])
         tot_lg_b += sum(r["legacy_bytes"] for r in paired)
-        v = collections.Counter(r["verdict"] for r in paired)
-        q = f"{v['match']}/{len(paired)} agree"
-        if v["match"] < len(paired):
-            q += f" · {len(paired) - v['match']} differ"
+        scored = [r for r in paired if r.get("verdict") != "unscored"]
+        v = collections.Counter(r["verdict"] for r in scored)
+        q = f"{v['match']}/{len(scored)} agree"
+        if v["match"] < len(scored):
+            q += f" · {len(scored) - v['match']} differ"
+        if len(scored) < len(paired):
+            q += f" · {len(paired) - len(scored)} unscored"
         print(f"{op:<11}{len(rs):>4}{vm:>8.0f}{lm:>9.0f}{lm / max(vm, .01):>6.0f}x"
               f"{vb:>9.0f}{lb:>10.0f}{lb / max(vb, 1):>7.0f}x  {q}")
 

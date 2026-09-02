@@ -132,10 +132,7 @@ fn scan_fm_parallel(files: &[PathBuf]) -> Result<Vec<HashMap<String, String>>, (
     Ok(result)
 }
 
-// python's SKIP_DIRS (src/vv_impl.py). Every member but graphify-out is a
-// dot-dir, which walk_board already skips; the list is mirrored whole so a
-// future non-dot member cannot drift the engines apart.
-const SKIP_DIRS: [&str; 5] = [".git", ".obsidian", ".claude", ".trash", "graphify-out"];
+use crate::SKIP_DIRS; // one mirror of python's list, shared with walk_ex
 
 // ---------- board: exactly cmd_board's live os.walk — dot-dirs + SKIP_DIRS ----------
 fn walk_board(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -326,21 +323,15 @@ fn cmd_props(args: &[String], vault: &Path, t0: Instant) -> Outcome {
     let key = &args[0];
     let folder = args.get(1).cloned().unwrap_or_default();
     let root: PathBuf = if !folder.is_empty() {
-        let full = vault.join(&folder);
-        // contain(): realpath-resolve and require it stays under the vault.
-        // Unlike python's realpath (which needs no existence), fs::canonicalize
-        // requires the path to exist — a nonexistent folder Falls back here
-        // where python would silently print "(0 notes with KEY)"; documented
-        // as a deliberately conservative (never-wrong) divergence.
-        let real = match fs::canonicalize(&full) {
-            Ok(r) => r,
-            Err(_) => return Outcome::Fallback,
+        // readpath::contain is the one native containment rule (a missing or
+        // escaping folder falls back; python emits the canonical text). A FILE
+        // scope falls back too: python refuses it since 2026-09-02 (it used to
+        // retire that file's own index row) — parity with board.
+        let full = match readpath::contain(vault, &folder) {
+            Some(p) => p,
+            None => return Outcome::Fallback,
         };
-        let vreal = match fs::canonicalize(vault) {
-            Ok(r) => r,
-            Err(_) => return Outcome::Fallback,
-        };
-        if !(real == vreal || real.starts_with(&vreal)) {
+        if !full.is_dir() {
             return Outcome::Fallback;
         }
         full

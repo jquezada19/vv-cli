@@ -52,6 +52,8 @@ if os.environ.get("VV_SHADOW_SINK"):
 # confident "disagreement" the harness had manufactured.
 HARNESS_VERSION = 4
 
+RULINGS = ("vv-correct", "legacy-correct", "both-defensible", "unresolved")
+
 WRITE_VERBS = {"set", "unset", "append", "appendsec", "patch", "daily-append",
                "rename", "move", "new", "index", "doctor"}
 
@@ -256,7 +258,7 @@ def adjudicate(argv):
         sys.exit("usage: shadow.py --adjudicate <op> <vv-correct|legacy-correct|"
                  "both-defensible|unresolved> <reason...> [-- <args...>]")
     op, who, reason = argv[0], argv[1], " ".join(argv[2:])
-    if who not in ("vv-correct", "legacy-correct", "both-defensible", "unresolved"):
+    if who not in RULINGS:
         sys.exit(f"shadow: unknown adjudication {who!r}")
     rec = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S"), "kind": "adjudication",
            "hv": HARNESS_VERSION, "op": op, "who": who, "reason": reason}
