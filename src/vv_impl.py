@@ -726,6 +726,8 @@ def _scope(folder):
         return ""
     root = contain(folder)
     if not os.path.isdir(root):
+        if os.path.exists(root):
+            die(f"not-found: {folder} is a file, not a folder — next: vv outline {folder}")
         die(f"not-found: no such folder: {folder}")
     rel_ = os.path.relpath(os.path.realpath(root), _VAULT_REAL)
     return "" if rel_ == "." else rel_
@@ -734,11 +736,12 @@ def cmd_orphans(folder=""):
     # re-joined onto VAULT so the prefix compares against the walk's own
     # absolute paths even when VAULT itself is a symlink (same form as board)
     rroot = _scope(folder)
-    top = rroot.split(os.sep, 1)[0]
-    if top.startswith(".") or top in SKIP_DIRS:
-        # Notes under a skip dir are outside the link graph, so "orphans of
+    if any(c.startswith(".") or c in SKIP_DIRS for c in rroot.split(os.sep) if c):
+        # Notes under a skip dir — at ANY depth, since the walk prunes by name
+        # at every level — are outside the link graph, so "orphans of
         # graphify-out" has no answer. It used to print a silent `(0 orphans)`
-        # — the affordance class this branch closes.
+        # — the affordance class this branch closes. The check runs on the
+        # RESOLVED scope (a `..` or a symlink cannot dodge it).
         # board/props DO answer for an explicitly named skip dir.
         die(f"refused: {folder} is outside the link graph (a skip dir) — next: vv board {folder}")
     root = os.path.join(VAULT, rroot) if rroot else VAULT
@@ -2319,9 +2322,10 @@ CMDS = {
 # day's own probing) — counts over the pilot register's INTERACTIVE rows, i.e.
 # after its contamination filter removed the 1,938 machine-paced/synthetic
 # rows of the 2026-08-27 bursts (383 of them post-stamping and unmarked; the
-# raw sink is 159 reads higher;
-# re-derive with `bench/pilot_report.py --since
-# 2026-08-26T21:06 --until 2026-09-02T10:00`). The honest next step is the
+# raw sink is 159 reads higher; `bench/pilot_report.py --since
+# 2026-08-26T21:06 --until 2026-09-02T10:00` re-derives the 228, and the 9 is
+# the op=read, kind=usage rows in that window — the report aggregates error
+# kinds across ops). The honest next step is the
 # outline — with the note the caller already named.
 def _next_read(args):
     if args:

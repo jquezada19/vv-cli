@@ -41,8 +41,8 @@ VV = os.path.join(REPO, "src/vv.py")
 TIMEOUT = int(os.environ.get("TORTURE_TIMEOUT", "60"))
 rng = random.Random(int(os.environ.get("SEED", "4242")))
 
-# Redirected HOME: the native engine derives its cache path from HOME (it also
-# honours VV_INDEX_ROOT since 2026-09-02, and python always did), so HOME is
+# Redirected HOME: the native engine derives its cache path from HOME (both
+# engines also honour VV_INDEX_ROOT), so HOME is
 # the one knob that keeps both engines off the runner's real ~/.cache/vv
 # without setting VV_INDEX_ROOT — which is deliberately NOT set, because it
 # re-enables python's SQLite index in CAS-fallback children, a path production

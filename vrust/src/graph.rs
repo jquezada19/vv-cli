@@ -527,20 +527,32 @@ fn cmd_orphans(folder: &str, vault: &Path, t0: Instant) -> Outcome {
         if !joined.is_dir() {
             return Outcome::Fallback;
         }
-        // a skip dir named as the scope is python's refusal to print.
+        // Resolve first, then test every component of the RESOLVED rel against
+        // the skip list — python refuses a skip dir at any depth, reached by
+        // any spelling (`Sub/../graphify-out`, a symlink named otherwise), and
+        // that refusal is python's to print. readpath::contain is the one
+        // containment RULE; orphans additionally re-joins the canonical rel
+        // onto `vault` because it prefix-compares against walk_ex's paths.
         // yagni: needed for parity, not defence — walk_ex prunes skip dirs by
         // child name, so the root itself would be walked; drop only if walk_ex
         // ever rejects a skip-dir root.
-        let top = folder.split('/').find(|s| !s.is_empty() && *s != ".").unwrap_or("");
-        if top.starts_with('.') || crate::SKIP_DIRS.contains(&top) {
-            return Outcome::Fallback;
-        }
         match (fs::canonicalize(&joined), fs::canonicalize(vault)) {
             (Ok(real), Ok(vreal)) => match real.strip_prefix(&vreal) {
-                // an empty rel is the root itself: never vault.join("") (a
-                // trailing separator that no walked path shares)
-                Ok(rel) if rel.as_os_str().is_empty() => vault.to_path_buf(),
-                Ok(rel) => vault.join(rel),
+                Ok(rel) => {
+                    let skipped = rel.components().any(|c| match c {
+                        std::path::Component::Normal(n) => {
+                            let n = n.to_string_lossy();
+                            n.starts_with('.') || crate::SKIP_DIRS.contains(&n.as_ref())
+                        }
+                        _ => false,
+                    });
+                    if skipped {
+                        return Outcome::Fallback;
+                    }
+                    // an empty rel is the root itself: never vault.join("") (a
+                    // trailing separator that no walked path shares)
+                    if rel.as_os_str().is_empty() { vault.to_path_buf() } else { vault.join(rel) }
+                }
                 Err(_) => return Outcome::Fallback,
             },
             _ => return Outcome::Fallback,

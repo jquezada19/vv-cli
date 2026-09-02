@@ -167,7 +167,8 @@ fn cmd_board(args: &[String], vault: &Path, t0: Instant) -> Outcome {
     // Containment parity with python's contain(): a folder that canonicalizes
     // outside the vault (absolute, `..`, or a symlink out) is python's
     // "escape:" refusal — never served natively. readpath::contain is the one
-    // native definition of "inside the vault" and also yields the root.
+    // native containment RULE and also yields the root (orphans re-joins the
+    // canonical rel onto the vault on top of it, for its prefix compare).
     // yagni: kept native so `board` keeps its fast path; drop to python-only
     // if board ever falls back for another reason anyway.
     let root = match readpath::contain(vault, folder) {
@@ -325,8 +326,8 @@ fn cmd_props(args: &[String], vault: &Path, t0: Instant) -> Outcome {
     let root: PathBuf = if !folder.is_empty() {
         // readpath::contain is the one native containment rule (a missing or
         // escaping folder falls back; python emits the canonical text). A FILE
-        // scope falls back too: python refuses it since 2026-09-02 (it used to
-        // retire that file's own index row) — parity with board.
+        // scope falls back too: python refuses it (a file as a sync scope used
+        // to retire that file's own index row) — parity with board.
         let full = match readpath::contain(vault, &folder) {
             Some(p) => p,
             None => return Outcome::Fallback,

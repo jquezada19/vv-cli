@@ -162,6 +162,10 @@ try:
         f.write("---\ntype: vvreadout-fixture\n---\n# sub\n")
     with open(os.path.join(TV, "graphify-out", "vvreadout-gen-fixture.md"), "w") as f:
         f.write("---\ntype: vvreadout-fixture\n---\n# gen\n")
+    os.symlink(os.path.join(TV, "graphify-out"), os.path.join(TV, "GLink"))   # a skip dir by another name
+    os.makedirs(os.path.join(TV, "Sub", "graphify-out"))                        # a NESTED skip dir
+    with open(os.path.join(TV, "Sub", "graphify-out", "nested-gen.md"), "w") as f:
+        f.write("---\ntype: vvreadout-fixture\n---\n# nested gen\n")
     try:
         ienv = {"VV_ENGINE": "python", "VV_INDEX_ROOT": mkdtemp("vv-readout-index-"), "VV_VAULT": TV}
         native_env = dict(os.environ, VV_VAULT=TV, VV_INDEX_ROOT=ienv["VV_INDEX_ROOT"])  # native cache in the temp dir too
@@ -194,8 +198,8 @@ try:
             if label == "native" and not native_available():
                 continue
             r = runner("props", "type", "Sub/sub-fixture.md")
-            check(f"RI2f {label} props with a FILE scope is refused, not a silent zero" + (" (control: python pre-existed)" if label == "python" else ""), r.returncode == 1
-                  and r.stderr.startswith("not-found: no such folder"), r.stdout + r.stderr)
+            check(f"RI2f {label} props with a FILE scope is refused, naming the file/folder mismatch with a next-step", r.returncode == 1
+                  and r.stderr.startswith("not-found: Sub/sub-fixture.md is a file, not a folder — next: vv outline"), r.stdout + r.stderr)
             r = runner("orphans", "NoSuchFolder")
             check(f"RI2n {label} orphans on a missing folder is refused, not a clean zero", r.returncode == 1
                   and r.stderr.startswith("not-found: no such folder"), r.stdout + r.stderr)
@@ -205,7 +209,8 @@ try:
         if native_available():
             subprocess.run([VRUST, "backlinks", "vvreadout-root-fixture"], capture_output=True, text=True, env=native_env)
             idx_files = [f for f in os.listdir(ienv["VV_INDEX_ROOT"]) if f.endswith(".vvidx")]
-            check("RI2i native cache lands in VV_INDEX_ROOT", bool(idx_files), os.listdir(ienv["VV_INDEX_ROOT"])[:5])
+            check("RI2i native cache lands in VV_INDEX_ROOT under the name _cache_key derives (RI2l's positive control)",
+                  _cache_key(TV) in idx_files, (idx_files[:3], _cache_key(TV)))
             noidx = mkdtemp("vv-readout-noidx-")
             r = subprocess.run([VRUST, "backlinks", "vvreadout-root-fixture"], capture_output=True, text=True,
                                env=dict(native_env, VV_INDEX_ROOT=noidx, VV_NO_INDEX="1"))
@@ -284,10 +289,11 @@ try:
                               ("native", lambda *a: subprocess.run([VRUST, *a], capture_output=True, text=True, env=native_env))):
             if label == "native" and not native_available():
                 continue
-            r = runner("orphans", "graphify-out")
-            check(f"RI2k {label} orphans on a named skip dir refuses with a next-step (was a silent 0)",
-                  r.returncode == 1 and r.stderr.startswith("refused: graphify-out is outside the link graph")
-                  and "next: vv board graphify-out" in r.stderr, (r.stdout + r.stderr)[:200])
+            for spelling in ("graphify-out", "Sub/../graphify-out", "GLink", "Sub/graphify-out"):
+                r = runner("orphans", spelling)
+                check(f"RI2k {label} orphans {spelling!r} (a skip dir, resolved, at any depth) refuses with a next-step (was a silent 0)",
+                      r.returncode == 1 and r.stderr.startswith(f"refused: {spelling} is outside the link graph")
+                      and f"next: vv board {spelling}" in r.stderr, (r.stdout + r.stderr)[:200])
         # a RELATIVE VV_VAULT of "." (cd into the vault): python's normpath keeps
         # ".", the native lexical normalise once yielded "" and every raw walk
         # read_dir("") answered a silent zero
