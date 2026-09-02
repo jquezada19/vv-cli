@@ -243,9 +243,9 @@ def adjudicate(argv):
     not assumed in either direction.
     """
     # `-- <args...>` scopes the ruling to one (op, args) case. Without it the
-    # ruling is op-level, which the report honours but labels as reused: the
-    # 2026-09-02 read-out found op-keyed rulings silently covering every case
-    # of that op, so a second disagreement never looked unadjudicated.
+    # ruling is op-level, which the report honours but labels as reused: an
+    # op-keyed ruling silently covers every case of that op, so a second
+    # disagreement never looks unadjudicated unless the reuse is visible.
     case_args = None
     if argv.count("--") > 1:
         sys.exit("shadow: more than one `--` — the reason and the case args are ambiguous")

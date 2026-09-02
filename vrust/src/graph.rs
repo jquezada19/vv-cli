@@ -527,15 +527,12 @@ fn cmd_orphans(folder: &str, vault: &Path, t0: Instant) -> Outcome {
         if !joined.is_dir() {
             return Outcome::Fallback;
         }
-        // a skip dir named as the scope is python's refusal to print
-        let top = Path::new(folder)
-            .components()
-            .find_map(|c| match c {
-                std::path::Component::Normal(n) => Some(n.to_string_lossy().into_owned()),
-                _ => None,
-            })
-            .unwrap_or_default();
-        if top.starts_with('.') || crate::SKIP_DIRS.contains(&top.as_str()) {
+        // a skip dir named as the scope is python's refusal to print.
+        // yagni: needed for parity, not defence — walk_ex prunes skip dirs by
+        // child name, so the root itself would be walked; drop only if walk_ex
+        // ever rejects a skip-dir root.
+        let top = folder.split('/').find(|s| !s.is_empty() && *s != ".").unwrap_or("");
+        if top.starts_with('.') || crate::SKIP_DIRS.contains(&top) {
             return Outcome::Fallback;
         }
         match (fs::canonicalize(&joined), fs::canonicalize(vault)) {

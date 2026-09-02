@@ -42,11 +42,7 @@ def _harness_error(r):
         return True          # a vv-only op never ran a legacy command; a non-zero exit is a harness fault
     # Every analog's argv[0] is a constant independent of args, so a
     # placeholder recovers it whatever the recorded args were (or weren't).
-    try:
-        argv = build(["_"])
-    except Exception:                                                 # noqa: BLE001
-        argv = ["?"]
-    return legacy_failed(argv, rc)
+    return legacy_failed(build(["_"]), rc)
 
 
 def main():

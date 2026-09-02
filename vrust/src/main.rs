@@ -47,7 +47,9 @@ fn normpath(p: &Path) -> PathBuf {
         }
     }
     if out.is_empty() {
-        return PathBuf::from("."); // python: normpath(".") == normpath("Sub/..") == "." — never ""
+        // python: normpath(".") == normpath("Sub/..") == "." — never "".
+        // yagni: parity, not defence; drop only if no raw walk consumes vault().
+        return PathBuf::from(".");
     }
     out.iter().collect()
 }
