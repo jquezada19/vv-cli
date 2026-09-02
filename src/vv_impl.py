@@ -2313,8 +2313,9 @@ CMDS = {
 }
 
 # Per-command "next" for an arity miss. The generic pointer (the no-args usage
-# line) is right and unhelpful: `read NOTE` with no section was 9 of 228 read
-# calls at the moment of the 2026-09-02 pilot read-out (8 of 226 before that
+# line) is right and unhelpful: `read` arity misses (no note, or a note with
+# no section — the sink cannot tell the two apart) were 9 of 228 read calls
+# at the moment of the 2026-09-02 pilot read-out (8 of 226 before that
 # day's own probing) — counts over the pilot register's INTERACTIVE rows, i.e.
 # after its contamination filter removed the 1,938 machine-paced/synthetic
 # rows of the 2026-08-27 bursts (383 of them post-stamping and unmarked; the

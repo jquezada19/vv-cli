@@ -12,7 +12,8 @@ Version to be set by the release commit. Note for that decision: the
 **Exit-code change** below moves two invocations from exit 0 to exit 1,
 which breaks a script that tested for success — a MAJOR change under this
 file's header (exit codes are part of the CLI surface; an exit-code change
-counts alongside "output unparseable").
+counts alongside "output unparseable"), i.e. 2.0.0 unless the release commit
+decides otherwise.
 
 Follow-ups from the shadow-pilot read-out (window 2026-08-26T21:06 →
 2026-09-02) — the affordance class: vv was right and unhelpful at the same
@@ -32,6 +33,13 @@ time.
   now `usage: board filters are KEY=VALUE …` with a runnable `next:`.
 
 ### Changed
+- Environment contract: `VV_VAULT` is normalised lexically (like
+  `os.path.normpath`) in BOTH engines before use, so a value containing `..`
+  through a symlink names the lexical directory in both — previously python
+  and the native engine could address different vaults. `VV_NO_INDEX` and
+  `VV_INDEX_ROOT` now bind the native engine's link cache too (they were
+  python-only; README documented them without an engine qualifier), and an
+  exported-but-empty value means unset in both engines.
 - `journal` (not a command) now hints `did you mean: doctor` — an alias table
   the edit-distance hint could never reach.
 - `read NOTE` with no section points at `vv outline <that note>` instead of

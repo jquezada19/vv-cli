@@ -19,8 +19,9 @@ R3  `journal` is not a command; one (double-logged) attempt in the week. The typ
     edit-distance only, so `doctor` was never suggested. Alias table.
 R4  `read NOTE` with no section pointed at the generic no-args usage line;
     the honest next step is `vv outline NOTE` — a RUNNABLE command, per the
-    `next:` contract. 9 of 228 read calls at the read-out moment (8 of 226
-    before that day's probing), counted over the register's interactive rows.
+    `next:` contract. Arity misses (no note, or no section — the sink cannot
+    tell them apart) were 9 of 228 read calls at the read-out moment (8 of
+    226 before that day's probing), over the register's interactive rows.
 R5  shadow harness: a legacy one-liner that FAILS is a harness error, never a
     tool disagreement (3 pairs scored vv-superset with legacy_exit=2) — but
     grep's exit 1 is an answer ("no selected lines"), not a failure. Excluded
