@@ -7,6 +7,10 @@ and exit codes. A change that makes existing output unparseable is a major chang
 
 ## [Unreleased]
 
+Version to be set by the release commit. Note for that decision: the
+**Exit-code change** below is a public-API change under this file's own
+header (exit codes are part of the CLI surface).
+
 Follow-ups from the shadow-pilot read-out (window 2026-08-26T21:06 →
 2026-09-02) — the affordance class: vv was right and unhelpful at the same
 time.

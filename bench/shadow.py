@@ -319,8 +319,9 @@ def main():
         except Exception as e:                                        # noqa: BLE001
             # A builder that raises (e.g. a missing positional) is recorded,
             # never a traceback: round 2 called build() a second time OUTSIDE
-            # this try and lost the record — the exact shape this PR exists to
-            # remove (three review seats, 2026-09-02). [verb] keeps the strict
+            # this try and lost the record — the traceback-with-no-row shape the
+            # harness must never produce (three review seats, 2026-09-02).
+            # [verb] keeps the strict
             # exit set, so -1 classifies as legacy-error.
             largv, lg_ms, lg_out, lg_rc = [verb], 0.0, "", -1
             rec["legacy_error"] = str(e)[:120]

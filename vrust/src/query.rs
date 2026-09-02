@@ -279,7 +279,7 @@ fn tag_tokens(s: &str) -> Vec<String> {
 fn cmd_tags(args: &[String], vault: &Path, t0: Instant) -> Outcome {
     let counts_flag = args.iter().any(|a| a == "--counts");
     let mut files = Vec::new();
-    crate::walk_ex(vault, &mut files, false); // matches md_files(): dot-dirs + graphify-out only
+    crate::walk_ex(vault, &mut files, false); // matches md_files(): dot-dirs + SKIP_DIRS
     files.sort_by_key(|p| p.to_string_lossy().into_owned());
     let props_list = match scan_fm_parallel(&files) {
         Ok(v) => v,

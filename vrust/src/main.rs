@@ -25,15 +25,39 @@ mod query;
 mod readpath;
 mod write;
 
+/// python's os.path.normpath, LEXICALLY: drops trailing separators and "."
+/// segments and collapses ".." against the previous segment without touching
+/// the filesystem. components().collect() alone kept ".." — so a VV_VAULT of
+/// "/a/link/../vault" resolved through the symlink natively but lexically in
+/// python, and the two engines could address different vaults (independent
+/// secondary review, round 12).
+fn normpath(p: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out: Vec<Component> = Vec::new();
+    for c in p.components() {
+        match c {
+            Component::CurDir => {}
+            Component::ParentDir => match out.last() {
+                Some(Component::Normal(_)) => {
+                    out.pop();
+                }
+                Some(Component::RootDir) => {}          // "/.." is "/"
+                _ => out.push(c),                       // relative: keep the ".."
+            },
+            other => out.push(other),
+        }
+    }
+    out.iter().collect()
+}
+
 fn vault() -> PathBuf {
-    // components().collect() drops a trailing separator and "." segments the
-    // way python's normpath does at its source: a "…/vault/" VV_VAULT made
+    // Normalised at the source the way python does: a "…/vault/" VV_VAULT made
     // native `orphans .` build a root prefix no walked path shares and answer
     // a silent zero (third-model seat, round 9).
     if let Ok(v) = env::var("VV_VAULT") {
         if !v.is_empty() {
             // python: `or` — empty means default (Codex parity audit)
-            return Path::new(&v).components().collect();
+            return normpath(Path::new(&v));
         }
     }
     let home = env::var("HOME").expect("HOME unset");

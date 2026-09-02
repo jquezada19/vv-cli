@@ -36,10 +36,13 @@ fn cache_path(vault: &Path) -> Option<PathBuf> {
     // root set ⇒ no index) is NOT mirrored: the cache-torture suite relies
     // on a HOME-redirected native cache under exactly that condition.
     // None = live scan, never a wrong answer.
-    if std::env::var_os("VV_NO_INDEX").is_some() {
+    // python: `or` — an exported-but-EMPTY variable means unset (an empty
+    // VV_INDEX_ROOT joined to a relative path dropped the cache into the CWD)
+    let nonempty = |k: &str| std::env::var_os(k).filter(|v| !v.is_empty());
+    if nonempty("VV_NO_INDEX").is_some() {
         return None;
     }
-    let index_root = std::env::var_os("VV_INDEX_ROOT");
+    let index_root = nonempty("VV_INDEX_ROOT");
     let real = fs::canonicalize(vault).ok()?;
     let key = &sha256_hex(real.to_string_lossy().as_bytes())[..16];
     let dir = match index_root {

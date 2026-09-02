@@ -41,11 +41,12 @@ VV = os.path.join(REPO, "src/vv.py")
 TIMEOUT = int(os.environ.get("TORTURE_TIMEOUT", "60"))
 rng = random.Random(int(os.environ.get("SEED", "4242")))
 
-# Redirected HOME: the native engine derives its cache path from HOME and does
-# NOT honor VV_INDEX_ROOT (only src/vv_impl.py does), so HOME is the one knob
-# that keeps both engines off the runner's real ~/.cache/vv. VV_INDEX_ROOT is
-# deliberately NOT set — setting it re-enables python's SQLite index in
-# CAS-fallback children, a path production would not take here.
+# Redirected HOME: the native engine derives its cache path from HOME (it also
+# honours VV_INDEX_ROOT since 2026-09-02, and python always did), so HOME is
+# the one knob that keeps both engines off the runner's real ~/.cache/vv
+# without setting VV_INDEX_ROOT — which is deliberately NOT set, because it
+# re-enables python's SQLite index in CAS-fallback children, a path production
+# would not take here.
 HOME = tempfile.mkdtemp(prefix="vv-torture-home-")
 JR = tempfile.mkdtemp(prefix="vv-torture-journals-")
 

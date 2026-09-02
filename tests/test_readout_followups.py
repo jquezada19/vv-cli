@@ -7,7 +7,7 @@ the same time. Each pin below names what motivated it.
 Window: 2026-08-26T21:06 → 2026-09-02 (the pilot register's window).
 Checks suffixed "(control…)" pass on pre-fix code by design and "(setup)"
 checks only gate what follows; every other check was watched to fail with its
-fix reverted (mutation pass, 2026-09-02).
+fix reverted (mutation pass, 2026-09-02). The suite runs in a throwaway vault.
 
 R1  `board FOLDER status open` (space, not `=`) died as a bare Python
     traceback: exit 1, no usage line, no `next:`, no metrics row. Found by
@@ -33,12 +33,8 @@ R7  the shadow PRODUCER writes `legacy-error` (not a normal verdict) when the
     exit 1 normally — exercised in-process with a stubbed runner.
 RN  the three affordance errors are identical through the native entry.
 """
-import fcntl, io, json, os, shutil, signal, subprocess, sys, tempfile
-signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))   # a SIGTERM runs finally + atexit, even mid-fixture-move
-signal.signal(signal.SIGINT, lambda *_: sys.exit(130))    # so does Ctrl-C (KeyboardInterrupt would skip neither, but be explicit)
+import io, json, os, shutil, subprocess, sys, tempfile
 
-_VAULT = os.environ.get("VV_VAULT") or os.path.expanduser("~/Documents/Obsidian Vault")
-SB = os.path.join(_VAULT, "Sandbox/vvreadout")
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 VV = os.path.join(REPO, "src", "vv.py")
 VRUST = os.path.join(REPO, "vrust", "target", "release", "vrust")
@@ -48,6 +44,16 @@ SHADOW_REPORT = os.path.join(REPO, "bench", "shadow_report.py")
 _TMP = []   # every temp dir this suite makes; removed at exit
 def mkdtemp(prefix):
     d = tempfile.mkdtemp(prefix=prefix); _TMP.append(d); return d
+
+# A THROWAWAY vault. Nothing here asserts anything about real notes — only
+# error grammar and folder scoping — so the suite never touches the user's
+# vault. (Rounds 2-11 of the 2026-09-02 review grew a lock, a sentinel, a
+# holding dir, an exit hook and signal handlers to protect a real-vault
+# fixture; the complexity seat pointed out the hazard was the fixture's
+# location, not its teardown. Deleting the hazard beats guarding it.)
+_VAULT = mkdtemp("vv-readout-vault-")
+os.environ["VV_VAULT"] = _VAULT          # every vv child, and bench/shadow.py at import
+SB = os.path.join(_VAULT, "Sandbox/vvreadout")
 _JR = mkdtemp("vv-test-journals-")
 os.environ["VV_JOURNAL_ROOT"] = _JR
 os.environ.setdefault("VV_NO_METRICS", "1")
@@ -76,54 +82,12 @@ def native_available():
 def vv(*args, env=None, stdin=None):
     return run(VV, *args, env=env, stdin=stdin)
 
-# ---------- fixture (pre-existing content is set aside and RESTORED at exit) ----------
-_kept = None
-# One run at a time per vault: two concurrent runs would each treat the
-# other's fixture as pre-existing user data and shuffle it through the holding
-# dir (third-model seat, round 9). The lock lives beside the holding dir.
-_LOCKDIR = os.path.expanduser("~/.local/state/vv/test-holding")
-try:
-    os.makedirs(_LOCKDIR, exist_ok=True)
-    _lock = open(os.path.join(_LOCKDIR, "readout.lock"), "w")
-except OSError:
-    _lock = open(os.path.join(tempfile.gettempdir(), "vv-readout.lock"), "w")
-fcntl.flock(_lock, fcntl.LOCK_EX)          # blocks until the other run finishes
-SENTINEL = ".vvreadout-fixture"             # marks a dir this suite made; a leftover is ours, not user data
-if os.path.isdir(SB) and os.path.exists(os.path.join(SB, SENTINEL)):
-    shutil.rmtree(SB)
-    print(f"note: removed a leftover fixture at {SB} (sentinel present)")
-if os.path.lexists(SB):                     # even an EMPTY pre-existing dir is the user's
-    # NOT registered in _TMP: the holding dir must outlive the temp sweep so a
-    # failing run can never delete the user's data (security seat, round 2).
-    _hold = os.path.expanduser("~/.local/state/vv/test-holding")   # not the OS-purged temp dir, not the disposable cache
-    try:
-        os.makedirs(_hold, exist_ok=True)
-    except OSError:
-        _hold = None
-    _stale = [d for d in (os.listdir(_hold) if _hold else []) if d.startswith("vv-")]
-    if len(_stale) > 5:
-        print(f"note: {len(_stale)} holding dirs under {_hold} — inspect and delete the ones you no longer need")
-    _kept = os.path.join(tempfile.mkdtemp(prefix="vv-kept-vvreadout-", dir=_hold), "vvreadout")
-    import atexit
-    def _restore_on_exit():
-        # belt-and-braces for an exit that skips the finally (SystemExit from a
-        # signal handler, an exception before the try): if the original is
-        # still set aside and SB is free, put it back. Registered BEFORE the
-        # move so no window exists between the move and the hook.
-        if os.path.lexists(_kept) and not os.path.lexists(SB):
-            shutil.move(_kept, SB)
-            print(f"note: restored pre-existing {SB} at exit")
-    atexit.register(_restore_on_exit)
-    shutil.move(SB, _kept)
-    print(f"note: pre-existing {SB} set aside at {_kept}; restored at exit")
-
 NOTE = "Sandbox/vvreadout/Readout Note.md"
 
 def affordance_checks(tag, runner):
     """The three CLI affordances, through whichever entry `runner` is."""
-    # Sandbox notes are excluded from the index by design (~vv_impl.py:844),
-    # so the root-folder pins below use a fixture OUTSIDE Sandbox on the
-    # indexed arm; see root_checks().
+    # The indexed-arm pins run in their own throwaway vault (the RI block);
+    # these run through whichever entry `runner` is, with the index off.
     r = runner("board", "Sandbox/vvreadout", "status", "open")
     check(f"{tag}1a bad board filter exits 1 (control: pre-fix also 1)", r.returncode == 1, f"rc={r.returncode}")
     check(f"{tag}1b bad board filter is a usage error", r.stderr.startswith("usage: board filters are KEY=VALUE"), r.stderr)
@@ -167,10 +131,7 @@ def root_checks(tag, runner):
     check(f"{tag}4c read NOTE SEC unchanged (control)", r.returncode == 0 and "alpha" in r.stdout, r.stdout + r.stderr)
 
 try:
-    # fixture creation is INSIDE the try so a failure here still restores
-    shutil.rmtree(SB, ignore_errors=True)
     os.makedirs(SB, exist_ok=True)
-    open(os.path.join(SB, SENTINEL), "w").close()
     with open(os.path.join(_VAULT, NOTE), "w") as f:
         f.write("---\ntype: test\nstatus: open\n---\n# Readout Note\n\n## First\n\nalpha\n\n## Second\n\nbeta\n")
     with open(os.path.join(SB, "Closed Note.md"), "w") as f:
@@ -195,6 +156,9 @@ try:
         f.write("---\ntype: vvreadout-fixture\n---\n# gen\n")
     try:
         ienv = {"VV_ENGINE": "python", "VV_INDEX_ROOT": mkdtemp("vv-readout-index-"), "VV_VAULT": TV}
+        native_env = dict(os.environ, VV_VAULT=TV, VV_INDEX_ROOT=ienv["VV_INDEX_ROOT"])  # native cache in the temp dir too
+        real_cache = os.path.expanduser("~/.cache/vv/index")
+        cache_before = set(os.listdir(real_cache)) if os.path.isdir(real_cache) else set()
         r = vv("index", "--rebuild", env=ienv)
         check("RI index built for the indexed-arm pins (setup)", r.returncode == 0, r.stderr[-200:])
         for folder in (".", "", "./"):
@@ -218,7 +182,6 @@ try:
         r = vv("board", "Sub", "type=vvreadout-fixture", env=ienv)
         check("RI2c a real subfolder still filters (control)", r.returncode == 0 and "sub-fixture" in r.stdout
               and "vvreadout-root-fixture" not in r.stdout, (r.stdout + r.stderr)[:300])
-        native_env = dict(os.environ, VV_VAULT=TV, VV_INDEX_ROOT=ienv["VV_INDEX_ROOT"])  # native cache in the temp dir too
         for label, runner in (("python", lambda *a: vv(*a, env=ienv)),
                               ("native", lambda *a: subprocess.run([VRUST, *a], capture_output=True, text=True, env=native_env))):
             if label == "native" and not native_available():
@@ -229,14 +192,32 @@ try:
             r = runner("orphans", "NoSuchFolder")
             check(f"RI2n {label} orphans on a missing folder is refused, not a clean zero", r.returncode == 1
                   and r.stderr.startswith("not-found: no such folder"), r.stdout + r.stderr)
-        r = vv("orphans", "Sub", env=dict(ienv, VV_VAULT=TV + "//"))
-        check("RI2v a non-normalised VV_VAULT (trailing //) still finds orphans in a subfolder",
+        r = vv("orphans", "Sub", env={"VV_ENGINE": "python", "VV_NO_INDEX": "1", "VV_VAULT": TV + "//"})
+        check("RI2v a non-normalised VV_VAULT (trailing //) still finds orphans in a subfolder on the walk arm (was 0)",
               r.returncode == 0 and "sub-fixture" in r.stdout, (r.stdout + r.stderr)[:300])
         if native_available():
+            subprocess.run([VRUST, "backlinks", "vvreadout-root-fixture"], capture_output=True, text=True, env=native_env)
+            idx_files = [f for f in os.listdir(ienv["VV_INDEX_ROOT"]) if f.endswith(".vvidx")]
+            check("RI2i native cache lands in VV_INDEX_ROOT", bool(idx_files), os.listdir(ienv["VV_INDEX_ROOT"])[:5])
+            noidx = mkdtemp("vv-readout-noidx-")
+            subprocess.run([VRUST, "backlinks", "vvreadout-root-fixture"], capture_output=True, text=True,
+                           env=dict(native_env, VV_INDEX_ROOT=noidx, VV_NO_INDEX="1"))
+            check("RI2j VV_NO_INDEX writes no native cache", not os.listdir(noidx), os.listdir(noidx))
             r = subprocess.run([VRUST, "orphans", "."], capture_output=True, text=True,
                                env=dict(native_env, VV_VAULT=TV + "/"))
             check("RI2t native orphans . under a trailing-slash VV_VAULT (was a silent 0)",
                   r.returncode == 0 and "vvreadout-root-fixture" in r.stdout, (r.stdout + r.stderr)[:300])
+            # VV_VAULT="<TV>/Link/../" — lexically TV itself; through the symlink it
+            # would be Sub's parent (= TV here) too, so make the two DIFFER: a link
+            # to a sibling temp dir, so the lexical form is TV and the resolved
+            # form is the sibling. Both engines must answer for TV.
+            other = mkdtemp("vv-readout-other-")
+            os.symlink(other, os.path.join(TV, "Elsewhere"))
+            dotdot = os.path.join(TV, "Elsewhere", "..")
+            rp = vv("orphans", ".", env={"VV_ENGINE": "python", "VV_NO_INDEX": "1", "VV_VAULT": dotdot})
+            rn = subprocess.run([VRUST, "orphans", "."], capture_output=True, text=True, env=dict(native_env, VV_VAULT=dotdot))
+            check("RI2u a `..` through a symlink in VV_VAULT resolves lexically on both engines",
+                  "vvreadout-root-fixture" in rp.stdout and rp.stdout == rn.stdout, (rp.stdout + "|" + rn.stdout + rn.stderr)[:300])
         # an explicitly named SKIP_DIRS member as the scope: every arm answers it
         for label, runner in (("indexed", lambda *a: vv(*a, env=ienv)),
                               ("walk", lambda *a: vv(*a, env={"VV_ENGINE": "python", "VV_NO_INDEX": "1", "VV_VAULT": TV})),
@@ -244,7 +225,7 @@ try:
             if label == "native" and not native_available():
                 continue
             r = runner("props", "type", "graphify-out")
-            check(f"RI2h {label} props on an explicit graphify-out scope answers it (walk arm was 0)",
+            check(f"RI2h {label} props on an explicit graphify-out scope answers it (walk arm was 0)" + (" (control: this arm always did)" if label != "walk" else ""),
                   r.returncode == 0 and "\tvvreadout-fixture" in r.stdout, (r.stdout + r.stderr)[:300])
         os.symlink(os.path.join(TV, "Sub"), os.path.join(TV, "Link"))
         for label, runner in (("python", lambda *a: vv(*a, env=ienv)),
@@ -258,8 +239,7 @@ try:
         # walk and the native engine must exclude it too (three seats, round 3)
         for label, runner in (("indexed", lambda *a: vv(*a, env=ienv)),
                               ("walk", lambda *a: vv(*a, env={"VV_ENGINE": "python", "VV_NO_INDEX": "1", "VV_VAULT": TV})),
-                              ("native", lambda *a: subprocess.run([VRUST, *a], capture_output=True, text=True,
-                                                                   env=dict(os.environ, VV_VAULT=TV)))):
+                              ("native", lambda *a: subprocess.run([VRUST, *a], capture_output=True, text=True, env=native_env))):
             if label == "native" and not native_available():
                 continue
             r = runner("board", ".", "type=vvreadout-fixture")
@@ -268,13 +248,26 @@ try:
                   and "vvreadout-root-fixture" in r.stdout and "vvreadout-gen-fixture" not in r.stdout, (r.stdout + r.stderr)[:300])
         # a `..` component: python resolves it; native must fall back, never answer 0
         for label, runner in (("python", lambda *a: vv(*a, env={"VV_ENGINE": "python", "VV_NO_INDEX": "1", "VV_VAULT": TV})),
-                              ("native", lambda *a: subprocess.run([VRUST, *a], capture_output=True, text=True,
-                                                                   env=dict(os.environ, VV_VAULT=TV)))):
+                              ("native", lambda *a: subprocess.run([VRUST, *a], capture_output=True, text=True, env=native_env))):
             if label == "native" and not native_available():
                 continue
             r = runner("orphans", "Sub/..")
             check(f"RI2d {label} orphans Sub/.. resolves to the root" + (" (control)" if label == "python" else ""), r.returncode == 0
                   and "vvreadout-root-fixture" in r.stdout and "(0 orphans" not in r.stdout, (r.stdout + r.stderr)[:300])
+        # graph commands never enter SKIP_DIRS, even when one is named: those
+        # notes are outside the link graph, so "orphans of graphify-out" has no
+        # answer — both engines say 0 (decision, not a defect; third-model seat,
+        # round 12). board/props DO answer for an explicitly named skip dir.
+        for label, runner in (("python", lambda *a: vv(*a, env={"VV_ENGINE": "python", "VV_NO_INDEX": "1", "VV_VAULT": TV})),
+                              ("native", lambda *a: subprocess.run([VRUST, *a], capture_output=True, text=True, env=native_env))):
+            if label == "native" and not native_available():
+                continue
+            r = runner("orphans", "graphify-out")
+            check(f"RI2k {label} orphans on a named skip dir is an explicit zero (decision: outside the graph)",
+                  r.returncode == 0 and "(0 orphans" in r.stdout, (r.stdout + r.stderr)[:200])
+        cache_after = set(os.listdir(real_cache)) if os.path.isdir(real_cache) else set()
+        check("RI2l the whole indexed-arm block wrote nothing to ~/.cache/vv/index", cache_after == cache_before,
+              sorted(cache_after - cache_before)[:3])
     finally:
         pass   # TV is in _TMP; removed at exit
     if native_available():
@@ -342,6 +335,9 @@ try:
         {"kind": "adjudication", "op": "head", "args": ["U.md"], "who": "sure", "reason": "?"},
         # a ruling made under an older harness: honoured but labelled
         {"kind": "adjudication", "hv": HARNESS_VERSION - 1, "op": "tags", "who": "vv-correct", "reason": "old instrument"},
+        # an op whose ONLY pair is unscored (stale legacy-error verdict, grep exit 1)
+        dict(base, op="search", args=["zzz"], legacy_ms=5.0, legacy_bytes=0, legacy_exit=1,
+             verdict="legacy-error", vv_only=None, legacy_only=None),   # grep analog: exit 1 is an answer
         # a disagreement whose only ruling has a valid `who` but NO reason
         dict(base, op="show", args=["N.md"], legacy_ms=5.0, legacy_bytes=0, legacy_exit=0,
              verdict="differ", vv_only=["n"], legacy_only=[]),
@@ -376,13 +372,15 @@ try:
     check("R5b grep exit 2 counted as a harness error", "harness errors: 3" in out and "[links] A.md legacy_exit=2" in out, out)
     check("R5c harness error not listed as a disagreement", "[links]" not in out.split("disagreements:")[-1], out)
     check("R5d grep exit 1 is an answer: scored, not a harness error",
-          "paired reads: 10" in out and "[backlinks] Z.md → vv-superset" in out, out)
+          "paired reads: 11" in out and "[backlinks] Z.md → vv-superset" in out, out)
     check("R5e byte totals exclude the failed pair on BOTH sides",
-          "vv 1,000 B vs old way 1,900 B" in out, out)
-    check("R5g funnel shows the split (unscored is paired, not scored)", "reads=13 -> scored=9" in out, out)
+          "vv 1,100 B vs old way 1,900 B" in out, out)
+    check("R5g funnel shows the split (unscored is paired, not scored)", "reads=14 -> scored=9" in out, out)
     check("R5p unscored rows leave the agree/differ denominator", "1 unscored" in out and "0/0 agree" not in out, out)
+    check("R5q an op with nothing scored says so", "nothing scored · 1 unscored" in out, out)
+    check("R5r the funnel line reconciles reads and scored", "reads − scored = 3 harness error(s) + 2 unscored" in out, out)
     check("R5k stale legacy-error verdict on a grep exit 1 is not a harness error and not a measured difference",
-          "unscored: 1" in out and "[backlinks] R1.md" in out.split("unscored:")[1].split("\n\n")[0]
+          "unscored: 2" in out and "[backlinks] R1.md" in out.split("unscored:")[1].split("\n\n")[0]
           and "R1.md → legacy-error" not in out and "harness errors: 3" in out, out)
     check("R6o unknown `who` does not adjudicate", "[head] U.md → differ  (UNADJUDICATED)" in out, out)
     check("R6q a ruling without a reason does not adjudicate", "[show] N.md → differ  (UNADJUDICATED)" in out, out)
@@ -409,8 +407,8 @@ try:
     r = run(SHADOW_REPORT, "2026-09-01", "2026-09-01", env=env)
     out = r.stdout + r.stderr
     check("R5f same record with exit 0 IS a disagreement (positive control: a real pin)",
-          "harness errors: 2" in out and "[links] A.md → vv-superset" in out and "paired reads: 11" in out
-          and "vv 1,100 B vs old way 2,400 B" in out, out)
+          "harness errors: 2" in out and "[links] A.md → vv-superset" in out and "paired reads: 12" in out
+          and "vv 1,200 B vs old way 2,400 B" in out, out)
     # a ruling made under an older harness is honoured but labelled
     rows.append(dict(base, op="tags", args=[], legacy_ms=10.0, legacy_bytes=10, legacy_exit=0,
                      verdict="differ", vv_only=["t"], legacy_only=[]))
@@ -461,41 +459,6 @@ try:
           and rec.get("verdict") == "legacy-error" and "index out of range" in rec.get("legacy_error", ""),
           r.stderr[-200:] + str(rec))
 finally:
-    def set_aside_fixture():
-        """Move the test fixture out of SB — OUTSIDE the vault (a leftover
-        inside the vault is git-visible to its auto-commit; security seat,
-        round 7). Never into or through a symlink."""
-        hold = os.path.expanduser("~/.local/state/vv/test-holding")
-        try:
-            os.makedirs(hold, exist_ok=True)
-        except OSError:
-            hold = None                     # unwritable HOME: outside-the-vault is the property that matters
-        aside = os.path.join(tempfile.mkdtemp(prefix="vv-failed-fixture-", dir=hold), "vvreadout")
-        shutil.move(SB, aside)
-        print(f"note: failed fixture kept at {aside} for inspection")
-    try:
-        if not fails:
-            shutil.rmtree(SB, ignore_errors=True)
-            if os.path.lexists(SB):
-                print(f"FAIL teardown: could not remove the fixture at {SB}")
-                fails.append("teardown")    # a stashed fixture is never a green run
-        if os.path.lexists(SB):
-            # Never move the original INTO a leftover dir (POSIX move nests it
-            # as SB/vvreadout — buddy seat, round 3). Set the leftover aside.
-            set_aside_fixture()
-    except Exception as e:                                             # noqa: BLE001
-        print(f"FAIL teardown: fixture set-aside failed ({e}); restoring the original regardless")
-        fails.append("teardown")        # never a green exit with a displaced original
-    if _kept:
-        if os.path.lexists(SB):
-            print(f"note: {SB} still present; original left at {_kept}")
-        else:
-            shutil.move(_kept, SB)      # unconditional: pass or fail
-            try:
-                os.rmdir(os.path.dirname(_kept))   # the holding dir's now-empty parent
-            except OSError:
-                pass
-            print(f"note: restored pre-existing {SB}")
     for d in _TMP:
         shutil.rmtree(d, ignore_errors=True)
 

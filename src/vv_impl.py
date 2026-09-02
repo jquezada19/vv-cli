@@ -787,7 +787,6 @@ def cmd_board(folder, *filters):
     # walk and the native engine returned every note (third-model seat,
     # 2026-09-02) — see _scope for the rule that fixed it for every sibling.
     rroot = _scope(folder or ".")
-    root = os.path.join(VAULT, rroot) if rroot else VAULT
     rows = []
     h = index_handle(scope=rroot or None)
     if h is not None:
@@ -799,18 +798,12 @@ def cmd_board(folder, *filters):
                              props.get("type", "-")))
         rows.sort()
     else:
-        for dirpath, dirs, names in os.walk(root):
-            # SKIP_DIRS, not just dot-dirs: the index and md_files() exclude
-            # graphify-out/ (generated), and since `board .` reaches the index
-            # the three paths must agree (three review seats, 2026-09-02).
-            dirs[:] = [d for d in dirs if not d.startswith(".") and d not in SKIP_DIRS]
-            for n in sorted(names):
-                if not n.endswith(".md"):
-                    continue
-                fm, _ = split_fm(open(os.path.join(dirpath, n), errors="replace").read())
-                props = fm_props(fm)
-                if all(props.get(k) == v for k, v in want.items()):
-                    rows.append((n[:-3], props.get("status", "-"), props.get("type", "-")))
+        for p_ in _walk_scope(rroot):      # same prune rules as the index and the native walk
+            n = os.path.basename(p_)
+            fm, _ = split_fm(open(p_, errors="replace").read())
+            props = fm_props(fm)
+            if all(props.get(k) == v for k, v in want.items()):
+                rows.append((n[:-3], props.get("status", "-"), props.get("type", "-")))
         rows.sort()   # deterministic + identical to the indexed path on nested
         # folders (they disagreed in walk order until 2026-08-27 — caught by the
         # native-port fixture suite, a latent inconsistency from the index change)
@@ -855,7 +848,7 @@ def cmd_props(key, folder=""):
     h = index_handle(scope=rroot or None)
     rows = h.props() if h is not None else (
         (rel(p), fm_props(split_fm(open(p, errors="replace").read())[0]))
-        for p in sorted(_walk_scope(rroot) if rroot else md_files()))
+        for p in sorted(_walk_scope(rroot)))
     for rp, props in rows:
         if rroot and not (rp == rroot or rp.startswith(rroot + os.sep)):
             continue
@@ -2316,9 +2309,10 @@ CMDS = {
 # line) is right and unhelpful: `read NOTE` with no section was 9 of 228 read
 # calls at the moment of the 2026-09-02 pilot read-out (8 of 226 before that
 # day's own probing) — counts over the pilot register's INTERACTIVE rows, i.e.
-# after its contamination filter removed the 383 machine-paced rows of the
-# 2026-08-27 bursts (three review seats recomputed the cuts; the raw sink is
-# 159 reads higher; re-derive with `bench/pilot_report.py --since
+# after its contamination filter removed the 1,938 machine-paced/synthetic
+# rows of the 2026-08-27 bursts (383 of them post-stamping and unmarked; three
+# review seats recomputed the cuts; the raw sink is 159 reads higher;
+# re-derive with `bench/pilot_report.py --since
 # 2026-08-26T21:06 --until 2026-09-02T10:00`). The honest next step is the
 # outline — with the note the caller already named.
 def _next_read(args):
