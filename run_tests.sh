@@ -27,6 +27,13 @@ run() {  # run <label> <cmd...>
   local label="$1"; shift
   local out
   out=$("$@" 2>&1); local rc=$?
+  # A suite that prints a FAIL line but exits 0 must not ride green: the ok
+  # branch shows only `tail -1`, so the FAIL line would be invisible. Every
+  # suite propagates its exit today; this closes the hole in the aggregator
+  # itself (negative-control census, 2026-09-02; tests/test_gate_controls.py).
+  if [ $rc -eq 0 ] && printf '%s\n' "$out" | grep -q '^FAIL'; then
+    rc=99
+  fi
   if [ $rc -eq 0 ]; then
     printf '  ok   %-28s %s\n' "$label" "$(printf '%s' "$out" | tail -1)"
   else
@@ -87,6 +94,7 @@ run "cache integrity"     python3 tests/test_cache_integrity.py
 run "link needle filter"  python3 tests/test_link_needle.py
 run "search entry points"  python3 tests/test_search_entry.py
 run "sweep guards"        python3 tests/test_sweepguard.py
+run "gate controls"       python3 tests/test_gate_controls.py
 run "metrics provenance" python3 tests/test_metrics_provenance.py
 run "jsonl surface"      python3 tests/test_jsonl.py
 run "batch + changed"    python3 tests/test_batch.py

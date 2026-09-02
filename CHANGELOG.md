@@ -7,6 +7,14 @@ and exit codes. A change that makes existing output unparseable is a major chang
 
 ## [Unreleased]
 
+### Added
+- `tests/test_gate_controls.py`: negative controls for the measurement gates
+  that had none — the pilot report's two ABORT paths, the shadow harness's
+  write/unknown-verb refusals, the benchmark corpus floor, the index bench's
+  VOID, the real-vault verification floors, and the gate aggregator itself
+  (a suite that prints `FAIL` but exits 0 now fails the gate). Each pin was
+  watched to fail against a deliberately broken input.
+
 ## [1.1.0] — 2026-08-27
 
 The agent-ergonomics release: byte budgets, structured output, invocation
