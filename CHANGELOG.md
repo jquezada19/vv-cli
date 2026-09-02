@@ -32,14 +32,17 @@ time.
   names — already prints `did you mean:` suggestions and is unchanged.)
 - `board .` / `board ""` / `props KEY .` / `orphans .` now cover the vault
   root in both engines (they returned zero rows before — `board` on the
-  indexed path, `props` on both paths, `orphans` on the walk) and sync the index unscoped
+  indexed path, `props` on both python paths, `orphans` on every path in
+  both engines) and sync the index unscoped
   instead of reparsing every note per call. The `board` walk in both engines
   now skips the same generated directory the index skips (`graphify-out/`),
-  so indexed, walk and native answers agree at the root. `props KEY <file>`
-  and `orphans <file|missing>` are refused like `board <file>` in both
-  engines (`props` used to retire that note's index row; `orphans` answered
-  a clean zero). `orphans <in-vault symlink>` now resolves the folder in both
-  engines (it answered zero).
+  so indexed, walk and native answers agree at the root. **Exit-code change:**
+  `props KEY <file>` and `orphans <file|missing>` are refused (exit 1) like
+  `board <file>` in both engines (`props` used to retire that note's index
+  row and answer a count; `orphans <missing>` answered a clean zero and
+  `orphans <file>` listed the file itself as an orphan, both exit 0).
+  `orphans <in-vault symlink>` now resolves the folder in both engines (it
+  answered zero).
 - Shadow harness (`bench/shadow.py`, `bench/shadow_report.py`): a legacy
   one-liner that *fails* (`grep` exit 2+, anything else non-zero — `grep`
   exit 1 is an answer) is recorded as `legacy-error` and reported as a

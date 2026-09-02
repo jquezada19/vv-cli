@@ -36,7 +36,10 @@ The suites need a vault to work against. Point them anywhere with `VV_VAULT`:
 VV_VAULT=/path/to/a/scratch/vault VV_TEST_SEARCH_TERMS="a term in it" ./run_tests.sh
 ```
 
-Tests write only under that vault's `Sandbox/` and clean up after themselves;
+Tests write only under that vault's `Sandbox/` and clean up after themselves
+(one exception: a suite that has to set a user's pre-existing `Sandbox/`
+fixture aside holds it under `~/.local/state/vv/test-holding/`, outside the
+vault and outside the disposable cache, and restores it at exit);
 the real-corpus pass (`tests/verify_real_vault.py`) is read-only toward the
 vault and copies notes to a temp dir before attempting any write. CI runs the
 gate against a generated fixture vault on Linux and macOS — see

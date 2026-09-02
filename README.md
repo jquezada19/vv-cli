@@ -259,6 +259,8 @@ same way (any doubt → live scan + rebuild, delete-don't-repair).
 
 - **Containment** — every read and write path, including rename/move
   destinations, resolves through a realpath check that refuses to leave the vault.
+  Known residual: a symlinked `.md` *file* inside a legitimately contained folder
+  is still read by `board`/`props` (a symlinked *directory* is never descended).
 - **CAS on every writer** — section patches carry a sha8 of the section they replace, and
   `set`/`unset`/`append`/`appendsec`/`daily-append` capture a `(mtime_ns, size)`
   signature at read and refuse with exit 3 if the file changed underneath. Obsidian is

@@ -515,16 +515,6 @@ fn cmd_orphans(folder: &str, vault: &Path, t0: Instant) -> Outcome {
     let root: PathBuf = if folder.is_empty() {
         vault.to_path_buf()
     } else {
-        // components() drops "." the way python's normpath does (`orphans .`
-        // was "<vault>/." and no file starts with "<vault>/./"), but keeps
-        // ".." — python resolves it, so a `..` component is python's to answer
-        // (two seats, round 5).
-        if Path::new(folder)
-            .components()
-            .any(|c| matches!(c, std::path::Component::ParentDir))
-        {
-            return Outcome::Fallback;
-        }
         // Resolve like python's _scope: canonicalize, strip the canonical vault,
         // re-join onto `vault` so the prefix matches walk_ex's own paths. An
         // in-vault symlinked folder used to answer a silent 0 natively while

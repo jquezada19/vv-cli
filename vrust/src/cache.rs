@@ -29,14 +29,24 @@ struct Row {
 }
 
 fn cache_path(vault: &Path) -> Option<PathBuf> {
+    // Two of python's isolation knobs: VV_NO_INDEX disables the cache and
+    // VV_INDEX_ROOT relocates it (test suites point both engines at one
+    // throwaway dir, so fixture vaults no longer litter ~/.cache/vv/index —
+    // 867 stale .vvidx files by 2026-09-02). Python's third rule (journal
+    // root set ⇒ no index) is NOT mirrored: the cache-torture suite relies
+    // on a HOME-redirected native cache under exactly that condition.
+    // None = live scan, never a wrong answer.
+    if std::env::var_os("VV_NO_INDEX").is_some() {
+        return None;
+    }
+    let index_root = std::env::var_os("VV_INDEX_ROOT");
     let real = fs::canonicalize(vault).ok()?;
     let key = &sha256_hex(real.to_string_lossy().as_bytes())[..16];
-    let home = std::env::var_os("HOME")?;
-    Some(
-        PathBuf::from(home)
-            .join(".cache/vv/index")
-            .join(format!("{}.vvidx", key)),
-    )
+    let dir = match index_root {
+        Some(r) => PathBuf::from(r),
+        None => PathBuf::from(std::env::var_os("HOME")?).join(".cache/vv/index"),
+    };
+    Some(dir.join(format!("{}.vvidx", key)))
 }
 
 /// Integrity checksum over the cache body. Guards against a TORN WRITE, not an

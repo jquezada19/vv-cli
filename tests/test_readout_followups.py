@@ -60,28 +60,51 @@ def run(*args, env=None, stdin=None):
     e = dict(os.environ, **(env or {}))
     return subprocess.run([sys.executable, *args], capture_output=True, text=True, env=e, input=stdin)
 
+_native_warned = []
+def native_available():
+    """The native binary, or a LOUD skip: a suite that silently skips its native
+    arms passes while proving nothing about the engine on PATH (third-model
+    seat). run_tests.sh builds the binary first, so the gate never skips."""
+    if os.path.exists(VRUST):
+        return True
+    if not _native_warned:
+        print(f"SKIP native pins: {VRUST} not built (run `cargo build --release` in vrust/)")
+        _native_warned.append(1)
+    return False
+
 def vv(*args, env=None, stdin=None):
     return run(VV, *args, env=env, stdin=stdin)
 
 # ---------- fixture (pre-existing content is set aside and RESTORED at exit) ----------
 _kept = None
+SENTINEL = ".vvreadout-fixture"             # marks a dir this suite made; a leftover is ours, not user data
+if os.path.isdir(SB) and os.path.exists(os.path.join(SB, SENTINEL)):
+    shutil.rmtree(SB)
+    print(f"note: removed a leftover fixture at {SB} (sentinel present)")
 if os.path.lexists(SB):                     # even an EMPTY pre-existing dir is the user's
     # NOT registered in _TMP: the holding dir must outlive the temp sweep so a
     # failing run can never delete the user's data (security seat, round 2).
-    _hold = os.path.expanduser("~/.cache/vv/test-holding")     # not the OS-purged temp dir
-    os.makedirs(_hold, exist_ok=True)
+    _hold = os.path.expanduser("~/.local/state/vv/test-holding")   # not the OS-purged temp dir, not the disposable cache
+    try:
+        os.makedirs(_hold, exist_ok=True)
+    except OSError:
+        _hold = None
+    _stale = [d for d in (os.listdir(_hold) if _hold else []) if d.startswith("vv-")]
+    if len(_stale) > 5:
+        print(f"note: {len(_stale)} holding dirs under {_hold} — inspect and delete the ones you no longer need")
     _kept = os.path.join(tempfile.mkdtemp(prefix="vv-kept-vvreadout-", dir=_hold), "vvreadout")
-    shutil.move(SB, _kept)
-    print(f"note: pre-existing {SB} set aside at {_kept}; restored at exit")
     import atexit
     def _restore_on_exit():
         # belt-and-braces for an exit that skips the finally (SystemExit from a
         # signal handler, an exception before the try): if the original is
-        # still set aside and SB is free, put it back.
+        # still set aside and SB is free, put it back. Registered BEFORE the
+        # move so no window exists between the move and the hook.
         if os.path.lexists(_kept) and not os.path.lexists(SB):
             shutil.move(_kept, SB)
             print(f"note: restored pre-existing {SB} at exit")
     atexit.register(_restore_on_exit)
+    shutil.move(SB, _kept)
+    print(f"note: pre-existing {SB} set aside at {_kept}; restored at exit")
 
 NOTE = "Sandbox/vvreadout/Readout Note.md"
 
@@ -136,6 +159,7 @@ try:
     # fixture creation is INSIDE the try so a failure here still restores
     shutil.rmtree(SB, ignore_errors=True)
     os.makedirs(SB, exist_ok=True)
+    open(os.path.join(SB, SENTINEL), "w").close()
     with open(os.path.join(_VAULT, NOTE), "w") as f:
         f.write("---\ntype: test\nstatus: open\n---\n# Readout Note\n\n## First\n\nalpha\n\n## Second\n\nbeta\n")
     with open(os.path.join(SB, "Closed Note.md"), "w") as f:
@@ -183,10 +207,10 @@ try:
         r = vv("board", "Sub", "type=vvreadout-fixture", env=ienv)
         check("RI2c a real subfolder still filters (control)", r.returncode == 0 and "sub-fixture" in r.stdout
               and "vvreadout-root-fixture" not in r.stdout, (r.stdout + r.stderr)[:300])
+        native_env = dict(os.environ, VV_VAULT=TV, VV_INDEX_ROOT=ienv["VV_INDEX_ROOT"])  # native cache in the temp dir too
         for label, runner in (("python", lambda *a: vv(*a, env=ienv)),
-                              ("native", lambda *a: subprocess.run([VRUST, *a], capture_output=True, text=True,
-                                                                   env=dict(os.environ, VV_VAULT=TV)))):
-            if label == "native" and not os.path.exists(VRUST):
+                              ("native", lambda *a: subprocess.run([VRUST, *a], capture_output=True, text=True, env=native_env))):
+            if label == "native" and not native_available():
                 continue
             r = runner("props", "type", "Sub/sub-fixture.md")
             check(f"RI2f {label} props with a FILE scope is refused, not a silent zero", r.returncode == 1
@@ -194,11 +218,13 @@ try:
             r = runner("orphans", "NoSuchFolder")
             check(f"RI2n {label} orphans on a missing folder is refused, not a clean zero", r.returncode == 1
                   and r.stderr.startswith("not-found: no such folder"), r.stdout + r.stderr)
+        r = vv("orphans", "Sub", env=dict(ienv, VV_VAULT=TV + "//"))
+        check("RI2v a non-normalised VV_VAULT (trailing //) still finds orphans in a subfolder",
+              r.returncode == 0 and "sub-fixture" in r.stdout, (r.stdout + r.stderr)[:300])
         os.symlink(os.path.join(TV, "Sub"), os.path.join(TV, "Link"))
         for label, runner in (("python", lambda *a: vv(*a, env=ienv)),
-                              ("native", lambda *a: subprocess.run([VRUST, *a], capture_output=True, text=True,
-                                                                   env=dict(os.environ, VV_VAULT=TV)))):
-            if label == "native" and not os.path.exists(VRUST):
+                              ("native", lambda *a: subprocess.run([VRUST, *a], capture_output=True, text=True, env=native_env))):
+            if label == "native" and not native_available():
                 continue
             r = runner("orphans", "Link")
             check(f"RI2s {label} orphans through an in-vault symlink resolves the folder (was 0)",
@@ -209,7 +235,7 @@ try:
                               ("walk", lambda *a: vv(*a, env={"VV_ENGINE": "python", "VV_NO_INDEX": "1", "VV_VAULT": TV})),
                               ("native", lambda *a: subprocess.run([VRUST, *a], capture_output=True, text=True,
                                                                    env=dict(os.environ, VV_VAULT=TV)))):
-            if label == "native" and not os.path.exists(VRUST):
+            if label == "native" and not native_available():
                 continue
             r = runner("board", ".", "type=vvreadout-fixture")
             check(f"RI2g {label} board . excludes graphify-out/" + (" (control: the index always did)" if label == "indexed" else ""),
@@ -219,14 +245,14 @@ try:
         for label, runner in (("python", lambda *a: vv(*a, env={"VV_ENGINE": "python", "VV_NO_INDEX": "1", "VV_VAULT": TV})),
                               ("native", lambda *a: subprocess.run([VRUST, *a], capture_output=True, text=True,
                                                                    env=dict(os.environ, VV_VAULT=TV)))):
-            if label == "native" and not os.path.exists(VRUST):
+            if label == "native" and not native_available():
                 continue
             r = runner("orphans", "Sub/..")
             check(f"RI2d {label} orphans Sub/.. resolves to the root" + (" (control)" if label == "python" else ""), r.returncode == 0
                   and "vvreadout-root-fixture" in r.stdout and "(0 orphans" not in r.stdout, (r.stdout + r.stderr)[:300])
     finally:
         pass   # TV is in _TMP; removed at exit
-    if os.path.exists(VRUST):
+    if native_available():
         # The native entry itself: every one of these must Fallback/exec to
         # python and print the identical text (Codex + buddy seats asked for
         # this pin — the python launcher alone never exercises the binary).
@@ -235,7 +261,7 @@ try:
                                   env=dict(os.environ, VV_VAULT=_VAULT))
         affordance_checks("RN", native)
     else:
-        print("SKIP RN native entry not built")
+        pass   # native_available() already printed the SKIP line
 
     # ---------- R5/R6 — shadow report over a synthetic sink ----------
     sys.path.insert(0, os.path.join(REPO, "bench"))
@@ -305,7 +331,7 @@ try:
     r = run(SHADOW, "--adjudicate", "backlinks", "vv-correct", "grep misses alias links", env=env)
     check("R6a op-level adjudication still accepted (control)", r.returncode == 0, r.stdout + r.stderr)
     r = run(SHADOW, "--adjudicate", "backlinks", "both-defensible", "E has a duplicate basename", "--", "E.md", env=env)
-    check("R6b case adjudication accepted", r.returncode == 0, r.stdout + r.stderr)
+    check("R6b case adjudication accepted (setup)", r.returncode == 0, r.stdout + r.stderr)
     last = json.loads(open(sink).read().strip().splitlines()[-1])
     check("R6c case adjudication records its args and harness version",
           last.get("kind") == "adjudication" and last.get("args") == ["E.md"] and last.get("hv") == HARNESS_VERSION, last)
@@ -314,7 +340,7 @@ try:
     r = run(SHADOW, "--adjudicate", "backlinks", "vv-correct", "a", "--", "b", "--", "X.md", env=env)
     check("R6h more than one `--` is refused as ambiguous", r.returncode != 0 and "ambiguous" in (r.stdout + r.stderr), r.stdout + r.stderr)
     r = run(SHADOW, "--adjudicate", "props", "vv-correct", "grep sees quoted values", "--", "status", env=env)
-    check("R6j case-only ruling accepted", r.returncode == 0, r.stdout + r.stderr)
+    check("R6j case-only ruling accepted (setup)", r.returncode == 0, r.stdout + r.stderr)
     r = run(SHADOW, "--adjudicate", "x", "vv-correct", "y", env={"VV_SHADOW_SINK": sink + ".txt"})
     check("R6k VV_SHADOW_SINK must be .jsonl", r.returncode != 0 and "must name a .jsonl" in (r.stdout + r.stderr), r.stdout + r.stderr)
     check("R6l shadow prints the override banner", "VV_SHADOW_SINK override" in run(SHADOW, "--adjudicate", "x", "vv-correct", "y", env=env).stderr)
@@ -329,7 +355,7 @@ try:
     check("R5e byte totals exclude the failed pair on BOTH sides",
           "vv 1,000 B vs old way 1,900 B" in out, out)
     check("R5g funnel shows the split (unscored is paired, not scored)", "reads=13 -> scored=9" in out, out)
-    check("R5p unscored rows leave the quality column", "1 unscored" in out and "0/0 agree" not in out, out)
+    check("R5p unscored rows leave the agree/differ denominator", "1 unscored" in out and "0/0 agree" not in out, out)
     check("R5k stale legacy-error verdict on a grep exit 1 is not a harness error and not a measured difference",
           "unscored: 1" in out and "[backlinks] R1.md" in out.split("unscored:")[1].split("\n\n")[0]
           and "R1.md → legacy-error" not in out and "harness errors: 3" in out, out)
@@ -357,7 +383,7 @@ try:
     write_sink(rows)
     r = run(SHADOW_REPORT, "2026-09-01", "2026-09-01", env=env)
     out = r.stdout + r.stderr
-    check("R5f control: same record with exit 0 IS a disagreement",
+    check("R5f same record with exit 0 IS a disagreement (positive control: a real pin)",
           "harness errors: 2" in out and "[links] A.md → vv-superset" in out and "paired reads: 11" in out
           and "vv 1,100 B vs old way 2,400 B" in out, out)
     # a ruling made under an older harness is honoured but labelled
@@ -414,8 +440,11 @@ finally:
         """Move the test fixture out of SB — OUTSIDE the vault (a leftover
         inside the vault is git-visible to its auto-commit; security seat,
         round 7). Never into or through a symlink."""
-        hold = os.path.expanduser("~/.cache/vv/test-holding")
-        os.makedirs(hold, exist_ok=True)
+        hold = os.path.expanduser("~/.local/state/vv/test-holding")
+        try:
+            os.makedirs(hold, exist_ok=True)
+        except OSError:
+            hold = None                     # unwritable HOME: outside-the-vault is the property that matters
         aside = os.path.join(tempfile.mkdtemp(prefix="vv-failed-fixture-", dir=hold), "vvreadout")
         shutil.move(SB, aside)
         print(f"note: failed fixture kept at {aside} for inspection")

@@ -60,7 +60,7 @@ def main():
                  f"This is a missing measurement, not a clean result.")
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from shadow import HARNESS_VERSION
-    reads, adj, stale, herr = [], collections.defaultdict(list), 0, []
+    reads, adj, stale, herr, unscored_n = [], collections.defaultdict(list), 0, [], 0
     adj_case = {}   # (op, tuple(args)) -> ruling; exact wins over op-level
     # "scored" is the stage that survives the harness-error split: a sink of
     # nothing but failed legacy runs must abort loudly here, not print a
@@ -114,8 +114,12 @@ def main():
             continue
         if r.get("verdict") != "unscored":
             funnel.bump("scored")    # an unscored pair is paired (bytes count) but not scored
+        else:
+            unscored_n += 1
         reads.append(r)
     funnel.report()
+    if herr or unscored_n:
+        print(f"  reads − scored = {len(herr)} harness error(s) + {unscored_n} unscored")
     if stale:
         print(f"  set aside {stale} record(s) from an older harness version "
               f"(current: v{HARNESS_VERSION}) — they measured a different\n"
@@ -147,11 +151,14 @@ def main():
         tot_lg_b += sum(r["legacy_bytes"] for r in paired)
         scored = [r for r in paired if r.get("verdict") != "unscored"]
         v = collections.Counter(r["verdict"] for r in scored)
-        q = f"{v['match']}/{len(scored)} agree"
-        if v["match"] < len(scored):
-            q += f" · {len(scored) - v['match']} differ"
-        if len(scored) < len(paired):
-            q += f" · {len(paired) - len(scored)} unscored"
+        if not scored:
+            q = f"nothing scored · {len(paired)} unscored"
+        else:
+            q = f"{v['match']}/{len(scored)} agree"
+            if v["match"] < len(scored):
+                q += f" · {len(scored) - v['match']} differ"
+            if len(scored) < len(paired):
+                q += f" · {len(paired) - len(scored)} unscored"
         print(f"{op:<11}{len(rs):>4}{vm:>8.0f}{lm:>9.0f}{lm / max(vm, .01):>6.0f}x"
               f"{vb:>9.0f}{lb:>10.0f}{lb / max(vb, 1):>7.0f}x  {q}")
 

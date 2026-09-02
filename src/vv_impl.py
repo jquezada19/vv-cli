@@ -27,7 +27,10 @@ import sys, os, re, json, time, hashlib
 # ~10 ms of startup and most commands touch none of them (Codex perf review
 # 2026-08-27, findings 8-9; measured with -X importtime).
 
-VAULT = os.environ.get("VV_VAULT") or os.path.expanduser("~/Documents/Obsidian Vault")
+# normpath ONCE at the source: a non-normalised VV_VAULT ("…/vault//",
+# "…/v/./") made the walk's paths and a normalised scope root disagree, so
+# `orphans Sub` answered a silent zero (security seat, round 9)
+VAULT = os.path.normpath(os.environ.get("VV_VAULT") or os.path.expanduser("~/Documents/Obsidian Vault"))
 VRUST = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "vrust/target/release/vrust")
 METRICS = os.path.expanduser("~/.claude/metrics/vv.jsonl")
 SKIP_DIRS = {".git", ".obsidian", ".claude", ".trash", "graphify-out"}
@@ -729,8 +732,9 @@ def _scope(folder):
 
 def cmd_orphans(folder=""):
     # re-joined onto VAULT so the prefix compares against the walk's own
-    # absolute paths even when VAULT itself is a symlink
-    root = os.path.normpath(os.path.join(VAULT, _scope(folder))) if folder else VAULT
+    # absolute paths even when VAULT itself is a symlink (same form as board)
+    rroot = _scope(folder)
+    root = os.path.join(VAULT, rroot) if rroot else VAULT
     files = list(md_files())
     idx = basename_index()
     # a note is linked if ANY note resolves a link to it — using the SAME winner
@@ -2301,8 +2305,9 @@ CMDS = {
 # day's own probing) — counts over the pilot register's INTERACTIVE rows, i.e.
 # after its contamination filter removed the 383 machine-paced rows of the
 # 2026-08-27 bursts (three review seats recomputed the cuts; the raw sink is
-# 159 reads higher). The honest next step is the outline — with the note the
-# caller already named.
+# 159 reads higher; re-derive with `bench/pilot_report.py --since
+# 2026-08-26T21:06 --until 2026-09-02T10:00`). The honest next step is the
+# outline — with the note the caller already named.
 def _next_read(args):
     if args:
         import shlex
