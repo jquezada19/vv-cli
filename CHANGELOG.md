@@ -11,20 +11,26 @@ Follow-ups from the 2026-08-27..09-02 shadow-pilot read-out — the affordance
 class: vv was right and unhelpful at the same time.
 
 ### Fixed
-- `board FOLDER status open` (a filter without `=`) crashed with a Python
-  traceback and **exit 0**; it is now `usage: board filters are KEY=VALUE …`
-  with exit 1 and a `next:` that shows the shape.
+- `board FOLDER status open` (a filter without `=`) died as a bare Python
+  traceback — exit 1, no usage line, no `next:`, and no metrics row; it is
+  now `usage: board filters are KEY=VALUE …` with a runnable `next:`.
+  `board` also gains the same vault containment as every other path argument
+  (`board ../x` is refused in both engines).
 
 ### Changed
 - `journal` (not a command) now hints `did you mean: doctor` — an alias table
   the edit-distance hint could never reach.
 - `read NOTE` with no section points at `vv outline NOTE` instead of the
-  generic usage line.
+  generic usage line. (The read-out's other `read` bucket — wrong note names —
+  already prints `did you mean:` suggestions and is unchanged.)
 - Shadow harness (`bench/shadow.py`, `bench/shadow_report.py`): a legacy
-  one-liner that exits non-zero is recorded as `legacy-error` and reported as
-  a harness error, never a disagreement; rulings can be scoped to one
-  `(op, args)` case with `--adjudicate … -- <args>`, and an op-level ruling is
-  labelled as reused. `VV_SHADOW_SINK` overrides the sink (tests only).
+  one-liner that *fails* (`grep` exit 2+, anything else non-zero — `grep`
+  exit 1 is an answer) is recorded as `legacy-error` and reported as a
+  harness error, never a disagreement, with no answer-set diff kept; rulings
+  can be scoped to one `(op, args)` case with `--adjudicate … -- <args>`, an
+  op-level ruling is labelled as reused, rulings are never window-filtered,
+  and a sink of nothing but failed pairs aborts loudly instead of printing a
+  clean zero. `VV_SHADOW_SINK` overrides the sink (tests only; banner printed).
 
 ## [1.1.0] — 2026-08-27
 

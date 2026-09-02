@@ -28,9 +28,20 @@ import json, os, re, subprocess, sys, time
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 VAULT = os.environ.get("VV_VAULT") or os.path.expanduser("~/Documents/Obsidian Vault")
 VV = os.path.join(REPO, "vrust/target/release/vrust")
-SINK = os.environ.get("VV_SHADOW_SINK") or os.path.expanduser("~/.claude/metrics/vv-shadow.jsonl")  # override: tests only
+SINK = os.environ.get("VV_SHADOW_SINK") or os.path.expanduser("~/.claude/metrics/vv-shadow.jsonl")
+if os.environ.get("VV_SHADOW_SINK"):
+    # A stray override diverts telemetry silently (the default sink keeps
+    # existing, so no "missing sink" guard fires). Make it visible every run.
+    if not SINK.endswith(".jsonl"):
+        sys.exit(f"shadow: VV_SHADOW_SINK must name a .jsonl file, got {SINK!r}")
+    if __name__ == "__main__":   # the report prints its own banner on import
+        print(f"shadow: sink {SINK} (VV_SHADOW_SINK override)", file=sys.stderr)
 
-# Bump whenever a NORMALISER, a legacy analog, or the comparison logic changes.
+# Bump whenever a NORMALISER, a legacy analog, or the comparison logic changes
+# in a way the report cannot re-derive from recorded fields. (2026-09-02: the
+# `legacy-error` verdict was added WITHOUT a bump — the report reclassifies
+# older records from their recorded `legacy_exit`, so v4 rows stay comparable;
+# a bump would have set aside the pilot's 30 paired reads for nothing.)
 # Records made by an earlier version measured a different instrument and must
 # not be pooled with these -- v1's normalisers scooped vv's content hash into
 # the answer set, shredded multi-word link targets on whitespace, compared
@@ -58,6 +69,20 @@ def sh(argv, shell=False):
     t = time.perf_counter()
     r = subprocess.run(argv, capture_output=True, text=True, cwd=VAULT, shell=shell)
     return (time.perf_counter() - t) * 1000, r.stdout, r.returncode
+
+
+def legacy_failed(argv, rc):
+    """Did the legacy one-liner FAIL, as opposed to answer 'nothing'?
+
+    grep exits 1 for "no selected lines" — a real, informative answer (the
+    old way found nothing where vv may have found something), and the class
+    the whole pairing exists to score. Only 2+ is a grep error. Everything
+    else here (cat/awk/find) answers with 0. The first version treated every
+    non-zero exit as a harness error and would have deleted exactly the
+    "vv found, old way missed" evidence (code-review + Codex seats, 2026-09-02).
+    """
+    ok = {0, 1} if os.path.basename(argv[0]) == "grep" else {0}
+    return rc not in ok
 
 
 # --- normalisers: both sides reduced to the SAME answer ---------------------
@@ -218,9 +243,13 @@ def adjudicate(argv):
     # 2026-09-02 read-out found op-keyed rulings silently covering every case
     # of that op, so a second disagreement never looked unadjudicated.
     case_args = None
+    if argv.count("--") > 1:
+        sys.exit("shadow: more than one `--` — the reason and the case args are ambiguous")
     if "--" in argv:
         i = argv.index("--")
         argv, case_args = argv[:i], argv[i + 1:]
+        if not case_args:
+            sys.exit("shadow: `--` given with no case args — drop it for an op-level ruling")
     if len(argv) < 3:
         sys.exit("usage: shadow.py --adjudicate <op> <vv-correct|legacy-correct|"
                  "both-defensible|unresolved> <reason...> [-- <args...>]")
@@ -228,10 +257,10 @@ def adjudicate(argv):
     if who not in ("vv-correct", "legacy-correct", "both-defensible", "unresolved"):
         sys.exit(f"shadow: unknown adjudication {who!r}")
     rec = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S"), "kind": "adjudication",
-           "op": op, "who": who, "reason": reason}
+           "hv": HARNESS_VERSION, "op": op, "who": who, "reason": reason}
     if case_args is not None:
         rec["args"] = case_args
-    os.makedirs(os.path.dirname(SINK), exist_ok=True)
+    os.makedirs(os.path.dirname(os.path.abspath(SINK)), exist_ok=True)
     with open(SINK, "a") as f:
         f.write(json.dumps(rec) + "\n")
     print(f"adjudicated {op}: {who} — {reason}")
@@ -286,11 +315,13 @@ def main():
             lg_ms, lg_out, lg_rc = 0.0, "", -1
             rec["legacy_error"] = str(e)[:120]
         a, b = norm(quality_out), norm(lg_out)
-        if lg_rc != 0:
-            # The legacy one-liner FAILED. Whatever it printed is not an answer,
-            # so comparing it scores the harness, not the tool (3 pairs in the
-            # pilot week landed as "vv-superset" with legacy_exit=2). Recorded
-            # so the report can count it; never a disagreement.
+        failed = legacy_failed(build(args), lg_rc)
+        if failed:
+            # The legacy one-liner FAILED (see legacy_failed for what counts).
+            # Whatever it printed is not an answer, so comparing it scores the
+            # harness, not the tool (3 pairs in the pilot week landed as
+            # "vv-superset" with legacy_exit=2). Recorded so the report can
+            # count it; never a disagreement, and no answer-set diff is kept.
             verdict = "legacy-error"
         elif a == b:
             verdict = "match"
@@ -303,25 +334,27 @@ def main():
                        "legacy-superset" if b > a else "differ")
         else:
             verdict = "differ"
+        sets = isinstance(a, set) and isinstance(b, set) and not failed
         rec.update({"legacy_ms": round(lg_ms, 1), "legacy_bytes": len(lg_out.encode()),
                     "legacy_exit": lg_rc, "verdict": verdict,
-                    "vv_only": (sorted(a - b)[:12]
-                                if isinstance(a, set) and isinstance(b, set) else None),
-                    "legacy_only": (sorted(b - a)[:12]
-                                    if isinstance(a, set) and isinstance(b, set) else None),
+                    "vv_only": sorted(a - b)[:12] if sets else None,
+                    "legacy_only": sorted(b - a)[:12] if sets else None,
                     "n_vv": len(a) if isinstance(a, set) else None,
-                    "n_legacy": len(b) if isinstance(b, set) else None})
+                    "n_legacy": len(b) if sets else None})
         ratio = (lg_ms / vv_ms) if vv_ms else 0
         bratio = (rec["legacy_bytes"] / rec["vv_bytes"]) if rec["vv_bytes"] else 0
         print(f"shadow[{verb}]: {verdict} | vv {vv_ms:.0f}ms/{rec['vv_bytes']}B  "
               f"legacy {lg_ms:.0f}ms/{rec['legacy_bytes']}B  "
               f"({ratio:.1f}x slower, {bratio:.1f}x bytes)", file=sys.stderr)
-        if verdict != "match":
+        if verdict == "legacy-error":
+            print(f"  legacy command exited {lg_rc}: a harness error, not an answer",
+                  file=sys.stderr)
+        elif verdict != "match":
             print(f"  vv-only={rec['vv_only']}\n  legacy-only={rec['legacy_only']}",
                   file=sys.stderr)
 
     try:
-        os.makedirs(os.path.dirname(SINK), exist_ok=True)
+        os.makedirs(os.path.dirname(os.path.abspath(SINK)), exist_ok=True)
         with open(SINK, "a") as f:
             f.write(json.dumps(rec) + "\n")
     except OSError:

@@ -743,16 +743,23 @@ def cmd_orphans(folder=""):
     _list_out(entries, len(entries), "orphans", cmd="orphans")
 
 def cmd_board(folder, *filters):
-    # A filter without "=" used to reach dict() and die as a TRACEBACK with
-    # exit 0 — a usage error reported as success (7 of 19 board calls in the
-    # 2026-08-27..09-02 pilot week). Validate at the boundary, like arity.
+    # A filter without "=" used to reach dict() and die as a bare TRACEBACK:
+    # exit 1, no usage line, no `next:`, and no metrics row (the traceback
+    # bypasses the logger) — so the pilot sink holds ZERO occurrences and the
+    # defect was found by probing, not by telemetry. (The 7 board usage rows
+    # in the pilot week were the bare `vv board` arity error, already clean.)
+    # Validate at the boundary, like arity. The review round's first version
+    # of this comment claimed "exit 0"; that came from reading a pipe's exit
+    # status instead of vv's — the envelope seat caught it (2026-09-02).
     bad = [f for f in filters if "=" not in f]
     if bad:
         import shlex
-        die(f"usage: board filters are KEY=VALUE, got '{bad[0]}' — "
-            f"next: vv board {shlex.quote(folder)} {bad[0]}=VALUE")
+        die(f"usage: board filters are KEY=VALUE, got {shlex.quote(bad[0])} — "
+            f"next: vv board {shlex.quote(folder)} {shlex.quote(bad[0] + '=VALUE')}")
     want = dict(f.split("=", 1) for f in filters)
-    root = os.path.join(VAULT, folder)
+    # Same containment as every other path argument: `board ../x` must not
+    # walk frontmatter outside the vault (security seat, 2026-09-02).
+    root = contain(folder)
     if not os.path.isdir(root):
         die(f"not-found: no such folder: {folder}")
     rows = []
@@ -2270,7 +2277,7 @@ CMDS = {
 # line) is right and unhelpful: `read NOTE` with no section was 11 of 230 read
 # calls in the pilot week, and the honest next step is the outline.
 ARITY_NEXT = {
-    "read": "vv outline NOTE lists the section ids, then vv read NOTE SEC",
+    "read": "vv outline NOTE",   # a runnable command, per the `next:` contract
 }
 
 # Words the pilot week typed that are not commands but name a real one.

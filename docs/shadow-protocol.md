@@ -26,12 +26,26 @@ text — and the comparison is over that.
 
 **A disagreement is not automatically vv being wrong.** For most of these
 questions grep is the weaker instrument. Disagreements are recorded in full and
-adjudicated case by case (`shadow.py --adjudicate <op> <who> <reason>`); the
-report refuses to call the checkpoint closed while any remain unadjudicated.
+adjudicated case by case (`shadow.py --adjudicate <op> <who> <reason> [-- <args...>]`);
+a ruling with `-- <args>` is scoped to that one `(op, args)` case, a ruling
+without it is op-level — still honoured, but the report labels it *op-level
+ruling reused* so the read-out can see a ruling covering more than one case.
+Rulings are never window-filtered (they are usually made after the window, on
+read-out day). The report refuses to call the checkpoint closed while any
+disagreement remains unadjudicated.
+
+**A failed legacy run is a harness error, not a disagreement.** When the
+legacy one-liner *fails* — exits 2+ for `grep`, non-zero for anything else —
+its output is not an answer, so the record is written with verdict
+`legacy-error`, kept out of both the quality and the byte totals, and reported
+under *harness errors*. `grep` exiting 1 ("no selected lines") is an answer
+and is compared normally: it is exactly the "vv found, old way missed" class
+the pairing exists to score. `VV_SHADOW_SINK` relocates the sink (tests only;
+both scripts print a banner when it is set).
 
 ## The dominant failure mode: the instrument invents the difference
 
-Four separate times, a reported "disagreement" turned out to be the harness:
+Five separate times, a reported "disagreement" turned out to be the harness:
 
 | Symptom | Cause |
 |---|---|
@@ -39,6 +53,7 @@ Four separate times, a reported "disagreement" turned out to be the harness:
 | `links` always differed | splitting `[[...]]` output on whitespace shredded multi-word targets (`New Note` → `New`, `Note`) |
 | `search` always "legacy-superset" | vv **ranks and truncates** to `--k 5`; grep returns every hit |
 | `resolve`/`board`/`props`/`tags` differed | `find`/`grep` walked `.claude/worktrees` (whole copies of the vault); `paths()` was run over vv output containing no paths; vv's `(N tags)` summary footer leaked into the answer set |
+| 3 pairs scored `vv-superset` | the legacy one-liner had **exited 2** (a bad path) and printed nothing; the empty output was compared as an answer (found at the 2026-09-02 read-out; now `legacy-error`) |
 
 So the harness is **versioned** (`HARNESS_VERSION`), and the report sets aside
 records from older versions instead of pooling them — the same rule the pilot
@@ -54,6 +69,10 @@ Comparability rules that follow:
 - vv's summary footers are counts, not answers, and never enter the answer set.
 
 ## What 30 paired reads showed (v4 harness)
+
+(27 scored after the 2026-09-02 harness-error exclusion: 3 of the 30 had a
+failed legacy side and are now reported separately — the context bill becomes
+62,256 B vs 277,511 B, still 4×.)
 
 | | vv | old way |
 |---|---|---|

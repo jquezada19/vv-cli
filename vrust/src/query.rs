@@ -159,12 +159,24 @@ fn cmd_board(args: &[String], vault: &Path, t0: Instant) -> Outcome {
     for f in &args[1..] {
         match f.find('=') {
             Some(i) => filters.push((f[..i].to_string(), f[i + 1..].to_string())),
-            None => return Outcome::Fallback, // python: dict(...) unpack crashes -> let it
+            None => return Outcome::Fallback, // python owns the usage error for a non-KEY=VALUE filter
         }
     }
     let root = vault.join(folder);
     if !root.is_dir() {
         return Outcome::Fallback; // python dies not-found: canonical text is python's
+    }
+    // Containment parity with python's contain(): an absolute folder, a `..`
+    // component, or a symlink that leaves the vault is python's "escape:"
+    // refusal — never served natively.
+    let escapes = Path::new(folder).is_absolute()
+        || Path::new(folder).components().any(|c| matches!(c, std::path::Component::ParentDir))
+        || match (fs::canonicalize(&root), fs::canonicalize(vault)) {
+            (Ok(r), Ok(v)) => !r.starts_with(&v),
+            _ => true,
+        };
+    if escapes {
+        return Outcome::Fallback;
     }
     let mut files = Vec::new();
     walk_board(&root, &mut files);

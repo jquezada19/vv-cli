@@ -11,9 +11,32 @@ Answers the three questions the 2026-09-02 checkpoint has to close on:
 """
 import collections, json, os, statistics, sys
 
-SINK = os.environ.get("VV_SHADOW_SINK") or os.path.expanduser("~/.claude/metrics/vv-shadow.jsonl")  # override: tests only
+SINK = os.environ.get("VV_SHADOW_SINK") or os.path.expanduser("~/.claude/metrics/vv-shadow.jsonl")
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import sweepguard as sg
+if os.environ.get("VV_SHADOW_SINK"):
+    print(f"shadow: sink {SINK} (VV_SHADOW_SINK override)", file=sys.stderr)
+
+
+def _harness_error(r):
+    """A read whose legacy side FAILED (not merely answered 'nothing').
+
+    Prefers the recorded verdict; falls back to the recorded exit code and the
+    op's analog for rows written before the verdict existed. grep's exit 1 is
+    an answer, not a failure — see shadow.legacy_failed.
+    """
+    if r.get("verdict") == "legacy-error":
+        return True
+    rc = r.get("legacy_exit")
+    if rc in (None, 0):
+        return False
+    from shadow import LEGACY, legacy_failed
+    build = LEGACY.get(r.get("op"), (None,))[0]
+    try:
+        argv = build(list(r.get("args", []))) if build else ["?"]
+    except Exception:                                                 # noqa: BLE001
+        argv = ["?"]
+    return legacy_failed(argv, rc)
 
 
 def main():
@@ -26,7 +49,10 @@ def main():
     from shadow import HARNESS_VERSION
     reads, adj, stale, herr = [], collections.defaultdict(list), 0, []
     adj_case = {}   # (op, tuple(args)) -> ruling; exact wins over op-level
-    funnel = sg.Funnel("shadow", "lines", "parsed", "in_window", "reads")
+    # "scored" is the stage that survives the harness-error split: a sink of
+    # nothing but failed legacy runs must abort loudly here, not print a
+    # clean-looking "paired reads: 0" (code-review + Codex seats, 2026-09-02).
+    funnel = sg.Funnel("shadow", "lines", "parsed", "in_window", "reads", "scored")
     for line in open(SINK):
         if not line.strip():
             continue
@@ -40,10 +66,16 @@ def main():
             # Rulings are never window-filtered: a disagreement inside the
             # window is usually ruled on AFTER it (the read-out day), and a
             # ruling dropped by the window resurfaced as UNADJUDICATED.
-            if r.get("args") is not None:
-                adj_case[(r["op"], tuple(r["args"]))] = r
+            # Malformed rows are skipped like a bad JSON line, never fatal.
+            op, args = r.get("op"), r.get("args")
+            if not isinstance(op, str):
+                continue
+            if args is not None:
+                if not (isinstance(args, list) and all(isinstance(x, str) for x in args)):
+                    continue
+                adj_case[(op, tuple(args))] = r
             else:
-                adj[r["op"]].append(r)
+                adj[op].append(r)
             continue
         if not (since <= r.get("ts", "")[:len(since)] <= until):
             continue
@@ -54,12 +86,13 @@ def main():
             stale += 1
             continue
         funnel.bump("reads")
-        if r.get("legacy_exit") not in (None, 0) or r.get("verdict") == "legacy-error":
+        if _harness_error(r):
             # The legacy command failed: a HARNESS error. Counted, shown, and
             # kept out of both the quality and the byte totals — scoring it
             # would bias the read-out against vv (3 such pairs on 2026-09-02).
             herr.append(r)
             continue
+        funnel.bump("scored")
         reads.append(r)
     funnel.report()
     if stale:
@@ -67,6 +100,7 @@ def main():
               f"(current: v{HARNESS_VERSION}) — they measured a different\n"
               f"  instrument and would report normaliser bugs as tool disagreements.")
     funnel.require("reads")
+    funnel.require("scored")
 
     print(f"\npaired reads: {len(reads)}")
     by = collections.defaultdict(list)
@@ -119,6 +153,11 @@ def main():
         a = [exact] if exact else adj.get(r["op"], [])
         who = (f"{exact['who']}, case ruling" if exact else
                f"{a[-1]['who']}, op-level ruling reused" if a else "UNADJUDICATED")
+        ruling = exact or (a[-1] if a else None)
+        if ruling and ruling.get("hv") not in (None, HARNESS_VERSION):
+            # A ruling made against a retired normaliser is evidence about
+            # THAT instrument; say so instead of silently reusing it.
+            who += f" (ruled under harness v{ruling['hv']})"
         print(f"  [{r['op']}] {' '.join(r.get('args', []))} → {r['verdict']}  ({who})")
         if r.get("vv_only"):
             print(f"      vv found, old way missed : {r['vv_only'][:4]}")
@@ -127,8 +166,7 @@ def main():
         if a:
             print(f"      ruling: {a[-1]['reason']}")
 
-    unadj = [r for r in diffs
-             if not adj_case.get((r["op"], tuple(r.get("args", [])))) and not adj.get(r["op"])]
+    unadj = [k for k in seen if not adj_case.get(k) and not adj.get(k[0])]
     if unadj:
         print(f"\n  !! {len(unadj)} disagreement(s) UNADJUDICATED — the checkpoint cannot "
               f"close on quality until each is ruled on:\n"
