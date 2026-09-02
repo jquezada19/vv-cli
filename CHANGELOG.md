@@ -27,8 +27,15 @@ time.
 ### Changed
 - `journal` (not a command) now hints `did you mean: doctor` — an alias table
   the edit-distance hint could never reach.
-- `read NOTE` with no section points at `vv outline NOTE` instead of the
-  generic usage line. (The read-out's other `read` bucket — wrong note names —
+- `read NOTE` with no section points at `vv outline <that note>` instead of
+  the generic usage line.
+- `board .` / `board ""` / `props KEY .` / `orphans .` now cover the vault
+  root in both engines (they returned zero rows before — on the indexed path
+  for board/props, on the walk for orphans) and sync the index unscoped
+  instead of reparsing every note per call. The `board` walk in both engines
+  now skips the same generated directory the index skips (`graphify-out/`),
+  so indexed, walk and native answers agree at the root. `props KEY <file>`
+  is refused like `board <file>` (it used to retire that note's index row). (The read-out's other `read` bucket — wrong note names —
   already prints `did you mean:` suggestions and is unchanged.)
 - Shadow harness (`bench/shadow.py`, `bench/shadow_report.py`): a legacy
   one-liner that *fails* (`grep` exit 2+, anything else non-zero — `grep`

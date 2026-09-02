@@ -132,15 +132,20 @@ fn scan_fm_parallel(files: &[PathBuf]) -> Result<Vec<HashMap<String, String>>, (
     Ok(result)
 }
 
-// ---------- board: exactly cmd_board's live os.walk — dot-dirs + graphify-out (SKIP_DIRS) ----------
+// python's SKIP_DIRS (src/vv_impl.py). Every member but graphify-out is a
+// dot-dir, which walk_board already skips; the list is mirrored whole so a
+// future non-dot member cannot drift the engines apart.
+const SKIP_DIRS: [&str; 5] = [".git", ".obsidian", ".claude", ".trash", "graphify-out"];
+
+// ---------- board: exactly cmd_board's live os.walk — dot-dirs + SKIP_DIRS ----------
 fn walk_board(dir: &Path, out: &mut Vec<PathBuf>) {
     if let Ok(rd) = fs::read_dir(dir) {
         for e in rd.flatten() {
             let name = e.file_name().to_string_lossy().to_string();
             let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
             if is_dir {
-                if name.starts_with('.') || name == "graphify-out" {
-                    continue; // python SKIP_DIRS: every other member is a dot-dir
+                if name.starts_with('.') || SKIP_DIRS.contains(&name.as_str()) {
+                    continue;
                 }
                 walk_board(&e.path(), out);
             } else if name.ends_with(".md") {
@@ -162,17 +167,18 @@ fn cmd_board(args: &[String], vault: &Path, t0: Instant) -> Outcome {
             None => return Outcome::Fallback, // python owns the usage error for a non-KEY=VALUE filter
         }
     }
-    let root = vault.join(folder);
-    if !root.is_dir() {
-        return Outcome::Fallback; // python dies not-found: canonical text is python's
-    }
     // Containment parity with python's contain(): a folder that canonicalizes
     // outside the vault (absolute, `..`, or a symlink out) is python's
     // "escape:" refusal — never served natively. readpath::contain is the one
-    // native definition of "inside the vault"; reuse it rather than re-derive.
-    // yagni: kept native (not python-only) so `board` keeps its fast path.
-    if readpath::contain(vault, folder).is_none() {
-        return Outcome::Fallback;
+    // native definition of "inside the vault" and also yields the root.
+    // yagni: kept native so `board` keeps its fast path; drop to python-only
+    // if board ever falls back for another reason anyway.
+    let root = match readpath::contain(vault, folder) {
+        Some(p) => p,
+        None => return Outcome::Fallback,
+    };
+    if !root.is_dir() {
+        return Outcome::Fallback; // python dies not-found: canonical text is python's
     }
     let mut files = Vec::new();
     walk_board(&root, &mut files);

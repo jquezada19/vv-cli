@@ -708,9 +708,12 @@ def cmd_links(ref):
     _list_out([{"path": l} for l in seen], len(seen), "links", cmd="links")
 
 def cmd_orphans(folder=""):
-    # normpath: contain(".") is "<vault>/." and no file path starts with
-    # "<vault>/./", so `orphans .` listed nothing (security seat, 2026-09-02)
-    root = os.path.normpath(contain(folder)) if folder else VAULT
+    # Resolved like board/props (contain(".") is "<vault>/." and no walked path
+    # starts with "<vault>/./"; an in-vault symlink resolves to its real
+    # folder), then re-joined onto VAULT so the prefix compares against the
+    # walk's own absolute paths even when VAULT itself is a symlink.
+    root = (os.path.normpath(os.path.join(VAULT, os.path.relpath(os.path.realpath(contain(folder)), _VAULT_REAL)))
+            if folder else VAULT)
     files = list(md_files())
     idx = basename_index()
     # a note is linked if ANY note resolves a link to it — using the SAME winner
@@ -825,6 +828,11 @@ def cmd_tags(*args):
 
 def cmd_props(key, folder=""):
     root = contain(folder) if folder else VAULT
+    if folder and not os.path.isdir(root):
+        # A FILE as the sync scope retired that file's own index row (the
+        # scoped stat-walk of a file yields nothing, so the row looked gone);
+        # board already refused, props did not (security seat, 2026-09-02).
+        die(f"not-found: no such folder: {folder}")
     rroot = os.path.relpath(os.path.realpath(root), _VAULT_REAL) if folder else ""
     if rroot == ".":
         rroot = ""              # `props KEY .` is the vault root: unscoped sync, no prefix filter
@@ -2296,8 +2304,11 @@ CMDS = {
 # Per-command "next" for an arity miss. The generic pointer (the no-args usage
 # line) is right and unhelpful: `read NOTE` with no section was 9 of 228 read
 # calls at the moment of the 2026-09-02 pilot read-out (8 of 226 before that
-# day's own probing; two review seats recomputed both cuts), and the honest
-# next step is the outline — with the note the caller already named.
+# day's own probing) — counts over the pilot register's INTERACTIVE rows, i.e.
+# after its contamination filter removed the 383 machine-paced rows of the
+# 2026-08-27 bursts (three review seats recomputed the cuts; the raw sink is
+# 159 reads higher). The honest next step is the outline — with the note the
+# caller already named.
 def _next_read(args):
     if args:
         import shlex
@@ -2306,7 +2317,7 @@ def _next_read(args):
 ARITY_NEXT = {"read": _next_read}   # runnable, per the `next:` contract
 
 # Words the pilot week typed that are not commands but name a real one.
-# `journal` (two rows, one double-logged attempt, in the pilot week): journals
+# `journal` (two rows, one double-logged attempt, before 2026-09-02): journals
 # are surfaced and resolved by `doctor`. An alias wins over the edit-distance
 # hint, which could never reach it.
 CMD_ALIASES = {"journal": "doctor"}

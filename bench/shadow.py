@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """Run one vault READ both ways -- vv and the old-fashioned way -- and compare.
 
-Pilot protocol upgrade (Jeff, 2026-08-27): every vault read during the shadow
-window runs BOTH ways so the 2026-09-02 checkpoint can close on measured quality
-and speed rather than on a handful of paired tasks.
+Pilot protocol (Jeff, 2026-08-27): pair a vault read against the old way and
+record it, so the 2026-09-02 checkpoint closes on measured quality and speed
+rather than on hand-paired tasks. (In practice the 30 recorded pairs were made
+in one session on 2026-08-27; see docs/shadow-protocol.md.)
 
   stdout  <- vv's output, verbatim. This is the answer the caller consumes.
   stderr  <- a one-line comparison.
-  sink    <- ~/.claude/metrics/vv-shadow.jsonl, one record per read.
+  sink    <- ~/.claude/metrics/vv-shadow.jsonl, one record per read
+             (VV_SHADOW_SINK overrides it — tests only; a banner is printed).
 
 WRITES ARE REFUSED, by design. Two tools writing the same note is how you get
 divergence, and the pilot note already says "reads only -- never pair a write".

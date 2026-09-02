@@ -515,10 +515,17 @@ fn cmd_orphans(folder: &str, vault: &Path, t0: Instant) -> Outcome {
     let root: PathBuf = if folder.is_empty() {
         vault.to_path_buf()
     } else {
+        // components() drops "." the way python's normpath does (`orphans .`
+        // was "<vault>/." and no file starts with "<vault>/./"), but keeps
+        // ".." — python resolves it, so a `..` component is python's to answer
+        // (two seats, round 5).
+        if Path::new(folder)
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
+            return Outcome::Fallback;
+        }
         match readpath::contain(vault, folder) {
-            // components() drops a trailing "." the way python's normpath does:
-            // `orphans .` was "<vault>/." and no file starts with "<vault>/./"
-            // (security seat, 2026-09-02)
             Some(p) => p.components().collect(),
             None => return Outcome::Fallback,
         }

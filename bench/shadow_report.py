@@ -81,8 +81,8 @@ def main():
             # ruling dropped by the window resurfaced as UNADJUDICATED.
             # Malformed rows are skipped like a bad JSON line, never fatal.
             op, args = r.get("op"), r.get("args")
-            if not isinstance(op, str) or r.get("who") not in RULINGS:
-                continue   # an unknown `who` must not count as adjudicated
+            if not isinstance(op, str) or r.get("who") not in RULINGS or not isinstance(r.get("reason"), str):
+                continue   # an unknown `who` or a missing reason must not count as adjudicated
             if args is not None:
                 if not (isinstance(args, list) and all(isinstance(x, str) for x in args)):
                     continue
@@ -99,6 +99,13 @@ def main():
             stale += 1
             continue
         funnel.bump("reads")
+        if r.get("verdict") == "legacy-error" and not _harness_error(r):
+            # A round-1-shaped row: the verdict says failure, the exit code says
+            # answer. The pair is real (bytes/latency count), but no answer-set
+            # diff was retained, so it cannot be scored as a disagreement or a
+            # match — mark it unscored rather than calling it a measured
+            # difference (independent secondary review, round 5).
+            r = dict(r, verdict="unscored")
         if _harness_error(r):
             # The legacy command failed: a HARNESS error. Counted, shown, and
             # kept out of both the quality and the byte totals — scoring it
@@ -149,7 +156,12 @@ def main():
               f"{tot_lg_b:,} B ({tot_lg_b / max(tot_vv_b, 1):.0f}x)")
         print("  (bytes an agent would have to CARRY — the token cost the pairing exists to price)")
 
-    diffs = [r for r in reads if r.get("verdict") not in (None, "match", "vv-only")]
+    unscored = [r for r in reads if r.get("verdict") == "unscored"]
+    if unscored:
+        print(f"\nunscored: {len(unscored)} (stale legacy-error verdict on an answering exit; no diff retained)")
+        for r in unscored:
+            print(f"  [{r['op']}] {' '.join(r.get('args', []))}")
+    diffs = [r for r in reads if r.get("verdict") not in (None, "match", "vv-only", "unscored")]
     print(f"\nharness errors: {len(herr)} (legacy one-liner FAILED — grep exit 2+, "
           f"anything else non-zero — excluded from quality and byte totals)")
     for r in herr:
