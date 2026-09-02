@@ -289,7 +289,8 @@ try:
                               ("native", lambda *a: subprocess.run([VRUST, *a], capture_output=True, text=True, env=native_env))):
             if label == "native" and not native_available():
                 continue
-            for spelling in ("graphify-out", "Sub/../graphify-out", "GLink", "Sub/graphify-out"):
+            for spelling in ("graphify-out", "Sub/../graphify-out", "GLink", "Sub/graphify-out",
+                             os.path.join(TV, "graphify-out")):
                 r = runner("orphans", spelling)
                 check(f"RI2k {label} orphans {spelling!r} (a skip dir, resolved, at any depth) refuses with a next-step (was a silent 0)",
                       r.returncode == 1 and r.stderr.startswith(f"refused: {spelling} is outside the link graph")
@@ -304,7 +305,7 @@ try:
             if label == "native" and not native_available():
                 continue
             r = runner("props", "type")
-            check(f"RI2w {label} VV_VAULT=. (relative) still walks the vault (native was a silent 0)",
+            check(f"RI2w {label} VV_VAULT=. (relative) still walks the vault (native was a silent 0)" + (" (control: python's normpath kept '.')" if label == "python" else ""),
                   r.returncode == 0 and "\tvvreadout-fixture" in r.stdout, (r.stdout + r.stderr)[:200])
     finally:
         pass   # TV is in _TMP; removed at exit
@@ -414,9 +415,12 @@ try:
     check("R5e byte totals exclude the failed pair on BOTH sides",
           "vv 1,100 B vs old way 1,900 B" in out, out)
     check("R5g funnel shows the split (unscored is paired, not scored)", "reads=14 -> scored=9" in out, out)
+    import re as _re
     _bl = [l for l in out.splitlines() if l.startswith("backlinks")]
-    check("R5p unscored rows leave the agree/differ denominator (the backlinks row itself says so)",
-          bool(_bl) and "1 unscored" in _bl[0] and "0/0 agree" not in out, _bl[:1] or out)
+    _m = _re.match(r"backlinks\s+(\d+)\s.*?(\d+)/(\d+) agree", _bl[0]) if _bl else None
+    check("R5p unscored rows leave the agree/differ denominator (the backlinks row: n pairs, n−1 scored, 1 unscored)",
+          bool(_m) and int(_m.group(3)) == int(_m.group(1)) - 1 and "1 unscored" in _bl[0] and "0/0 agree" not in out,
+          _bl[:1] or out)
     check("R5q an op with nothing scored says so", "nothing scored · 1 unscored" in out, out)
     check("R5r the funnel line reconciles reads and scored", "reads − scored = 3 harness error(s) + 2 unscored" in out, out)
     check("R5k stale legacy-error verdict on a grep exit 1 is not a harness error and not a measured difference",

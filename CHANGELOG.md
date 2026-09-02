@@ -40,7 +40,9 @@ time.
 - Environment contract: `VV_VAULT` is normalised lexically (like
   `os.path.normpath`) in BOTH engines before use, so a value containing `..`
   through a symlink names the lexical directory in both — previously python
-  and the native engine could address different vaults. `VV_NO_INDEX` and
+  and the native engine could address different vaults (known lexical
+  divergence: POSIX keeps a leading `//`, the native normalise collapses it
+  to `/`). `VV_NO_INDEX` and
   `VV_INDEX_ROOT` now bind the native engine's link cache too (they were
   python-only; README documented them without an engine qualifier), and an
   exported-but-empty value means unset in both engines.
