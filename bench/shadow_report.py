@@ -14,7 +14,7 @@ import collections, json, os, statistics, sys
 SINK = os.environ.get("VV_SHADOW_SINK") or os.path.expanduser("~/.claude/metrics/vv-shadow.jsonl")
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import sweepguard as sg
-from shadow import RULINGS   # one source for the four ruling values
+from shadow import RULINGS, LEGACY, HARNESS_VERSION, legacy_failed   # RULINGS: one source for the four ruling values
 if os.environ.get("VV_SHADOW_SINK"):
     print(f"shadow: sink {SINK} (VV_SHADOW_SINK override)", file=sys.stderr)
 
@@ -23,9 +23,9 @@ def _harness_error(r):
     """A read whose legacy side FAILED (not merely answered 'nothing').
 
     Decides from the RECORDED EXIT CODE whenever one exists — a verdict written
-    by an earlier producer could carry `legacy-error` for a grep exit 1 (the
-    round-1 shape), and trusting it would re-import the misclassification the
-    exit code refutes. The verdict is consulted only for a row with no exit
+    by an earlier producer could carry `legacy-error` for a grep exit 1 (a
+    producer that predates the exit-code rule), and trusting it would
+    re-import the misclassification the exit code refutes. The verdict is consulted only for a row with no exit
     code. grep's exit 1 is an answer, not a failure — see shadow.legacy_failed.
     # yagni: the exit-code branch reclassifies pre-verdict v4 rows (the
     # legacy-error verdict shipped without a HARNESS_VERSION bump on purpose);
@@ -36,7 +36,6 @@ def _harness_error(r):
         return r.get("verdict") == "legacy-error"
     if rc == 0:
         return False
-    from shadow import LEGACY, legacy_failed
     build = LEGACY.get(r.get("op"), (None,))[0]
     if build is None:
         return True          # a vv-only op never ran a legacy command; a non-zero exit is a harness fault
@@ -51,8 +50,6 @@ def main():
     if not os.path.exists(SINK):
         sys.exit(f"shadow: {SINK} does not exist — no paired reads recorded. "
                  f"This is a missing measurement, not a clean result.")
-    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    from shadow import HARNESS_VERSION
     reads, adj, stale, herr, unscored_n = [], collections.defaultdict(list), 0, [], 0
     adj_case = {}   # (op, tuple(args)) -> ruling; exact wins over op-level
     # "scored" is the stage that survives the harness-error split: a sink of
@@ -93,8 +90,8 @@ def main():
             continue
         funnel.bump("reads")
         if r.get("verdict") == "legacy-error" and not _harness_error(r):
-            # A round-1-shaped row: the verdict says failure, the exit code says
-            # answer. The pair is real (bytes/latency count), but no answer-set
+            # A row from a producer that predates the exit-code rule: the
+            # verdict says failure, the exit code says answer. The pair is real (bytes/latency count), but no answer-set
             # diff was retained, so it cannot be scored as a disagreement or a
             # match — mark it unscored rather than calling it a measured
             # difference.

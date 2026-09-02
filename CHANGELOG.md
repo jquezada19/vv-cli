@@ -9,7 +9,7 @@ changes an exit code, is a major change.
 ## [Unreleased]
 
 Version to be set by the release commit. Note for that decision: the
-**Exit-code change** below moves five invocations across three commands
+**Exit-code change** below moves five cases across three commands
 from exit 0 to exit 1 (`props KEY <file>`, `orphans <file>`,
 `orphans <missing>`, `orphans <skip dir>`, `board ../x`), which breaks a
 script that tested for success — a MAJOR change under this file's header
@@ -35,6 +35,14 @@ time.
 - `board FOLDER status open` (a filter without `=`) died as a bare Python
   traceback — exit 1, no usage line, no `next:`, and no metrics row; it is
   now `usage: board filters are KEY=VALUE …` with a runnable `next:`.
+- A case-variant folder spelling on a case-insensitive filesystem (APFS
+  default): `orphans SUB` resolved but named no walked path and answered a
+  silent `(0 orphans)`, and `orphans GRAPHIFY-OUT` dodged the skip-dir refusal
+  into the same silent zero. The scope is now respelled to its on-disk names
+  (matched by identity, not by case rule) in the python engine; the native
+  engine's canonicalize already answered the on-disk spelling.
+- The `next:` a file-as-folder or skip-dir refusal prints is shell-quoted, so a
+  path with a space is copy-runnable (board's and read's already were).
 
 ### Changed
 - Environment contract: `VV_VAULT` is normalised lexically (like

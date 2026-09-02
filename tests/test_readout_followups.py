@@ -166,6 +166,16 @@ try:
     os.makedirs(os.path.join(TV, "Sub", "graphify-out"))                        # a NESTED skip dir
     with open(os.path.join(TV, "Sub", "graphify-out", "nested-gen.md"), "w") as f:
         f.write("---\ntype: vvreadout-fixture\n---\n# nested gen\n")
+    with open(os.path.join(TV, "Sub", "has space.md"), "w") as f:          # a next-step must quote it
+        f.write("---\ntype: other\n---\n# spaced\n")
+    os.makedirs(os.path.join(TV, "Sp ace", "graphify-out"))
+    os.makedirs(os.path.join(TV, "Sub2"))
+    with open(os.path.join(TV, "Sub2", "graphify-out"), "w") as f:         # a FILE named like a skip dir
+        f.write("not a folder\n")
+    _outside = mkdtemp("vv-readout-outside-")
+    os.symlink(_outside, os.path.join(TV, "Esc"))                          # an escaping symlink
+    os.makedirs(os.path.join(TV, "Alias"))
+    os.symlink(os.path.join(TV, "Sub"), os.path.join(TV, "Alias", "graphify-out"))   # skip-NAMED, allowed target
     try:
         ienv = {"VV_ENGINE": "python", "VV_INDEX_ROOT": mkdtemp("vv-readout-index-"), "VV_VAULT": TV}
         native_env = dict(os.environ, VV_VAULT=TV, VV_INDEX_ROOT=ienv["VV_INDEX_ROOT"])  # native cache in the temp dir too
@@ -203,6 +213,20 @@ try:
             r = runner("orphans", "NoSuchFolder")
             check(f"RI2n {label} orphans on a missing folder is refused, not a clean zero", r.returncode == 1
                   and r.stderr.startswith("not-found: no such folder"), r.stdout + r.stderr)
+            # the next-step is copy-runnable: a path with a space is shell-quoted
+            # (board and read already quote theirs)
+            r = runner("orphans", "Sub/has space.md")
+            check(f"RI2f2 {label} a file refusal's next-step is shell-safe (a spaced path is quoted)",
+                  r.returncode == 1 and "next: vv outline 'Sub/has space.md'" in r.stderr, r.stdout + r.stderr)
+            r = runner("orphans", "Sp ace/graphify-out")
+            check(f"RI2k2 {label} a skip-dir refusal's next-step is shell-safe (a spaced path is quoted)",
+                  r.returncode == 1 and "next: vv board 'Sp ace/graphify-out'" in r.stderr, r.stdout + r.stderr)
+            r = runner("orphans", "Sub2/graphify-out")
+            check(f"RI2f3 {label} a FILE named like a skip dir gets the file refusal (the file test runs first; control: pre-existed)",
+                  r.returncode == 1 and r.stderr.startswith("not-found: Sub2/graphify-out is a file, not a folder"), r.stdout + r.stderr)
+            r = runner("orphans", "Esc")
+            check(f"RI2e {label} an escaping symlink is 'escape:' before any file/folder classification (control: pre-existed)",
+                  r.returncode == 1 and r.stderr.startswith("escape:"), r.stdout + r.stderr)
         r = vv("orphans", "Sub", env={"VV_ENGINE": "python", "VV_NO_INDEX": "1", "VV_VAULT": TV + "//"})
         check("RI2v a non-normalised VV_VAULT (trailing //) still finds orphans in a subfolder on the walk arm (was 0; control: the shared VAULT form fixed it, the source normpath is defence in depth)",
               r.returncode == 0 and "sub-fixture" in r.stdout, (r.stdout + r.stderr)[:300])
@@ -211,6 +235,18 @@ try:
             idx_files = [f for f in os.listdir(ienv["VV_INDEX_ROOT"]) if f.endswith(".vvidx")]
             check("RI2i native cache lands in VV_INDEX_ROOT under the name _cache_key derives (RI2l's positive control)",
                   _cache_key(TV) in idx_files, (idx_files[:3], _cache_key(TV)))
+            # a SYMLINKED VV_VAULT shares the real vault's cache file: the key
+            # hashes the canonical path on both sides (a lexical native hash
+            # would land a second file under the symlink's own name)
+            TVL = os.path.join(mkdtemp("vv-readout-vlink-"), "link")
+            os.symlink(TV, TVL)
+            _lexical = hashlib.sha256(TVL.encode()).hexdigest()[:16] + ".vvidx"
+            r = subprocess.run([VRUST, "backlinks", "vvreadout-root-fixture"], capture_output=True, text=True,
+                               env=dict(native_env, VV_VAULT=TVL))
+            idx_files = [f for f in os.listdir(ienv["VV_INDEX_ROOT"]) if f.endswith(".vvidx")]
+            check("RI2i2 a symlinked VV_VAULT lands on the canonical vault's cache file, never a lexical one (pins _cache_key ⇄ cache.rs)",
+                  r.returncode == 0 and _cache_key(TVL) == _cache_key(TV) and _cache_key(TV) in idx_files and _lexical not in idx_files,
+                  (idx_files[:4], _lexical, r.stderr[-120:]))
             noidx = mkdtemp("vv-readout-noidx-")
             r = subprocess.run([VRUST, "backlinks", "vvreadout-root-fixture"], capture_output=True, text=True,
                                env=dict(native_env, VV_INDEX_ROOT=noidx, VV_NO_INDEX="1"))
@@ -223,9 +259,10 @@ try:
             fakehome = mkdtemp("vv-readout-home-")    # "unset" means the HOME cache: point HOME at a temp dir
             r = subprocess.run([VRUST, "backlinks", "vvreadout-root-fixture"], capture_output=True, text=True,
                                env=dict(native_env, VV_INDEX_ROOT="", HOME=fakehome), cwd=emptycwd)
-            check("RI2m an empty VV_INDEX_ROOT means unset: nothing in the CWD, the cache under HOME",
-                  r.returncode == 0 and not os.listdir(emptycwd) and os.path.isdir(os.path.join(fakehome, ".cache/vv/index")),
-                  (os.listdir(emptycwd), os.path.exists(os.path.join(fakehome, ".cache/vv/index")), r.stderr[-120:]))
+            _homeidx = os.path.join(fakehome, ".cache/vv/index")
+            check("RI2m an empty VV_INDEX_ROOT means unset: nothing in the CWD, THIS vault's cache file under HOME",
+                  r.returncode == 0 and not os.listdir(emptycwd) and os.path.isdir(_homeidx) and _cache_key(TV) in os.listdir(_homeidx),
+                  (os.listdir(emptycwd), os.path.isdir(_homeidx) and os.listdir(_homeidx)[:3], r.stderr[-120:]))
             r = subprocess.run([VRUST, "backlinks", "vvreadout-root-fixture"], capture_output=True, text=True,
                                env=dict(native_env, VV_INDEX_ROOT=emptyroot, VV_NO_INDEX=""))
             check("RI2m2 an empty VV_NO_INDEX keeps the native cache on", r.returncode == 0 and bool(os.listdir(emptyroot)),
@@ -282,19 +319,49 @@ try:
                   and "vvreadout-root-fixture" in r.stdout and "(0 orphans" not in r.stdout, (r.stdout + r.stderr)[:300])
         # graph commands never enter SKIP_DIRS: those notes are outside the
         # link graph, so "orphans of graphify-out" has no answer. It used to
-        # print a silent 0 — the affordance class this branch closes; now it
+        # print a silent 0 (the wrong answer); now it
         # refuses with a next-step, both engines.
         # board/props DO answer for an explicitly named skip dir.
+        # Which spellings were a silent 0: python only the NESTED one (its check
+        # ran on the resolved top segment); native every one but the literal
+        # (its check ran on the RAW first segment). The rest are controls.
+        ci = os.path.isdir(os.path.join(TV, "SUB"))     # a case-insensitive filesystem (APFS default)
         for label, runner in (("python", lambda *a: vv(*a, env={"VV_ENGINE": "python", "VV_NO_INDEX": "1", "VV_VAULT": TV})),
                               ("native", lambda *a: subprocess.run([VRUST, *a], capture_output=True, text=True, env=native_env))):
             if label == "native" and not native_available():
                 continue
             for spelling in ("graphify-out", "Sub/../graphify-out", "GLink", "Sub/graphify-out",
                              os.path.join(TV, "graphify-out")):
+                pinned = spelling == "Sub/graphify-out" if label == "python" else spelling != "graphify-out"
                 r = runner("orphans", spelling)
-                check(f"RI2k {label} orphans {spelling!r} (a skip dir, resolved, at any depth) refuses with a next-step (was a silent 0)",
+                check(f"RI2k {label} orphans {spelling!r} (a skip dir, resolved, at any depth) refuses with a next-step"
+                      + (" (was a silent 0)" if pinned else " (control: already refused)"),
                       r.returncode == 1 and r.stderr.startswith(f"refused: {spelling} is outside the link graph")
                       and f"next: vv board {spelling}" in r.stderr, (r.stdout + r.stderr)[:200])
+            # the inverse: the RESOLVED target decides, never the lexical name
+            r = runner("orphans", "Alias/graphify-out")
+            check(f"RI2k3 {label} a skip-NAMED symlink to an allowed folder answers (resolved target, not lexical name, is the rule)",
+                  r.returncode == 0 and "sub-fixture" in r.stdout, (r.stdout + r.stderr)[:200])
+            # a case-variant spelling resolves on a case-insensitive filesystem,
+            # but realpath keeps the CALLER's casing while every walk prunes
+            # and prefix-compares by the on-disk name: `orphans SUB` matched
+            # no walked path (a silent 0) and `orphans GRAPHIFY-OUT` dodged
+            # the skip-dir refusal (the same silent 0), both engines.
+            if ci:
+                r = runner("orphans", "SUB")
+                check(f"RI2ci {label} orphans by a case-variant spelling answers by the on-disk name (was a silent 0)",
+                      r.returncode == 0 and "sub-fixture" in r.stdout, (r.stdout + r.stderr)[:200])
+                r = runner("orphans", "GRAPHIFY-OUT")
+                check(f"RI2ci2 {label} a case-variant skip dir is still refused (was a silent 0)",
+                      r.returncode == 1 and r.stderr.startswith("refused: GRAPHIFY-OUT is outside the link graph"), (r.stdout + r.stderr)[:200])
+            else:
+                r = runner("orphans", "SUB")
+                check(f"RI2ci {label} on a case-sensitive filesystem a case-variant spelling is not-found (control)",
+                      r.returncode == 1 and r.stderr.startswith("not-found"), (r.stdout + r.stderr)[:200])
+        if ci:
+            r = vv("props", "type", "SUB", env=ienv)
+            check("RI2ci3 indexed props by a case-variant scope answers by the on-disk name",
+                  r.returncode == 0 and "\tvvreadout-fixture" in r.stdout, (r.stdout + r.stderr)[:200])
         # a RELATIVE VV_VAULT of "." (cd into the vault): python's normpath keeps
         # ".", the native lexical normalise once yielded "" and every raw walk
         # read_dir("") answered a silent zero
@@ -362,7 +429,7 @@ try:
         # a record from an OLDER harness: must be set aside, never pooled
         dict(base, hv=HARNESS_VERSION - 1, op="outline", args=["Old.md"], legacy_ms=30.0,
              legacy_bytes=9999, legacy_exit=0, verdict="differ", vv_only=["z"], legacy_only=[]),
-        # a row the ROUND-1 producer would have written: verdict legacy-error
+        # a row a producer predating the exit-code rule would have written: verdict legacy-error
         # on a grep exit 1. The exit code wins — it is an answer, scored.
         dict(base, op="backlinks", args=["R1.md"], legacy_ms=5.0, legacy_bytes=0, legacy_exit=1,
              verdict="legacy-error", vv_only=None, legacy_only=None),
@@ -417,9 +484,11 @@ try:
     check("R5g funnel shows the split (unscored is paired, not scored)", "reads=14 -> scored=9" in out, out)
     import re as _re
     _bl = [l for l in out.splitlines() if l.startswith("backlinks")]
-    _m = _re.match(r"backlinks\s+(\d+)\s.*?(\d+)/(\d+) agree", _bl[0]) if _bl else None
-    check("R5p unscored rows leave the agree/differ denominator (the backlinks row: n pairs, n−1 scored, 1 unscored)",
-          bool(_m) and int(_m.group(3)) == int(_m.group(1)) - 1 and "1 unscored" in _bl[0] and "0/0 agree" not in out,
+    # bound to the row's own agree/differ/unscored (the n column counts every
+    # row for the op, paired or not, so an unpaired fixture row would move it)
+    _m = _re.search(r"(\d+)/(\d+) agree · (\d+) differ · (\d+) unscored", _bl[0]) if _bl else None
+    check("R5p unscored rows leave the agree/differ denominator (agree + differ = scored; the unscored count sits beside it)",
+          bool(_m) and int(_m.group(1)) + int(_m.group(3)) == int(_m.group(2)) and int(_m.group(4)) == 1 and "0/0 agree" not in out,
           _bl[:1] or out)
     check("R5q an op with nothing scored says so", "nothing scored · 1 unscored" in out, out)
     check("R5r the funnel line reconciles reads and scored", "reads − scored = 3 harness error(s) + 2 unscored" in out, out)
@@ -428,6 +497,16 @@ try:
           and "R1.md → legacy-error" not in out and "harness errors: 3" in out, out)
     check("R6o unknown `who` does not adjudicate", "[head] U.md → differ  (UNADJUDICATED)" in out, out)
     check("R6q a ruling without a reason does not adjudicate", "[show] N.md → differ  (UNADJUDICATED)" in out, out)
+    # shadow_report._harness_error hands every builder a one-element placeholder
+    # argv, unguarded — this is the invariant that makes that safe
+    from shadow import LEGACY as _LEGACY
+    _bad = [op for op, (b, *_) in _LEGACY.items() if b is not None and not isinstance(b(["_"]), list)]
+    check("R6r every legacy builder accepts the one-element placeholder argv the report's classifier hands it", not _bad, _bad)
+    # the skip list is mirrored by hand into the native engine: pin the mirror
+    import re as _re2
+    _py = set(_re2.findall(r'"([^"]+)"', _re2.search(r"^SKIP_DIRS\s*=\s*\{([^}]*)\}", open(os.path.join(REPO, "src", "vv_impl.py")).read(), _re2.M).group(1)))
+    _rs = set(_re2.findall(r'"([^"]+)"', _re2.search(r"pub const SKIP_DIRS[^=]*=\s*&?\[([^\]]*)\]", open(os.path.join(REPO, "vrust", "src", "main.rs")).read()).group(1)))
+    check("R6s SKIP_DIRS is mirrored whole: the python set and the native const name the same directories", _py == _rs and bool(_py), (sorted(_py), sorted(_rs)))
     check("R5i older-harness record set aside, not pooled (control: pre-existing)",
           "set aside 1 record(s)" in out and "Old.md" not in out and "9,999" not in out, out)
     check("R5j report prints the override banner", "VV_SHADOW_SINK override" in out, out)

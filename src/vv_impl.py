@@ -22,7 +22,7 @@ Global:  --vault PATH · --limit N (enumerators)        Help: vv --help
 Every op logs {op, ms, out_bytes} to ~/.claude/metrics/vv.jsonl.
 Exit: 0 ok · 1 not-found/usage · 3 stale hash or drifted plan · 4 pending journal (vv doctor)
 """
-import sys, os, re, json, time, hashlib
+import sys, os, re, json, time, hashlib, shlex
 # subprocess, glob, datetime are imported AT USE SITES: together they cost
 # ~10 ms of startup and most commands touch none of them (Codex perf review
 # 2026-08-27, findings 8-9; measured with -X importtime).
@@ -727,10 +727,37 @@ def _scope(folder):
     root = contain(folder)
     if not os.path.isdir(root):
         if os.path.exists(root):
-            die(f"not-found: {folder} is a file, not a folder — next: vv outline {folder}")
+            die(f"not-found: {folder} is a file, not a folder — next: vv outline {shlex.quote(folder)}")
         die(f"not-found: no such folder: {folder}")
     rel_ = os.path.relpath(os.path.realpath(root), _VAULT_REAL)
-    return "" if rel_ == "." else rel_
+    return "" if rel_ == "." else _ondisk(rel_)
+
+def _ondisk(rel_):
+    """`rel_` respelled with each component's ON-DISK name. os.path.realpath
+    is pure python and keeps the caller's casing, so on a case-insensitive
+    filesystem (APFS default) `SUB` resolves but names no walked path — every
+    walk prunes and prefix-compares by the name the directory listing returns
+    — and `orphans SUB` answered a silent 0 while `orphans GRAPHIFY-OUT`
+    dodged the skip-dir refusal into the same silent 0. (The native engine's
+    canonicalize is realpath(3), which already answers the on-disk spelling.)
+    Each component is matched by identity (samestat), never by case rule."""
+    cur, out = _VAULT_REAL, []
+    for c in rel_.split(os.sep):
+        if not c:
+            continue
+        name = c
+        try:
+            want = os.stat(os.path.join(cur, c))
+            with os.scandir(cur) as it:
+                for e in it:
+                    if e.name.casefold() == c.casefold() and os.path.samestat(e.stat(), want):
+                        name = e.name
+                        break
+        except OSError:
+            pass
+        out.append(name)
+        cur = os.path.join(cur, name)
+    return os.sep.join(out)
 
 def cmd_orphans(folder=""):
     # re-joined onto VAULT so the prefix compares against the walk's own
@@ -739,11 +766,11 @@ def cmd_orphans(folder=""):
     if any(c.startswith(".") or c in SKIP_DIRS for c in rroot.split(os.sep) if c):
         # Notes under a skip dir — at ANY depth, since the walk prunes by name
         # at every level — are outside the link graph, so "orphans of
-        # graphify-out" has no answer. It used to print a silent `(0 orphans)`
-        # — the affordance class this branch closes. The check runs on the
-        # RESOLVED scope (a `..` or a symlink cannot dodge it).
+        # graphify-out" has no answer; a silent `(0 orphans)` is the wrong one.
+        # The check runs on the RESOLVED, on-disk-spelled scope (a `..`, a
+        # symlink or a case variant cannot dodge it).
         # board/props DO answer for an explicitly named skip dir.
-        die(f"refused: {folder} is outside the link graph (a skip dir) — next: vv board {folder}")
+        die(f"refused: {folder} is outside the link graph (a skip dir) — next: vv board {shlex.quote(folder)}")
     root = os.path.join(VAULT, rroot) if rroot else VAULT
     files = list(md_files())
     idx = basename_index()
@@ -789,7 +816,6 @@ def cmd_board(folder, *filters):
     # vv's — capture exit codes unpiped.)
     bad = [f for f in filters if "=" not in f]
     if bad:
-        import shlex
         die(f"usage: board filters are KEY=VALUE, got {shlex.quote(bad[0])} — "
             f"next: vv board {shlex.quote(folder)} {shlex.quote(bad[0] + '=VALUE')}")
     want = dict(f.split("=", 1) for f in filters)
@@ -2329,7 +2355,6 @@ CMDS = {
 # outline — with the note the caller already named.
 def _next_read(args):
     if args:
-        import shlex
         return f"vv outline {shlex.quote(args[0])}"
     return "vv outline NOTE"
 ARITY_NEXT = {"read": _next_read}   # runnable, per the `next:` contract

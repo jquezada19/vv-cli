@@ -14,7 +14,10 @@ export VV_NO_METRICS=1
 # NOT exported gate-wide: VV_INDEX_ROOT. Three cache suites (phase2, cache
 # integrity, cache torture) deliberately exercise the HOME-derived native
 # cache path and go red with it set; a suite that wants both engines' caches
-# in a throwaway dir sets it itself (the read-out suite does).
+# in a throwaway dir sets it itself (the read-out suite does). phase2 and
+# cache integrity remove their fixture vaults' .vvidx files from the real
+# ~/.cache/vv/index on the way out; cache torture redirects HOME. Files left
+# there by gate runs before that clean-up are stale, harmless and unswept.
 
 # src/vv_impl.py uses PEP 701 multi-line f-string expressions (3.12+). On an
 # older interpreter the python oracle dies at import, and the differential

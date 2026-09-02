@@ -8,7 +8,7 @@ answer and must self-heal. Patch: stdin ordering — a stale sha falls back
 BEFORE stdin is consumed, so python's canonical exit-3 flow still works; the
 happy path must produce byte-identical files.
 """
-import os, subprocess, sys, tempfile, shutil, glob
+import hashlib, os, subprocess, sys, tempfile, shutil
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 VR = os.path.join(REPO, "vrust/target/release/vrust")
@@ -26,9 +26,10 @@ def run(cmd, vault, stdin=None, py=False):
 def main():
     if not os.path.exists(VR):
         print("SKIP: binary not built"); return 0
-    fails = []
+    fails, ran = [], []
     def check(lbl, ok, info=""):
         print(("PASS " if ok else "FAIL ") + lbl + ("" if ok else f"  [{str(info)[:140]}]"))
+        ran.append(lbl)
         if not ok: fails.append(lbl)
 
     tv = tempfile.mkdtemp(prefix="vv-p2-")
@@ -46,16 +47,20 @@ def main():
     a = run(["deadends"], tv); b = run(["deadends"], tv, py=True)
     check("P2b deletion parity", a.stdout == b.stdout and a.returncode == b.returncode,
           a.stdout + b.stdout)
-    # corruption self-heal
-    caches = sorted(glob.glob(os.path.expanduser("~/.cache/vv/index/*.vvidx")),
-                    key=os.path.getmtime)
-    if caches:
-        open(caches[-1], "w").write("garbage")
+    # corruption self-heal — THIS vault's cache file, addressed by key (the
+    # newest file of a real-cache glob was whatever ran last, and an empty
+    # glob skipped both checks under a fixed "10" banner)
+    cache = os.path.expanduser("~/.cache/vv/index/"
+                               + hashlib.sha256(os.path.realpath(tv).encode()).hexdigest()[:16] + ".vvidx")
+    check("P2c0 the fixture vault's native cache exists where the engine derives it (setup)",
+          os.path.exists(cache), cache)
+    if os.path.exists(cache):
+        open(cache, "w").write("garbage")
         a = run(["backlinks", "C.md"], tv); b = run(["backlinks", "C.md"], tv, py=True)
         check("P2c corrupt cache still answers correctly",
               a.stdout == b.stdout, a.stdout + b.stdout)
-        check("P2d cache self-healed", open(caches[-1]).readline().startswith("vvidx"),
-              open(caches[-1]).readline())
+        check("P2d cache self-healed", open(cache).readline().startswith("vvidx"),
+              open(cache).readline())
     # patch: happy + stale + CRLF, byte-compared against python on twin vaults
     tb = tempfile.mkdtemp(prefix="vv-p2b-")
     for name, content in (("N.md", "---\ntype: note\n---\n# H\nold body\n## Two\nx\n"),
@@ -78,9 +83,15 @@ def main():
     check("P2h stale patch touched nothing",
           open(f"{tv}/N.md", "rb").read() == open(f"{tb}/N.md", "rb").read())
     shutil.rmtree(tv, ignore_errors=True); shutil.rmtree(tb, ignore_errors=True)
+    for v in (tv, tb):     # the fixtures' cache files too — they used to pile up in the real cache dir
+        try:
+            os.remove(os.path.expanduser("~/.cache/vv/index/"
+                                         + hashlib.sha256(os.path.realpath(v).encode()).hexdigest()[:16] + ".vvidx"))
+        except FileNotFoundError:
+            pass
     if fails:
         print(f"\n{len(fails)} failures: {fails}"); return 1
-    print("\nALL PASS (phase2: 10)")
+    print(f"\nALL PASS (phase2: {len(ran)})")
     return 0
 
 if __name__ == "__main__":
