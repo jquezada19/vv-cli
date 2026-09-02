@@ -7,7 +7,7 @@ the same time. Each pin below names what motivated it.
 Window: 2026-08-26T21:06 → 2026-09-02 (the pilot register's window).
 Checks suffixed "(control…)" pass on pre-fix code by design and "(setup)"
 checks only gate what follows; every other check was watched to fail with its
-fix reverted (mutation pass, 2026-09-02). The suite runs in a throwaway vault.
+fix reverted (a mutation pass). The suite runs in a throwaway vault.
 
 R1  `board FOLDER status open` (space, not `=`) died as a bare Python
     traceback: exit 1, no usage line, no `next:`, no metrics row. Found by
@@ -47,12 +47,19 @@ def mkdtemp(prefix):
 
 # A THROWAWAY vault. Nothing here asserts anything about real notes — only
 # error grammar and folder scoping — so the suite never touches the user's
-# vault. (Rounds 2-11 of the 2026-09-02 review grew a lock, a sentinel, a
-# holding dir, an exit hook and signal handlers to protect a real-vault
-# fixture; the complexity seat pointed out the hazard was the fixture's
-# location, not its teardown. Deleting the hazard beats guarding it.)
+# vault. (An earlier version grew a lock, a sentinel, a holding dir, an
+# exit hook and signal handlers to protect a real-vault fixture; the hazard
+# was the fixture's location, not its teardown. Deleting the hazard beats
+# guarding it.)
 _VAULT = mkdtemp("vv-readout-vault-")
 os.environ["VV_VAULT"] = _VAULT          # every vv child, and bench/shadow.py at import
+os.environ["VV_INDEX_ROOT"] = mkdtemp("vv-readout-index-")   # both engines' caches, for EVERY child
+_REAL_CACHE = os.path.expanduser("~/.cache/vv/index")
+import hashlib
+def _cache_key(vault):
+    """The native cache file name for a vault: sha256(canonical path)[:16]."""
+    return hashlib.sha256(os.path.realpath(vault).encode()).hexdigest()[:16] + ".vvidx"
+_OUR_VAULTS = [_VAULT]                      # every vault this suite drives natively; TV is appended later
 SB = os.path.join(_VAULT, "Sandbox/vvreadout")
 _JR = mkdtemp("vv-test-journals-")
 os.environ["VV_JOURNAL_ROOT"] = _JR
@@ -70,8 +77,8 @@ def run(*args, env=None, stdin=None):
 _native_warned = []
 def native_available():
     """The native binary, or a LOUD skip: a suite that silently skips its native
-    arms passes while proving nothing about the engine on PATH (third-model
-    seat). run_tests.sh builds the binary first, so the gate never skips."""
+    arms passes while proving nothing about the engine on PATH.
+    run_tests.sh builds the binary first, so the gate never skips."""
     if os.path.exists(VRUST):
         return True
     if not _native_warned:
@@ -140,9 +147,9 @@ try:
     r = vv("batch", env={"VV_ENGINE": "python"}, stdin=json.dumps({"cmd": "read", "args": [NOTE]}) + "\n")
     check("R4e batch read arity miss carries the same interpolated next-step",
           f"vv outline '{NOTE}'" in r.stdout + r.stderr, (r.stdout + r.stderr)[:300])
-    # The INDEXED python arm — the one that returned zero rows for "." (buddy
-    # seat, round 3: with VV_JOURNAL_ROOT set and no VV_INDEX_ROOT the index is
-    # off, so the plain R2r/R2p above exercise only the walk arm). Sandbox is
+    # The INDEXED python arm — the one that returned zero rows for "." (with
+    # VV_JOURNAL_ROOT set and no VV_INDEX_ROOT the index is off, so the plain
+    # R2r/R2p above exercise only the walk arm). Sandbox is
     # not indexed, so the fixture lives at the vault root for this block and
     # is removed right after.
     TV = mkdtemp("vv-readout-tv-")            # a throwaway vault: never the real one
@@ -157,8 +164,7 @@ try:
     try:
         ienv = {"VV_ENGINE": "python", "VV_INDEX_ROOT": mkdtemp("vv-readout-index-"), "VV_VAULT": TV}
         native_env = dict(os.environ, VV_VAULT=TV, VV_INDEX_ROOT=ienv["VV_INDEX_ROOT"])  # native cache in the temp dir too
-        real_cache = os.path.expanduser("~/.cache/vv/index")
-        cache_before = set(os.listdir(real_cache)) if os.path.isdir(real_cache) else set()
+        _OUR_VAULTS.append(TV)
         r = vv("index", "--rebuild", env=ienv)
         check("RI index built for the indexed-arm pins (setup)", r.returncode == 0, r.stderr[-200:])
         for folder in (".", "", "./"):
@@ -169,7 +175,7 @@ try:
         check("RI2p indexed props KEY . covers the vault root", r.returncode == 0 and "\tvvreadout-fixture" in r.stdout,
               (r.stdout + r.stderr)[:300])
         # retirement: a "." SCOPE saw no DB rows, so a deleted note's row was
-        # never retired by a root query (secondary review, round 5). Index a
+        # never retired by a root query. Index a
         # note, delete it, query the root: the stale row must be gone.
         GONE = os.path.join(TV, "Sub", "gone-fixture.md")
         with open(GONE, "w") as f:
@@ -193,24 +199,38 @@ try:
             check(f"RI2n {label} orphans on a missing folder is refused, not a clean zero", r.returncode == 1
                   and r.stderr.startswith("not-found: no such folder"), r.stdout + r.stderr)
         r = vv("orphans", "Sub", env={"VV_ENGINE": "python", "VV_NO_INDEX": "1", "VV_VAULT": TV + "//"})
-        check("RI2v a non-normalised VV_VAULT (trailing //) still finds orphans in a subfolder on the walk arm (was 0)",
+        check("RI2v a non-normalised VV_VAULT (trailing //) still finds orphans in a subfolder on the walk arm (was 0; control: the shared VAULT form fixed it, the source normpath is defence in depth)",
               r.returncode == 0 and "sub-fixture" in r.stdout, (r.stdout + r.stderr)[:300])
         if native_available():
             subprocess.run([VRUST, "backlinks", "vvreadout-root-fixture"], capture_output=True, text=True, env=native_env)
             idx_files = [f for f in os.listdir(ienv["VV_INDEX_ROOT"]) if f.endswith(".vvidx")]
             check("RI2i native cache lands in VV_INDEX_ROOT", bool(idx_files), os.listdir(ienv["VV_INDEX_ROOT"])[:5])
             noidx = mkdtemp("vv-readout-noidx-")
-            subprocess.run([VRUST, "backlinks", "vvreadout-root-fixture"], capture_output=True, text=True,
-                           env=dict(native_env, VV_INDEX_ROOT=noidx, VV_NO_INDEX="1"))
-            check("RI2j VV_NO_INDEX writes no native cache", not os.listdir(noidx), os.listdir(noidx))
+            r = subprocess.run([VRUST, "backlinks", "vvreadout-root-fixture"], capture_output=True, text=True,
+                               env=dict(native_env, VV_INDEX_ROOT=noidx, VV_NO_INDEX="1"))
+            check("RI2j VV_NO_INDEX writes no native cache (and the command still answers)",
+                  r.returncode == 0 and not os.listdir(noidx), os.listdir(noidx) or r.stderr[-120:])
+            # empty knobs mean UNSET (python's `or`): an empty index root must not
+            # drop the cache into the CWD; an empty VV_NO_INDEX keeps the cache on
+            emptycwd = mkdtemp("vv-readout-emptycwd-")
+            emptyroot = mkdtemp("vv-readout-emptyroot-")
+            fakehome = mkdtemp("vv-readout-home-")    # "unset" means the HOME cache: point HOME at a temp dir
+            r = subprocess.run([VRUST, "backlinks", "vvreadout-root-fixture"], capture_output=True, text=True,
+                               env=dict(native_env, VV_INDEX_ROOT="", HOME=fakehome), cwd=emptycwd)
+            check("RI2m an empty VV_INDEX_ROOT means unset: nothing in the CWD, the cache under HOME",
+                  r.returncode == 0 and not os.listdir(emptycwd) and os.path.isdir(os.path.join(fakehome, ".cache/vv/index")),
+                  (os.listdir(emptycwd), os.path.exists(os.path.join(fakehome, ".cache/vv/index")), r.stderr[-120:]))
+            r = subprocess.run([VRUST, "backlinks", "vvreadout-root-fixture"], capture_output=True, text=True,
+                               env=dict(native_env, VV_INDEX_ROOT=emptyroot, VV_NO_INDEX=""))
+            check("RI2m2 an empty VV_NO_INDEX keeps the native cache on", r.returncode == 0 and bool(os.listdir(emptyroot)),
+                  os.listdir(emptyroot) or r.stderr[-120:])
             r = subprocess.run([VRUST, "orphans", "."], capture_output=True, text=True,
                                env=dict(native_env, VV_VAULT=TV + "/"))
             check("RI2t native orphans . under a trailing-slash VV_VAULT (was a silent 0)",
                   r.returncode == 0 and "vvreadout-root-fixture" in r.stdout, (r.stdout + r.stderr)[:300])
-            # VV_VAULT="<TV>/Link/../" — lexically TV itself; through the symlink it
-            # would be Sub's parent (= TV here) too, so make the two DIFFER: a link
-            # to a sibling temp dir, so the lexical form is TV and the resolved
-            # form is the sibling. Both engines must answer for TV.
+            # VV_VAULT="<TV>/Elsewhere/.." — lexically TV; resolved through the
+            # symlink it is the sibling temp dir's PARENT (the system temp dir),
+            # which holds no fixture. Both engines must answer for TV.
             other = mkdtemp("vv-readout-other-")
             os.symlink(other, os.path.join(TV, "Elsewhere"))
             dotdot = os.path.join(TV, "Elsewhere", "..")
@@ -236,7 +256,7 @@ try:
             check(f"RI2s {label} orphans through an in-vault symlink resolves the folder (was 0)" + (" (control: python pre-existed)" if label == "python" else ""),
                   r.returncode == 0 and "sub-fixture" in r.stdout, (r.stdout + r.stderr)[:300])
         # generated dir parity: graphify-out/ is excluded by the index; the
-        # walk and the native engine must exclude it too (three seats, round 3)
+        # walk and the native engine must exclude it too
         for label, runner in (("indexed", lambda *a: vv(*a, env=ienv)),
                               ("walk", lambda *a: vv(*a, env={"VV_ENGINE": "python", "VV_NO_INDEX": "1", "VV_VAULT": TV})),
                               ("native", lambda *a: subprocess.run([VRUST, *a], capture_output=True, text=True, env=native_env))):
@@ -254,26 +274,37 @@ try:
             r = runner("orphans", "Sub/..")
             check(f"RI2d {label} orphans Sub/.. resolves to the root" + (" (control)" if label == "python" else ""), r.returncode == 0
                   and "vvreadout-root-fixture" in r.stdout and "(0 orphans" not in r.stdout, (r.stdout + r.stderr)[:300])
-        # graph commands never enter SKIP_DIRS, even when one is named: those
-        # notes are outside the link graph, so "orphans of graphify-out" has no
-        # answer — both engines say 0 (decision, not a defect; third-model seat,
-        # round 12). board/props DO answer for an explicitly named skip dir.
+        # graph commands never enter SKIP_DIRS: those notes are outside the
+        # link graph, so "orphans of graphify-out" has no answer. It used to
+        # print a silent 0 — the affordance class this branch closes; now it
+        # refuses with a next-step, both engines.
+        # board/props DO answer for an explicitly named skip dir.
         for label, runner in (("python", lambda *a: vv(*a, env={"VV_ENGINE": "python", "VV_NO_INDEX": "1", "VV_VAULT": TV})),
                               ("native", lambda *a: subprocess.run([VRUST, *a], capture_output=True, text=True, env=native_env))):
             if label == "native" and not native_available():
                 continue
             r = runner("orphans", "graphify-out")
-            check(f"RI2k {label} orphans on a named skip dir is an explicit zero (decision: outside the graph)",
-                  r.returncode == 0 and "(0 orphans" in r.stdout, (r.stdout + r.stderr)[:200])
-        cache_after = set(os.listdir(real_cache)) if os.path.isdir(real_cache) else set()
-        check("RI2l the whole indexed-arm block wrote nothing to ~/.cache/vv/index", cache_after == cache_before,
-              sorted(cache_after - cache_before)[:3])
+            check(f"RI2k {label} orphans on a named skip dir refuses with a next-step (was a silent 0)",
+                  r.returncode == 1 and r.stderr.startswith("refused: graphify-out is outside the link graph")
+                  and "next: vv board graphify-out" in r.stderr, (r.stdout + r.stderr)[:200])
+        # a RELATIVE VV_VAULT of "." (cd into the vault): python's normpath keeps
+        # ".", the native lexical normalise once yielded "" and every raw walk
+        # read_dir("") answered a silent zero
+        for label, runner in (("python", lambda *a: subprocess.run([sys.executable, VV, *a], capture_output=True, text=True,
+                                                                   env=dict(os.environ, VV_ENGINE="python", VV_VAULT=".", VV_NO_INDEX="1"), cwd=TV)),
+                              ("native", lambda *a: subprocess.run([VRUST, *a], capture_output=True, text=True,
+                                                                   env=dict(os.environ, VV_VAULT="."), cwd=TV))):
+            if label == "native" and not native_available():
+                continue
+            r = runner("props", "type")
+            check(f"RI2w {label} VV_VAULT=. (relative) still walks the vault (native was a silent 0)",
+                  r.returncode == 0 and "\tvvreadout-fixture" in r.stdout, (r.stdout + r.stderr)[:200])
     finally:
         pass   # TV is in _TMP; removed at exit
     if native_available():
         # The native entry itself: every one of these must Fallback/exec to
-        # python and print the identical text (Codex + buddy seats asked for
-        # this pin — the python launcher alone never exercises the binary).
+        # python and print the identical text (the python launcher alone
+        # never exercises the binary).
         def native(*a):
             return subprocess.run([VRUST, *a], capture_output=True, text=True,
                                   env=dict(os.environ, VV_VAULT=_VAULT))
@@ -317,7 +348,7 @@ try:
         dict(base, op="backlinks", args=["A.md"], legacy_ms=40.0, legacy_bytes=0, legacy_exit=0,
              verdict="differ", vv_only=["C.md"], legacy_only=["D.md"]),
         # a disagreement whose op has NO op-level ruling — only a case ruling
-        # (pins the dedupe/unadj expression, code-review seat round 2)
+        # (pins the dedupe/unadj expression)
         dict(base, op="props", args=["status"], legacy_ms=40.0, legacy_bytes=0, legacy_exit=0,
              verdict="differ", vv_only=["x"], legacy_only=[]),
         # a record from an OLDER harness: must be set aside, never pooled
@@ -376,7 +407,9 @@ try:
     check("R5e byte totals exclude the failed pair on BOTH sides",
           "vv 1,100 B vs old way 1,900 B" in out, out)
     check("R5g funnel shows the split (unscored is paired, not scored)", "reads=14 -> scored=9" in out, out)
-    check("R5p unscored rows leave the agree/differ denominator", "1 unscored" in out and "0/0 agree" not in out, out)
+    _bl = [l for l in out.splitlines() if l.startswith("backlinks")]
+    check("R5p unscored rows leave the agree/differ denominator (the backlinks row itself says so)",
+          bool(_bl) and "1 unscored" in _bl[0] and "0/0 agree" not in out, _bl[:1] or out)
     check("R5q an op with nothing scored says so", "nothing scored · 1 unscored" in out, out)
     check("R5r the funnel line reconciles reads and scored", "reads − scored = 3 harness error(s) + 2 unscored" in out, out)
     check("R5k stale legacy-error verdict on a grep exit 1 is not a harness error and not a measured difference",
@@ -451,7 +484,7 @@ try:
     rec = produce(0, "Sandbox/vvreadout/Readout Note.md\n")
     check("R7d matching answer → match (control)", rec.get("verdict") == "match", rec)
     # R7e — a legacy BUILDER that raises (missing positional) is recorded as a
-    # harness error, never a traceback: round 2 lost this record (3 seats).
+    # harness error, never a traceback: an earlier version lost this record.
     r = run(SHADOW, "read", env=env)
     rec = json.loads(open(sink).read().strip().splitlines()[-1])
     check("R7e builder exception is recorded, not a traceback",
@@ -462,5 +495,9 @@ finally:
     for d in _TMP:
         shutil.rmtree(d, ignore_errors=True)
 
+# hermetic: only THIS suite's vault keys are asserted absent (another process
+# may legitimately write its own vault's cache while we run)
+_leaked = [k for k in map(_cache_key, _OUR_VAULTS) if os.path.exists(os.path.join(_REAL_CACHE, k))]
+check("RI2l the WHOLE suite wrote none of its own vaults' caches to ~/.cache/vv/index", not _leaked, _leaked)
 print(f"\n{len(fails)} failure(s)" if fails else "\nALL PASS")
 sys.exit(1 if fails else 0)

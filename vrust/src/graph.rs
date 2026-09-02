@@ -518,13 +518,24 @@ fn cmd_orphans(folder: &str, vault: &Path, t0: Instant) -> Outcome {
         // Resolve like python's _scope: canonicalize, strip the canonical vault,
         // re-join onto `vault` so the prefix matches walk_ex's own paths. An
         // in-vault symlinked folder used to answer a silent 0 natively while
-        // python answered correctly (two seats, round 7). A missing folder is
+        // python answered correctly. A missing folder is
         // python's `not-found` to print.
         let joined = match readpath::contain(vault, folder) {
             Some(p) => p,
             None => return Outcome::Fallback,
         };
         if !joined.is_dir() {
+            return Outcome::Fallback;
+        }
+        // a skip dir named as the scope is python's refusal to print
+        let top = Path::new(folder)
+            .components()
+            .find_map(|c| match c {
+                std::path::Component::Normal(n) => Some(n.to_string_lossy().into_owned()),
+                _ => None,
+            })
+            .unwrap_or_default();
+        if top.starts_with('.') || crate::SKIP_DIRS.contains(&top.as_str()) {
             return Outcome::Fallback;
         }
         match (fs::canonicalize(&joined), fs::canonicalize(vault)) {

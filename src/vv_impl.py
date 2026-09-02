@@ -29,7 +29,7 @@ import sys, os, re, json, time, hashlib
 
 # normpath ONCE at the source: a non-normalised VV_VAULT ("…/vault//",
 # "…/v/./") made the walk's paths and a normalised scope root disagree, so
-# `orphans Sub` answered a silent zero (security seat, round 9)
+# `orphans Sub` answered a silent zero
 VAULT = os.path.normpath(os.environ.get("VV_VAULT") or os.path.expanduser("~/Documents/Obsidian Vault"))
 VRUST = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "vrust/target/release/vrust")
 METRICS = os.path.expanduser("~/.claude/metrics/vv.jsonl")
@@ -712,8 +712,8 @@ def cmd_links(ref):
 
 def _scope(folder):
     """The resolved, vault-relative scope of a folder argument — "" for the
-    vault root. One rule for board/props/orphans (the engines drifted three
-    times on it in one review, 2026-09-02):
+    vault root. One rule for board/props/orphans (the engines drifted on it
+    three separate times before it was written down once):
       * contained (an escape dies here), and must be a directory (a FILE as a
         sync scope retired that file's own index row);
       * resolved, not lexical: `<in-vault symlink>/..` relpaths to "."
@@ -734,6 +734,13 @@ def cmd_orphans(folder=""):
     # re-joined onto VAULT so the prefix compares against the walk's own
     # absolute paths even when VAULT itself is a symlink (same form as board)
     rroot = _scope(folder)
+    top = rroot.split(os.sep, 1)[0]
+    if top.startswith(".") or top in SKIP_DIRS:
+        # Notes under a skip dir are outside the link graph, so "orphans of
+        # graphify-out" has no answer. It used to print a silent `(0 orphans)`
+        # — the affordance class this branch closes.
+        # board/props DO answer for an explicitly named skip dir.
+        die(f"refused: {folder} is outside the link graph (a skip dir) — next: vv board {folder}")
     root = os.path.join(VAULT, rroot) if rroot else VAULT
     files = list(md_files())
     idx = basename_index()
@@ -774,9 +781,9 @@ def cmd_board(folder, *filters):
     # bypasses the logger) — so the pilot sink holds ZERO occurrences and the
     # defect was found by probing, not by telemetry. (The 7 board usage rows
     # in the pilot week were the bare `vv board` arity error, already clean.)
-    # Validate at the boundary, like arity. The review round's first version
-    # of this comment claimed "exit 0"; that came from reading a pipe's exit
-    # status instead of vv's — the envelope seat caught it (2026-09-02).
+    # Validate at the boundary, like arity. (An earlier version of this comment
+    # claimed "exit 0"; that came from reading a pipe's exit status instead of
+    # vv's — capture exit codes unpiped.)
     bad = [f for f in filters if "=" not in f]
     if bad:
         import shlex
@@ -784,8 +791,8 @@ def cmd_board(folder, *filters):
             f"next: vv board {shlex.quote(folder)} {shlex.quote(bad[0] + '=VALUE')}")
     want = dict(f.split("=", 1) for f in filters)
     # `board .` / `board ""` returned ZERO rows on the indexed path while the
-    # walk and the native engine returned every note (third-model seat,
-    # 2026-09-02) — see _scope for the rule that fixed it for every sibling.
+    # walk and the native engine returned every note — see _scope for the
+    # rule that fixed it for every sibling.
     rroot = _scope(folder or ".")
     rows = []
     h = index_handle(scope=rroot or None)
@@ -833,7 +840,7 @@ def _walk_scope(rroot):
     walk, the index's scoped sync and the native engine all do it. Filtering
     md_files() by prefix instead pruned a SKIP_DIRS member named explicitly
     as the scope (`props KEY graphify-out` → 0 on the walk arm, 1 on the
-    indexed and native arms; third-model seat, round 9)."""
+    indexed and native arms)."""
     root = os.path.join(VAULT, rroot) if rroot else VAULT
     for dirpath, dirs, names in os.walk(root):
         dirs[:] = [d for d in dirs if not d.startswith(".") and d not in SKIP_DIRS]
@@ -2310,8 +2317,8 @@ CMDS = {
 # calls at the moment of the 2026-09-02 pilot read-out (8 of 226 before that
 # day's own probing) — counts over the pilot register's INTERACTIVE rows, i.e.
 # after its contamination filter removed the 1,938 machine-paced/synthetic
-# rows of the 2026-08-27 bursts (383 of them post-stamping and unmarked; three
-# review seats recomputed the cuts; the raw sink is 159 reads higher;
+# rows of the 2026-08-27 bursts (383 of them post-stamping and unmarked; the
+# raw sink is 159 reads higher;
 # re-derive with `bench/pilot_report.py --since
 # 2026-08-26T21:06 --until 2026-09-02T10:00`). The honest next step is the
 # outline — with the note the caller already named.

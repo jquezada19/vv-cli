@@ -29,8 +29,7 @@ mod write;
 /// segments and collapses ".." against the previous segment without touching
 /// the filesystem. components().collect() alone kept ".." — so a VV_VAULT of
 /// "/a/link/../vault" resolved through the symlink natively but lexically in
-/// python, and the two engines could address different vaults (independent
-/// secondary review, round 12).
+/// python, and the two engines could address different vaults.
 fn normpath(p: &Path) -> PathBuf {
     use std::path::Component;
     let mut out: Vec<Component> = Vec::new();
@@ -47,13 +46,16 @@ fn normpath(p: &Path) -> PathBuf {
             other => out.push(other),
         }
     }
+    if out.is_empty() {
+        return PathBuf::from("."); // python: normpath(".") == normpath("Sub/..") == "." — never ""
+    }
     out.iter().collect()
 }
 
 fn vault() -> PathBuf {
     // Normalised at the source the way python does: a "…/vault/" VV_VAULT made
     // native `orphans .` build a root prefix no walked path shares and answer
-    // a silent zero (third-model seat, round 9).
+    // a silent zero.
     if let Ok(v) = env::var("VV_VAULT") {
         if !v.is_empty() {
             // python: `or` — empty means default (Codex parity audit)

@@ -83,7 +83,7 @@ def legacy_failed(argv, rc):
     the whole pairing exists to score. Only 2+ is a grep error. Everything
     else here (cat/awk/find) answers with 0. The first version treated every
     non-zero exit as a harness error and would have deleted exactly the
-    "vv found, old way missed" evidence (code-review + Codex seats, 2026-09-02).
+    "vv found, old way missed" evidence.
     """
     ok = {0, 1} if os.path.basename(argv[0]) == "grep" else {0}
     return rc not in ok
@@ -318,9 +318,9 @@ def main():
             lg_ms, lg_out, lg_rc = sh(largv, shell=shell)
         except Exception as e:                                        # noqa: BLE001
             # A builder that raises (e.g. a missing positional) is recorded,
-            # never a traceback: round 2 called build() a second time OUTSIDE
-            # this try and lost the record — the traceback-with-no-row shape the
-            # harness must never produce (three review seats, 2026-09-02).
+            # never a traceback: an earlier version called build() a second
+            # time OUTSIDE this try and lost the record — the traceback-with-
+            # no-row shape the harness must never produce.
             # [verb] keeps the strict
             # exit set, so -1 classifies as legacy-error.
             largv, lg_ms, lg_out, lg_rc = [verb], 0.0, "", -1

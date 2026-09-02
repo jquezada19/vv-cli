@@ -40,15 +40,12 @@ def _harness_error(r):
     build = LEGACY.get(r.get("op"), (None,))[0]
     if build is None:
         return True          # a vv-only op never ran a legacy command; a non-zero exit is a harness fault
+    # Every analog's argv[0] is a constant independent of args, so a
+    # placeholder recovers it whatever the recorded args were (or weren't).
     try:
-        argv = build(list(r.get("args", [])))
+        argv = build(["_"])
     except Exception:                                                 # noqa: BLE001
-        # Unbuildable from the recorded args: recover the analog's argv[0] with
-        # a placeholder so grep's exit-1-is-an-answer rule still applies.
-        try:
-            argv = build(["_"])
-        except Exception:                                             # noqa: BLE001
-            argv = ["?"]
+        argv = ["?"]
     return legacy_failed(argv, rc)
 
 
@@ -64,7 +61,7 @@ def main():
     adj_case = {}   # (op, tuple(args)) -> ruling; exact wins over op-level
     # "scored" is the stage that survives the harness-error split: a sink of
     # nothing but failed legacy runs must abort loudly here, not print a
-    # clean-looking "paired reads: 0" (code-review + Codex seats, 2026-09-02).
+    # clean-looking "paired reads: 0".
     funnel = sg.Funnel("shadow", "lines", "parsed", "in_window", "reads", "scored")
     for line in open(SINK):
         if not line.strip():
@@ -104,12 +101,12 @@ def main():
             # answer. The pair is real (bytes/latency count), but no answer-set
             # diff was retained, so it cannot be scored as a disagreement or a
             # match — mark it unscored rather than calling it a measured
-            # difference (independent secondary review, round 5).
+            # difference.
             r = dict(r, verdict="unscored")
         if _harness_error(r):
             # The legacy command failed: a HARNESS error. Counted, shown, and
             # kept out of both the quality and the byte totals — scoring it
-            # would bias the read-out against vv (3 such pairs on 2026-09-02).
+            # would bias the read-out against vv (3 such pairs in the pilot data).
             herr.append(r)
             continue
         if r.get("verdict") != "unscored":

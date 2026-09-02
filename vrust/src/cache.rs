@@ -32,9 +32,10 @@ fn cache_path(vault: &Path) -> Option<PathBuf> {
     // Two of python's isolation knobs: VV_NO_INDEX disables the cache and
     // VV_INDEX_ROOT relocates it (test suites point both engines at one
     // throwaway dir, so fixture vaults no longer litter ~/.cache/vv/index —
-    // 867 stale .vvidx files by 2026-09-02). Python's third rule (journal
+    // hundreds of stale .vvidx files by 2026-09). Python's third rule (journal
     // root set ⇒ no index) is NOT mirrored: the cache-torture suite relies
     // on a HOME-redirected native cache under exactly that condition.
+    // yagni: revisit if tests/test_torture_cache.py stops needing that.
     // None = live scan, never a wrong answer.
     // python: `or` — an exported-but-EMPTY variable means unset (an empty
     // VV_INDEX_ROOT joined to a relative path dropped the cache into the CWD)

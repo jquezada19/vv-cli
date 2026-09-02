@@ -3,13 +3,16 @@
 Notable changes to `vv`. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html), where
 the public API is the **CLI surface**: command names, flag names, output shape,
-and exit codes. A change that makes existing output unparseable is a major change.
+and exit codes. A change that makes existing output unparseable, or that
+changes an exit code, is a major change.
 
 ## [Unreleased]
 
 Version to be set by the release commit. Note for that decision: the
-**Exit-code change** below is a public-API change under this file's own
-header (exit codes are part of the CLI surface).
+**Exit-code change** below moves two invocations from exit 0 to exit 1,
+which breaks a script that tested for success — a MAJOR change under this
+file's header (exit codes are part of the CLI surface; an exit-code change
+counts alongside "output unparseable").
 
 Follow-ups from the shadow-pilot read-out (window 2026-08-26T21:06 →
 2026-09-02) — the affordance class: vv was right and unhelpful at the same
@@ -40,7 +43,10 @@ time.
   both engines) and sync the index unscoped
   instead of reparsing every note per call. The `board` walk in both engines
   now skips the same generated directory the index skips (`graphify-out/`),
-  so indexed, walk and native answers agree at the root. **Exit-code change:**
+  so indexed, walk and native answers agree at the root. A skip dir named
+  explicitly as the scope IS answered by `board`/`props` (its own notes), and
+  `orphans` refuses it with a `next:` (those notes are outside the link
+  graph; it printed a silent zero). **Exit-code change:**
   `props KEY <file>` and `orphans <file|missing>` are refused (exit 1) like
   `board <file>` in both engines (`props` used to retire that note's index
   row and answer a count; `orphans <missing>` answered a clean zero and
