@@ -768,7 +768,11 @@ def cmd_board(folder, *filters):
     if h is not None:
         rroot = rroot0
         for rp, props in h.props():
-            if not (rp == rroot or rp.startswith(rroot + os.sep)):
+            # relpath of the vault root is "." — no indexed path starts with
+            # "./", so `board .` / `board ""` returned ZERO rows on the indexed
+            # path while the walk and the native engine returned every note
+            # (third-model review seat, 2026-09-02).
+            if rroot != "." and not (rp == rroot or rp.startswith(rroot + os.sep)):
                 continue
             if all(props.get(k) == v for k, v in want.items()):
                 rows.append((os.path.basename(rp)[:-3], props.get("status", "-"),
@@ -2274,8 +2278,9 @@ CMDS = {
 }
 
 # Per-command "next" for an arity miss. The generic pointer (the no-args usage
-# line) is right and unhelpful: `read NOTE` with no section was 11 of 230 read
-# calls in the pilot week, and the honest next step is the outline.
+# line) is right and unhelpful: `read NOTE` with no section was 9 of 230 read
+# calls as recorded at the 2026-09-02 pilot read-out (8 of 226 before that
+# day's own probing), and the honest next step is the outline.
 ARITY_NEXT = {
     "read": "vv outline NOTE",   # a runnable command, per the `next:` contract
 }

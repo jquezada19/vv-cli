@@ -7,15 +7,19 @@ and exit codes. A change that makes existing output unparseable is a major chang
 
 ## [Unreleased]
 
-Follow-ups from the 2026-08-27..09-02 shadow-pilot read-out — the affordance
-class: vv was right and unhelpful at the same time.
+Follow-ups from the shadow-pilot read-out (window 2026-08-26T21:06 →
+2026-09-02) — the affordance class: vv was right and unhelpful at the same
+time.
+
+### Security
+- `board FOLDER` now carries the same vault containment as every other path
+  argument: `board ../x` is refused (`escape:`) in both engines. Before this
+  it walked and printed frontmatter from outside the vault.
 
 ### Fixed
 - `board FOLDER status open` (a filter without `=`) died as a bare Python
   traceback — exit 1, no usage line, no `next:`, and no metrics row; it is
   now `usage: board filters are KEY=VALUE …` with a runnable `next:`.
-  `board` also gains the same vault containment as every other path argument
-  (`board ../x` is refused in both engines).
 
 ### Changed
 - `journal` (not a command) now hints `did you mean: doctor` — an alias table

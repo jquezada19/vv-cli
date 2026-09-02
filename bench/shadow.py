@@ -270,7 +270,7 @@ def adjudicate(argv):
 def main():
     if len(sys.argv) < 2:
         sys.exit("usage: shadow.py <read-verb> [args...]   (writes are refused)\n"
-                 "       shadow.py --adjudicate <op> <who> <reason>")
+                 "       shadow.py --adjudicate <op> <who> <reason> [-- <args...>]")
     if sys.argv[1] == "--adjudicate":
         return adjudicate(sys.argv[2:])
     verb, args = sys.argv[1], sys.argv[2:]
@@ -310,12 +310,18 @@ def main():
               f"no legacy equivalent", file=sys.stderr)
     else:
         try:
-            lg_ms, lg_out, lg_rc = sh(build(args), shell=shell)
+            largv = build(args)
+            lg_ms, lg_out, lg_rc = sh(largv, shell=shell)
         except Exception as e:                                        # noqa: BLE001
-            lg_ms, lg_out, lg_rc = 0.0, "", -1
+            # A builder that raises (e.g. a missing positional) is recorded,
+            # never a traceback: round 2 called build() a second time OUTSIDE
+            # this try and lost the record — the exact shape this PR exists to
+            # remove (three review seats, 2026-09-02). [verb] keeps the strict
+            # exit set, so -1 classifies as legacy-error.
+            largv, lg_ms, lg_out, lg_rc = [verb], 0.0, "", -1
             rec["legacy_error"] = str(e)[:120]
         a, b = norm(quality_out), norm(lg_out)
-        failed = legacy_failed(build(args), lg_rc)
+        failed = legacy_failed(largv, lg_rc)
         if failed:
             # The legacy one-liner FAILED (see legacy_failed for what counts).
             # Whatever it printed is not an answer, so comparing it scores the

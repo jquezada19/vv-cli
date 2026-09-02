@@ -150,10 +150,9 @@ def main():
             continue
         seen.add(key)
         exact = adj_case.get(key)
-        a = [exact] if exact else adj.get(r["op"], [])
-        who = (f"{exact['who']}, case ruling" if exact else
-               f"{a[-1]['who']}, op-level ruling reused" if a else "UNADJUDICATED")
-        ruling = exact or (a[-1] if a else None)
+        ruling = exact or (adj.get(r["op"]) or [None])[-1]
+        who = (f"{ruling.get('who', '?')}, {'case ruling' if exact else 'op-level ruling reused'}"
+               if ruling else "UNADJUDICATED")
         if ruling and ruling.get("hv") not in (None, HARNESS_VERSION):
             # A ruling made against a retired normaliser is evidence about
             # THAT instrument; say so instead of silently reusing it.
@@ -163,8 +162,8 @@ def main():
             print(f"      vv found, old way missed : {r['vv_only'][:4]}")
         if r.get("legacy_only"):
             print(f"      old way found, vv missed : {r['legacy_only'][:4]}")
-        if a:
-            print(f"      ruling: {a[-1]['reason']}")
+        if ruling:
+            print(f"      ruling: {ruling.get('reason', '?')}")
 
     unadj = [k for k in seen if not adj_case.get(k) and not adj.get(k[0])]
     if unadj:

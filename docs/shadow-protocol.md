@@ -70,9 +70,10 @@ Comparability rules that follow:
 
 ## What 30 paired reads showed (v4 harness)
 
-(27 scored after the 2026-09-02 harness-error exclusion: 3 of the 30 had a
-failed legacy side and are now reported separately — the context bill becomes
-62,256 B vs 277,511 B, still 4×.)
+(As of the 2026-09-02 read-out: 27 of the 30 v4 records scored — the 3 with
+a failed legacy side (`legacy_exit=2`) are reported separately as harness
+errors, and the context bill becomes 62,256 B vs 277,511 B, still 4×. Later
+records move these counts; the report is the source of truth.)
 
 | | vv | old way |
 |---|---|---|
