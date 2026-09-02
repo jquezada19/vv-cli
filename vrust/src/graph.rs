@@ -516,7 +516,10 @@ fn cmd_orphans(folder: &str, vault: &Path, t0: Instant) -> Outcome {
         vault.to_path_buf()
     } else {
         match readpath::contain(vault, folder) {
-            Some(p) => p,
+            // components() drops a trailing "." the way python's normpath does:
+            // `orphans .` was "<vault>/." and no file starts with "<vault>/./"
+            // (security seat, 2026-09-02)
+            Some(p) => p.components().collect(),
             None => return Outcome::Fallback,
         }
     };

@@ -708,7 +708,9 @@ def cmd_links(ref):
     _list_out([{"path": l} for l in seen], len(seen), "links", cmd="links")
 
 def cmd_orphans(folder=""):
-    root = contain(folder) if folder else VAULT
+    # normpath: contain(".") is "<vault>/." and no file path starts with
+    # "<vault>/./", so `orphans .` listed nothing (security seat, 2026-09-02)
+    root = os.path.normpath(contain(folder)) if folder else VAULT
     files = list(md_files())
     idx = basename_index()
     # a note is linked if ANY note resolves a link to it — using the SAME winner
@@ -763,16 +765,22 @@ def cmd_board(folder, *filters):
     if not os.path.isdir(root):
         die(f"not-found: no such folder: {folder}")
     rows = []
-    rroot0 = os.path.relpath(root, VAULT)
-    h = index_handle(scope=rroot0)
+    # Resolved, not lexical: `<in-vault symlink>/..` relpaths to "." lexically
+    # while its real root is a subfolder (security seat, round 3).
+    rroot0 = os.path.relpath(os.path.realpath(root), _VAULT_REAL)
+    # relpath of the vault root is "." — no indexed path starts with "./", so
+    # `board .` / `board ""` returned ZERO rows on the indexed path while the
+    # walk and the native engine returned every note (third-model seat,
+    # 2026-09-02). A "." SCOPE is equally wrong for the sync itself: the
+    # freshness query would match nothing, reparse every note each call, and
+    # never retire rows an earlier scoped call inserted — so the root syncs
+    # unscoped (independent secondary review, round 3).
+    at_root = rroot0 == "."
+    h = index_handle(scope=None if at_root else rroot0)
     if h is not None:
         rroot = rroot0
         for rp, props in h.props():
-            # relpath of the vault root is "." — no indexed path starts with
-            # "./", so `board .` / `board ""` returned ZERO rows on the indexed
-            # path while the walk and the native engine returned every note
-            # (third-model review seat, 2026-09-02).
-            if rroot != "." and not (rp == rroot or rp.startswith(rroot + os.sep)):
+            if not at_root and not (rp == rroot or rp.startswith(rroot + os.sep)):
                 continue
             if all(props.get(k) == v for k, v in want.items()):
                 rows.append((os.path.basename(rp)[:-3], props.get("status", "-"),
@@ -780,7 +788,10 @@ def cmd_board(folder, *filters):
         rows.sort()
     else:
         for dirpath, dirs, names in os.walk(root):
-            dirs[:] = [d for d in dirs if not d.startswith(".")]
+            # SKIP_DIRS, not just dot-dirs: the index and md_files() exclude
+            # graphify-out/ (generated), and since `board .` reaches the index
+            # the three paths must agree (three review seats, 2026-09-02).
+            dirs[:] = [d for d in dirs if not d.startswith(".") and d not in SKIP_DIRS]
             for n in sorted(names):
                 if not n.endswith(".md"):
                     continue
@@ -814,7 +825,9 @@ def cmd_tags(*args):
 
 def cmd_props(key, folder=""):
     root = contain(folder) if folder else VAULT
-    rroot = os.path.relpath(root, VAULT) if folder else ""
+    rroot = os.path.relpath(os.path.realpath(root), _VAULT_REAL) if folder else ""
+    if rroot == ".":
+        rroot = ""              # `props KEY .` is the vault root: unscoped sync, no prefix filter
     from collections import Counter
     c = Counter()
     h = index_handle(scope=rroot or None)
@@ -822,7 +835,10 @@ def cmd_props(key, folder=""):
         (rel(p), fm_props(split_fm(open(p, errors="replace").read())[0]))
         for p in sorted(md_files()))
     for rp, props in rows:
-        if folder and not (rp == rroot or rp.startswith(rroot + os.sep)):
+        # (the "." case is normalised to "" above — the same defect `board`
+        # had: relpath gives "." and no indexed path starts with "./";
+        # standards seat, 2026-09-02)
+        if rroot and not (rp == rroot or rp.startswith(rroot + os.sep)):
             continue
         v = props.get(key)
         if v:
@@ -2278,16 +2294,21 @@ CMDS = {
 }
 
 # Per-command "next" for an arity miss. The generic pointer (the no-args usage
-# line) is right and unhelpful: `read NOTE` with no section was 9 of 230 read
-# calls as recorded at the 2026-09-02 pilot read-out (8 of 226 before that
-# day's own probing), and the honest next step is the outline.
-ARITY_NEXT = {
-    "read": "vv outline NOTE",   # a runnable command, per the `next:` contract
-}
+# line) is right and unhelpful: `read NOTE` with no section was 9 of 228 read
+# calls at the moment of the 2026-09-02 pilot read-out (8 of 226 before that
+# day's own probing; two review seats recomputed both cuts), and the honest
+# next step is the outline — with the note the caller already named.
+def _next_read(args):
+    if args:
+        import shlex
+        return f"vv outline {shlex.quote(args[0])}"
+    return "vv outline NOTE"
+ARITY_NEXT = {"read": _next_read}   # runnable, per the `next:` contract
 
 # Words the pilot week typed that are not commands but name a real one.
-# `journal` (3 attempts): journals are surfaced and resolved by `doctor`.
-# An alias wins over the edit-distance hint, which could never reach it.
+# `journal` (two rows, one double-logged attempt, in the pilot week): journals
+# are surfaced and resolved by `doctor`. An alias wins over the edit-distance
+# hint, which could never reach it.
 CMD_ALIASES = {"journal": "doctor"}
 
 def _check_arity(cmd, fn, args):
@@ -2303,7 +2324,7 @@ def _check_arity(cmd, fn, args):
     if len(args) < req or (hi is not None and len(args) > hi):
         want = f"{req}+" if hi is None else (str(req) if req == hi else f"{req}-{hi}")
         die(f"usage: {cmd} takes {want} positional args, got {len(args)} — "
-            f"next: {ARITY_NEXT.get(cmd, 'run vv with no args for the command list')}")
+            f"next: {ARITY_NEXT[cmd](args) if cmd in ARITY_NEXT else 'run vv with no args for the command list'}")
 
 VERSION_FALLBACK = "1.1.0"  # used only when VERSION is absent (bare-file deploys)
 

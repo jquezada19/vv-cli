@@ -1,8 +1,11 @@
 # Paired-read shadow protocol
 
-From 2026-08-27 to the 2026-09-02 checkpoint, **every vault read runs both ways**
-— vv and the old-fashioned way — so the pilot closes on measured quality and
-speed rather than on a handful of paired tasks.
+The harness runs a vault read **both ways** — vv and the old-fashioned way —
+and records the pair, so the pilot closes on measured quality and speed rather
+than on a handful of hand-paired tasks. In practice the 30 recorded pairs were
+made in one session on 2026-08-27; day-to-day reads through the pilot went to
+vv directly (the pilot register is honest about this: "30 pairs, unchanged
+since 2026-08-27").
 
 ```
 python3 bench/shadow.py <read-verb> [args...]     # stdout = vv's answer
@@ -77,7 +80,7 @@ records move these counts; the report is the source of truth.)
 
 | | vv | old way |
 |---|---|---|
-| context bill | **64,333 B** | 277,511 B (**4×**) |
+| context bill | **64,333 B** as recorded (30 pairs) · **62,256 B** scored (27, after the harness-error exclusion) | 277,511 B (**4×** either way) |
 | whole-vault ops | 3–30× faster (`resolve` 30×, `backlinks` 8×, `search` 7×, `props` 4×, `tags` 3×) | |
 | single-note ops | roughly equal or slightly slower — vv pays process startup where grep reads one file | |
 

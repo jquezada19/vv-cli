@@ -132,15 +132,15 @@ fn scan_fm_parallel(files: &[PathBuf]) -> Result<Vec<HashMap<String, String>>, (
     Ok(result)
 }
 
-// ---------- board: dot-dirs-only exclusion, exactly cmd_board's live os.walk ----------
+// ---------- board: exactly cmd_board's live os.walk — dot-dirs + graphify-out (SKIP_DIRS) ----------
 fn walk_board(dir: &Path, out: &mut Vec<PathBuf>) {
     if let Ok(rd) = fs::read_dir(dir) {
         for e in rd.flatten() {
             let name = e.file_name().to_string_lossy().to_string();
             let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
             if is_dir {
-                if name.starts_with('.') {
-                    continue;
+                if name.starts_with('.') || name == "graphify-out" {
+                    continue; // python SKIP_DIRS: every other member is a dot-dir
                 }
                 walk_board(&e.path(), out);
             } else if name.ends_with(".md") {
@@ -166,16 +166,12 @@ fn cmd_board(args: &[String], vault: &Path, t0: Instant) -> Outcome {
     if !root.is_dir() {
         return Outcome::Fallback; // python dies not-found: canonical text is python's
     }
-    // Containment parity with python's contain(): an absolute folder, a `..`
-    // component, or a symlink that leaves the vault is python's "escape:"
-    // refusal — never served natively.
-    let escapes = Path::new(folder).is_absolute()
-        || Path::new(folder).components().any(|c| matches!(c, std::path::Component::ParentDir))
-        || match (fs::canonicalize(&root), fs::canonicalize(vault)) {
-            (Ok(r), Ok(v)) => !r.starts_with(&v),
-            _ => true,
-        };
-    if escapes {
+    // Containment parity with python's contain(): a folder that canonicalizes
+    // outside the vault (absolute, `..`, or a symlink out) is python's
+    // "escape:" refusal — never served natively. readpath::contain is the one
+    // native definition of "inside the vault"; reuse it rather than re-derive.
+    // yagni: kept native (not python-only) so `board` keeps its fast path.
+    if readpath::contain(vault, folder).is_none() {
         return Outcome::Fallback;
     }
     let mut files = Vec::new();

@@ -12,9 +12,12 @@ Follow-ups from the shadow-pilot read-out (window 2026-08-26T21:06 →
 time.
 
 ### Security
-- `board FOLDER` now carries the same vault containment as every other path
-  argument: `board ../x` is refused (`escape:`) in both engines. Before this
-  it walked and printed frontmatter from outside the vault.
+- `board FOLDER`'s folder argument now carries the same vault containment as
+  every other path argument: `board ../x` is refused (`escape:`) in both
+  engines. Before this it walked and printed frontmatter from outside the
+  vault. Residual, pre-existing and unchanged here: a symlinked `.md` *file*
+  inside a legitimate board root is still read by both engines (directory
+  symlinks are not followed).
 
 ### Fixed
 - `board FOLDER status open` (a filter without `=`) died as a bare Python

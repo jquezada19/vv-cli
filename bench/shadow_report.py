@@ -12,6 +12,7 @@ Answers the three questions the 2026-09-02 checkpoint has to close on:
 import collections, json, os, statistics, sys
 
 SINK = os.environ.get("VV_SHADOW_SINK") or os.path.expanduser("~/.claude/metrics/vv-shadow.jsonl")
+RULINGS = ("vv-correct", "legacy-correct", "both-defensible", "unresolved")
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import sweepguard as sg
 if os.environ.get("VV_SHADOW_SINK"):
@@ -21,21 +22,33 @@ if os.environ.get("VV_SHADOW_SINK"):
 def _harness_error(r):
     """A read whose legacy side FAILED (not merely answered 'nothing').
 
-    Prefers the recorded verdict; falls back to the recorded exit code and the
-    op's analog for rows written before the verdict existed. grep's exit 1 is
-    an answer, not a failure — see shadow.legacy_failed.
+    Decides from the RECORDED EXIT CODE whenever one exists — a verdict written
+    by an earlier producer could carry `legacy-error` for a grep exit 1 (the
+    round-1 shape), and trusting it would re-import the misclassification the
+    exit code refutes. The verdict is consulted only for a row with no exit
+    code. grep's exit 1 is an answer, not a failure — see shadow.legacy_failed.
+    # yagni: the exit-code branch reclassifies pre-verdict v4 rows (the
+    # legacy-error verdict shipped without a HARNESS_VERSION bump on purpose);
+    # it stays until no v4 row predating 2026-09-02 falls in a reported window.
     """
-    if r.get("verdict") == "legacy-error":
-        return True
     rc = r.get("legacy_exit")
-    if rc in (None, 0):
+    if rc is None:
+        return r.get("verdict") == "legacy-error"
+    if rc == 0:
         return False
     from shadow import LEGACY, legacy_failed
     build = LEGACY.get(r.get("op"), (None,))[0]
+    if build is None:
+        return True          # a vv-only op never ran a legacy command; a non-zero exit is a harness fault
     try:
-        argv = build(list(r.get("args", []))) if build else ["?"]
+        argv = build(list(r.get("args", [])))
     except Exception:                                                 # noqa: BLE001
-        argv = ["?"]
+        # Unbuildable from the recorded args: recover the analog's argv[0] with
+        # a placeholder so grep's exit-1-is-an-answer rule still applies.
+        try:
+            argv = build(["_"])
+        except Exception:                                             # noqa: BLE001
+            argv = ["?"]
     return legacy_failed(argv, rc)
 
 
@@ -68,8 +81,8 @@ def main():
             # ruling dropped by the window resurfaced as UNADJUDICATED.
             # Malformed rows are skipped like a bad JSON line, never fatal.
             op, args = r.get("op"), r.get("args")
-            if not isinstance(op, str):
-                continue
+            if not isinstance(op, str) or r.get("who") not in RULINGS:
+                continue   # an unknown `who` must not count as adjudicated
             if args is not None:
                 if not (isinstance(args, list) and all(isinstance(x, str) for x in args)):
                     continue
@@ -137,12 +150,13 @@ def main():
         print("  (bytes an agent would have to CARRY — the token cost the pairing exists to price)")
 
     diffs = [r for r in reads if r.get("verdict") not in (None, "match", "vv-only")]
-    print(f"\nharness errors: {len(herr)} (legacy one-liner exited non-zero — excluded "
-          f"from quality and byte totals)")
+    print(f"\nharness errors: {len(herr)} (legacy one-liner FAILED — grep exit 2+, "
+          f"anything else non-zero — excluded from quality and byte totals)")
     for r in herr:
         print(f"  [{r['op']}] {' '.join(r.get('args', []))} legacy_exit={r.get('legacy_exit')}")
 
-    print(f"\ndisagreements: {len(diffs)}")
+    distinct = len({(r["op"], tuple(r.get("args", []))) for r in diffs})
+    print(f"\ndisagreements: {len(diffs)}" + (f" ({distinct} distinct cases)" if distinct != len(diffs) else ""))
     seen = set()
     for r in diffs:
         key = (r["op"], tuple(r.get("args", [])))

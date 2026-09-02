@@ -14,11 +14,12 @@ R1  `board FOLDER status open` (space, not `=`) died as a bare Python
     pilot sink holds zero occurrences). Now a usage error with a runnable
     `next:`. R1x: `board ../x` is refused by containment, both engines.
 R2  `board FOLDER status=open` still works (control for R1).
-R3  `journal` is not a command; 3 attempts in the week. The typo hint is
+R3  `journal` is not a command; one (double-logged) attempt in the week. The typo hint is
     edit-distance only, so `doctor` was never suggested. Alias table.
 R4  `read NOTE` with no section pointed at the generic no-args usage line;
     the honest next step is `vv outline NOTE` — a RUNNABLE command, per the
-    `next:` contract. 9 of 230 read calls as recorded at the read-out.
+    `next:` contract. 9 of 228 read calls at the read-out moment (8 of 226
+    before that day's probing).
 R5  shadow harness: a legacy one-liner that FAILS is a harness error, never a
     tool disagreement (3 pairs scored vv-superset with legacy_exit=2) — but
     grep's exit 1 is an answer ("no selected lines"), not a failure. Excluded
@@ -67,17 +68,14 @@ if os.path.isdir(SB) and os.listdir(SB):
     # failing run can never delete the user's data (security seat, round 2).
     _kept = os.path.join(tempfile.mkdtemp(prefix="vv-kept-vvreadout-"), "vvreadout")
     shutil.move(SB, _kept)
-    print(f"note: pre-existing {SB} set aside; restored at exit")
-shutil.rmtree(SB, ignore_errors=True)
-os.makedirs(SB, exist_ok=True)
+    print(f"note: pre-existing {SB} set aside at {_kept}; restored at exit")
 NOTE = "Sandbox/vvreadout/Readout Note.md"
-with open(os.path.join(_VAULT, NOTE), "w") as f:
-    f.write("---\ntype: test\nstatus: open\n---\n# Readout Note\n\n## First\n\nalpha\n\n## Second\n\nbeta\n")
-with open(os.path.join(SB, "Closed Note.md"), "w") as f:
-    f.write("---\ntype: test\nstatus: done\n---\n# Closed Note\n\nbody\n")
 
 def affordance_checks(tag, runner):
     """The three CLI affordances, through whichever entry `runner` is."""
+    # Sandbox notes are excluded from the index by design (~vv_impl.py:844),
+    # so the root-folder pins below use a fixture OUTSIDE Sandbox on the
+    # indexed arm; see root_checks().
     r = runner("board", "Sandbox/vvreadout", "status", "open")
     check(f"{tag}1a bad board filter exits 1 (control: pre-fix also 1)", r.returncode == 1, f"rc={r.returncode}")
     check(f"{tag}1b bad board filter is a usage error", r.stderr.startswith("usage: board filters are KEY=VALUE"), r.stderr)
@@ -89,25 +87,87 @@ def affordance_checks(tag, runner):
     r = runner("board", "../", "status=open")
     check(f"{tag}1x board is vault-contained", r.returncode == 1 and r.stderr.startswith("escape:"), r.stderr)
     r = runner("board", "Sandbox/vvreadout", "status=open")
-    check(f"{tag}2 board KEY=VALUE filter works", r.returncode == 0 and "Readout Note" in r.stdout
+    check(f"{tag}2 board KEY=VALUE filter works (control)", r.returncode == 0 and "Readout Note" in r.stdout
           and "Closed Note" not in r.stdout, r.stdout + r.stderr)
+    root_checks(tag, runner)
+
+def root_checks(tag, runner):
+    """`board .`/`board ""`/`props KEY .` must cover the vault root."""
     for folder in (".", ""):
         r = runner("board", folder, "type=test")
         check(f"{tag}2r board {folder!r} covers the vault root", r.returncode == 0 and "Readout Note" in r.stdout
               and "Closed Note" in r.stdout, (r.stdout + r.stderr)[:300])
+    r = runner("props", "type", ".")
+    check(f"{tag}2p props KEY . covers the vault root",
+          r.returncode == 0 and "\ttest" in r.stdout and "(0 notes" not in r.stdout, (r.stdout + r.stderr)[:300])
+    r = runner("orphans", ".")
+    check(f"{tag}2o orphans . covers the vault root (was 0)", r.returncode == 0 and "(0 orphans" not in r.stdout
+          and "Closed Note" in r.stdout, (r.stdout + r.stderr)[:300])
     r = runner("journal")
     check(f"{tag}3a journal is still not a command (control)", r.returncode == 1 and r.stderr.startswith("usage: unknown command journal"), r.stderr)
     check(f"{tag}3b journal suggests doctor", "(did you mean: doctor)" in r.stderr, r.stderr)
     r = runner("outlien", "x")
-    check(f"{tag}3c edit-distance hint unchanged", "(did you mean: outline)" in r.stderr, r.stderr)
+    check(f"{tag}3c edit-distance hint unchanged (control)", "(did you mean: outline)" in r.stderr, r.stderr)
     r = runner("read", NOTE)
     check(f"{tag}4a read NOTE alone is a usage error (control)", r.returncode == 1 and r.stderr.startswith("usage: read takes 2 positional args, got 1"), r.stderr)
-    check(f"{tag}4b next step is the runnable outline command", r.stderr.rstrip().endswith("— next: vv outline NOTE"), r.stderr)
+    check(f"{tag}4b next step is the runnable outline command for THIS note",
+          r.stderr.rstrip().endswith("— next: vv outline 'Sandbox/vvreadout/Readout Note.md'"), r.stderr)
+    r = runner("read")
+    check(f"{tag}4d with no note the next step keeps the placeholder", r.stderr.rstrip().endswith("— next: vv outline NOTE"), r.stderr)
     r = runner("read", NOTE, "First")
-    check(f"{tag}4c read NOTE SEC unchanged", r.returncode == 0 and "alpha" in r.stdout, r.stdout + r.stderr)
+    check(f"{tag}4c read NOTE SEC unchanged (control)", r.returncode == 0 and "alpha" in r.stdout, r.stdout + r.stderr)
 
 try:
+    # fixture creation is INSIDE the try so a failure here still restores
+    shutil.rmtree(SB, ignore_errors=True)
+    os.makedirs(SB, exist_ok=True)
+    with open(os.path.join(_VAULT, NOTE), "w") as f:
+        f.write("---\ntype: test\nstatus: open\n---\n# Readout Note\n\n## First\n\nalpha\n\n## Second\n\nbeta\n")
+    with open(os.path.join(SB, "Closed Note.md"), "w") as f:
+        f.write("---\ntype: test\nstatus: done\n---\n# Closed Note\n\nbody\n")
     affordance_checks("R", lambda *a: vv(*a, env={"VV_ENGINE": "python"}))
+    # The INDEXED python arm — the one that returned zero rows for "." (buddy
+    # seat, round 3: with VV_JOURNAL_ROOT set and no VV_INDEX_ROOT the index is
+    # off, so the plain R2r/R2p above exercise only the walk arm). Sandbox is
+    # not indexed, so the fixture lives at the vault root for this block and
+    # is removed right after.
+    ROOTNOTE = os.path.join(_VAULT, "vvreadout-root-fixture.md")
+    with open(ROOTNOTE, "w") as f:
+        f.write("---\ntype: vvreadout-fixture\n---\n# root fixture\n")
+    try:
+        ienv = {"VV_ENGINE": "python", "VV_INDEX_ROOT": mkdtemp("vv-readout-index-")}
+        r = vv("index", "--rebuild", env=ienv)
+        check("RI index built for the indexed-arm pins", r.returncode == 0, r.stderr[-200:])
+        for folder in (".", ""):
+            r = vv("board", folder, "type=vvreadout-fixture", env=ienv)
+            check(f"RI2r indexed board {folder!r} covers the vault root", r.returncode == 0
+                  and "vvreadout-root-fixture" in r.stdout, (r.stdout + r.stderr)[:300])
+        r = vv("props", "type", ".", env=ienv)
+        check("RI2p indexed props KEY . covers the vault root", r.returncode == 0 and "\tvvreadout-fixture" in r.stdout,
+              (r.stdout + r.stderr)[:300])
+        r = vv("board", "Sandbox", "type=vvreadout-fixture", env=ienv)
+        check("RI2c control: a real subfolder still filters", r.returncode == 0 and "vvreadout-root-fixture" not in r.stdout,
+              (r.stdout + r.stderr)[:300])
+        # generated dir parity: graphify-out/ is excluded by the index; the
+        # walk and the native engine must exclude it too (three seats, round 3)
+        GEN = os.path.join(_VAULT, "graphify-out", "vvreadout-gen-fixture.md")
+        os.makedirs(os.path.dirname(GEN), exist_ok=True)
+        with open(GEN, "w") as f:
+            f.write("---\ntype: vvreadout-fixture\n---\n# gen\n")
+        try:
+            for label, runner in (("indexed", lambda *a: vv(*a, env=ienv)),
+                                  ("walk", lambda *a: vv(*a, env={"VV_ENGINE": "python", "VV_NO_INDEX": "1"})),
+                                  ("native", lambda *a: subprocess.run([VRUST, *a], capture_output=True, text=True,
+                                                                       env=dict(os.environ, VV_VAULT=_VAULT)))):
+                if label == "native" and not os.path.exists(VRUST):
+                    continue
+                r = runner("board", ".", "type=vvreadout-fixture")
+                check(f"RI2g {label} board . excludes graphify-out/", r.returncode == 0
+                      and "vvreadout-root-fixture" in r.stdout and "vvreadout-gen-fixture" not in r.stdout, (r.stdout + r.stderr)[:300])
+        finally:
+            os.remove(GEN)
+    finally:
+        os.remove(ROOTNOTE)
     if os.path.exists(VRUST):
         # The native entry itself: every one of these must Fallback/exec to
         # python and print the identical text (Codex + buddy seats asked for
@@ -149,8 +209,16 @@ try:
         # a record from an OLDER harness: must be set aside, never pooled
         dict(base, hv=HARNESS_VERSION - 1, op="outline", args=["Old.md"], legacy_ms=30.0,
              legacy_bytes=9999, legacy_exit=0, verdict="differ", vv_only=["z"], legacy_only=[]),
+        # a row the ROUND-1 producer would have written: verdict legacy-error
+        # on a grep exit 1. The exit code wins — it is an answer, scored.
+        dict(base, op="backlinks", args=["R1.md"], legacy_ms=5.0, legacy_bytes=0, legacy_exit=1,
+             verdict="legacy-error", vv_only=None, legacy_only=None),
         # a malformed adjudication row: skipped, never fatal
         {"kind": "adjudication", "who": "vv-correct", "reason": "no op field"},
+        # a disagreement whose ONLY ruling carries an unknown `who`
+        dict(base, op="head", args=["U.md"], legacy_ms=5.0, legacy_bytes=0, legacy_exit=0,
+             verdict="differ", vv_only=["u"], legacy_only=[]),
+        {"kind": "adjudication", "op": "head", "args": ["U.md"], "who": "sure", "reason": "?"},
         # a ruling made under an older harness: honoured but labelled
         {"kind": "adjudication", "hv": HARNESS_VERSION - 1, "op": "tags", "who": "vv-correct", "reason": "old instrument"},
     ]
@@ -183,16 +251,20 @@ try:
     check("R5b grep exit 2 counted as a harness error", "harness errors: 1" in out and "[links] A.md legacy_exit=2" in out, out)
     check("R5c harness error not listed as a disagreement", "[links]" not in out.split("disagreements:")[-1], out)
     check("R5d grep exit 1 is an answer: scored, not a harness error",
-          "paired reads: 5" in out and "[backlinks] Z.md → vv-superset" in out, out)
+          "paired reads: 7" in out and "[backlinks] Z.md → vv-superset" in out, out)
     check("R5e byte totals exclude the failed pair on BOTH sides",
-          "vv 500 B vs old way 1,900 B" in out, out)
-    check("R5g funnel shows the split", "reads=6 -> scored=5" in out, out)
+          "vv 700 B vs old way 1,900 B" in out, out)
+    check("R5g funnel shows the split", "reads=8 -> scored=7" in out, out)
+    check("R5k stale legacy-error verdict on a grep exit 1 is re-scored from the exit code",
+          "[backlinks] R1.md → legacy-error" in out and "harness errors: 1" in out, out)
+    check("R6o unknown `who` does not adjudicate", "[head] U.md → differ  (UNADJUDICATED)" in out, out)
     check("R5i older-harness record set aside, not pooled",
           "set aside 1 record(s)" in out and "Old.md" not in out and "9,999" not in out, out)
     check("R5j report prints the override banner", "VV_SHADOW_SINK override" in out, out)
     check("R6d exact ruling labelled as a case ruling", "E.md → differ  (both-defensible, case ruling)" in out, out)
     check("R6e op-level ruling labelled as reused", "A.md → differ  (vv-correct, op-level ruling reused)" in out, out)
-    check("R6f nothing left unadjudicated", "UNADJUDICATED" not in out, out)
+    check("R6f only the unknown-`who` case is left unadjudicated",
+          out.count("UNADJUDICATED") == 2 and "1 disagreement(s) UNADJUDICATED" in out, out)
     check("R6i malformed adjudication row skipped, not fatal", "Traceback" not in out, out)
     check("R6m case-only ruling closes its case", "[props] status → differ  (vv-correct, case ruling)" in out, out)
 
@@ -204,8 +276,8 @@ try:
     r = run(SHADOW_REPORT, "2026-09-01", "2026-09-01", env=env)
     out = r.stdout + r.stderr
     check("R5f control: same record with exit 0 IS a disagreement",
-          "harness errors: 0" in out and "[links] A.md → vv-superset" in out and "paired reads: 6" in out
-          and "vv 600 B vs old way 2,400 B" in out, out)
+          "harness errors: 0" in out and "[links] A.md → vv-superset" in out and "paired reads: 8" in out
+          and "vv 800 B vs old way 2,400 B" in out, out)
     # a ruling made under an older harness is honoured but labelled
     rows.append(dict(base, op="tags", args=[], legacy_ms=10.0, legacy_bytes=10, legacy_exit=0,
                      verdict="differ", vv_only=["t"], legacy_only=[]))
@@ -256,15 +328,35 @@ try:
           and rec.get("verdict") == "legacy-error" and "index out of range" in rec.get("legacy_error", ""),
           r.stderr[-200:] + str(rec))
 finally:
-    if not fails:
-        shutil.rmtree(SB, ignore_errors=True)
-    else:
-        print(f"note: fixture kept at {SB}-failed-fixture for inspection")
-        if os.path.exists(SB):
-            shutil.rmtree(SB + "-failed-fixture", ignore_errors=True)
-            shutil.move(SB, SB + "-failed-fixture")
+    def set_aside_fixture():
+        """Move the test fixture out of SB; never into or through a symlink."""
+        aside = SB + "-failed-fixture"
+        if os.path.islink(aside):
+            os.unlink(aside)
+        shutil.rmtree(aside, ignore_errors=True)
+        if os.path.exists(aside):        # rmtree failed silently: refuse to move onto it
+            raise RuntimeError(f"cannot clear {aside}")
+        shutil.move(SB, aside)
+    try:
+        if not fails:
+            shutil.rmtree(SB, ignore_errors=True)
+        else:
+            print(f"note: fixture kept at {SB}-failed-fixture for inspection")
+        if os.path.lexists(SB):
+            # Never move the original INTO a leftover dir (POSIX move nests it
+            # as SB/vvreadout — buddy seat, round 3). Set the leftover aside.
+            set_aside_fixture()
+    except Exception as e:                                             # noqa: BLE001
+        print(f"note: fixture teardown failed ({e}); restoring the original regardless")
     if _kept:
-        shutil.move(_kept, SB)          # unconditional: pass or fail
+        if os.path.lexists(SB):
+            print(f"note: {SB} still present; original left at {_kept}")
+        else:
+            shutil.move(_kept, SB)      # unconditional: pass or fail
+        try:
+            os.rmdir(os.path.dirname(_kept))   # the holding dir's now-empty parent
+        except OSError:
+            pass
         print(f"note: restored pre-existing {SB}")
     for d in _TMP:
         shutil.rmtree(d, ignore_errors=True)
