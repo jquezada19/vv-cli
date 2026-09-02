@@ -11,7 +11,7 @@ Answers the three questions the 2026-09-02 checkpoint has to close on:
 """
 import collections, json, os, statistics, sys
 
-SINK = os.path.expanduser("~/.claude/metrics/vv-shadow.jsonl")
+SINK = os.environ.get("VV_SHADOW_SINK") or os.path.expanduser("~/.claude/metrics/vv-shadow.jsonl")  # override: tests only
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import sweepguard as sg
 
@@ -24,7 +24,8 @@ def main():
                  f"This is a missing measurement, not a clean result.")
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from shadow import HARNESS_VERSION
-    reads, adj, stale = [], collections.defaultdict(list), 0
+    reads, adj, stale, herr = [], collections.defaultdict(list), 0, []
+    adj_case = {}   # (op, tuple(args)) -> ruling; exact wins over op-level
     funnel = sg.Funnel("shadow", "lines", "parsed", "in_window", "reads")
     for line in open(SINK):
         if not line.strip():
@@ -35,18 +36,30 @@ def main():
         except json.JSONDecodeError:
             continue
         funnel.bump("parsed")
+        if r.get("kind") == "adjudication":
+            # Rulings are never window-filtered: a disagreement inside the
+            # window is usually ruled on AFTER it (the read-out day), and a
+            # ruling dropped by the window resurfaced as UNADJUDICATED.
+            if r.get("args") is not None:
+                adj_case[(r["op"], tuple(r["args"]))] = r
+            else:
+                adj[r["op"]].append(r)
+            continue
         if not (since <= r.get("ts", "")[:len(since)] <= until):
             continue
         funnel.bump("in_window")
-        if r.get("kind") == "adjudication":
-            adj[r["op"]].append(r)
-            continue
         if r.get("hv") != HARNESS_VERSION:
             # A record from an older harness measured a DIFFERENT instrument.
             # Pooling them would report normaliser bugs as tool disagreements.
             stale += 1
             continue
         funnel.bump("reads")
+        if r.get("legacy_exit") not in (None, 0) or r.get("verdict") == "legacy-error":
+            # The legacy command failed: a HARNESS error. Counted, shown, and
+            # kept out of both the quality and the byte totals — scoring it
+            # would bias the read-out against vv (3 such pairs on 2026-09-02).
+            herr.append(r)
+            continue
         reads.append(r)
     funnel.report()
     if stale:
@@ -90,6 +103,11 @@ def main():
         print("  (bytes an agent would have to CARRY — the token cost the pairing exists to price)")
 
     diffs = [r for r in reads if r.get("verdict") not in (None, "match", "vv-only")]
+    print(f"\nharness errors: {len(herr)} (legacy one-liner exited non-zero — excluded "
+          f"from quality and byte totals)")
+    for r in herr:
+        print(f"  [{r['op']}] {' '.join(r.get('args', []))} legacy_exit={r.get('legacy_exit')}")
+
     print(f"\ndisagreements: {len(diffs)}")
     seen = set()
     for r in diffs:
@@ -97,8 +115,10 @@ def main():
         if key in seen:
             continue
         seen.add(key)
-        a = adj.get(r["op"], [])
-        who = a[-1]["who"] if a else "UNADJUDICATED"
+        exact = adj_case.get(key)
+        a = [exact] if exact else adj.get(r["op"], [])
+        who = (f"{exact['who']}, case ruling" if exact else
+               f"{a[-1]['who']}, op-level ruling reused" if a else "UNADJUDICATED")
         print(f"  [{r['op']}] {' '.join(r.get('args', []))} → {r['verdict']}  ({who})")
         if r.get("vv_only"):
             print(f"      vv found, old way missed : {r['vv_only'][:4]}")
@@ -107,12 +127,13 @@ def main():
         if a:
             print(f"      ruling: {a[-1]['reason']}")
 
-    unadj = [r for r in diffs if not adj.get(r["op"])]
+    unadj = [r for r in diffs
+             if not adj_case.get((r["op"], tuple(r.get("args", [])))) and not adj.get(r["op"])]
     if unadj:
         print(f"\n  !! {len(unadj)} disagreement(s) UNADJUDICATED — the checkpoint cannot "
               f"close on quality until each is ruled on:\n"
               f"     shadow.py --adjudicate <op> <vv-correct|legacy-correct|"
-              f"both-defensible|unresolved> <reason>")
+              f"both-defensible|unresolved> <reason> [-- <args...>]")
     return 0
 
 

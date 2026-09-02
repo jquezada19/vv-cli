@@ -743,6 +743,14 @@ def cmd_orphans(folder=""):
     _list_out(entries, len(entries), "orphans", cmd="orphans")
 
 def cmd_board(folder, *filters):
+    # A filter without "=" used to reach dict() and die as a TRACEBACK with
+    # exit 0 — a usage error reported as success (7 of 19 board calls in the
+    # 2026-08-27..09-02 pilot week). Validate at the boundary, like arity.
+    bad = [f for f in filters if "=" not in f]
+    if bad:
+        import shlex
+        die(f"usage: board filters are KEY=VALUE, got '{bad[0]}' — "
+            f"next: vv board {shlex.quote(folder)} {bad[0]}=VALUE")
     want = dict(f.split("=", 1) for f in filters)
     root = os.path.join(VAULT, folder)
     if not os.path.isdir(root):
@@ -2258,6 +2266,18 @@ CMDS = {
     "rename": cmd_rename, "move": cmd_move, "lint": cmd_lint, "doctor": cmd_doctor, "index": cmd_index,
 }
 
+# Per-command "next" for an arity miss. The generic pointer (the no-args usage
+# line) is right and unhelpful: `read NOTE` with no section was 11 of 230 read
+# calls in the pilot week, and the honest next step is the outline.
+ARITY_NEXT = {
+    "read": "vv outline NOTE lists the section ids, then vv read NOTE SEC",
+}
+
+# Words the pilot week typed that are not commands but name a real one.
+# `journal` (3 attempts): journals are surfaced and resolved by `doctor`.
+# An alias wins over the edit-distance hint, which could never reach it.
+CMD_ALIASES = {"journal": "doctor"}
+
 def _check_arity(cmd, fn, args):
     """Positional-arg validation at the boundary, so an INTERNAL TypeError is a
     defect (traceback), never mislabeled as user error (review 2026-08-26)."""
@@ -2271,7 +2291,7 @@ def _check_arity(cmd, fn, args):
     if len(args) < req or (hi is not None and len(args) > hi):
         want = f"{req}+" if hi is None else (str(req) if req == hi else f"{req}-{hi}")
         die(f"usage: {cmd} takes {want} positional args, got {len(args)} — "
-            f"next: run vv with no args for the command list")
+            f"next: {ARITY_NEXT.get(cmd, 'run vv with no args for the command list')}")
 
 VERSION_FALLBACK = "1.1.0"  # used only when VERSION is absent (bare-file deploys)
 
@@ -2435,7 +2455,8 @@ def main():
         print(__doc__.rstrip()); sys.exit(0)
     fn = CMDS.get(a[0])
     if not fn:
-        sugg = suggest_names(a[0], [c + ".md" for c in CMDS], n=1)  # same tiered ranking notes get
+        alias = CMD_ALIASES.get(a[0])
+        sugg = [alias] if alias else suggest_names(a[0], [c + ".md" for c in CMDS], n=1)  # same tiered ranking notes get
         hint = f" (did you mean: {sugg[0]})" if sugg else ""
         die(f"usage: unknown command {a[0]}{hint} — next: run vv --help for the command list")
     _check_arity(a[0], fn, a[1:])

@@ -76,6 +76,7 @@ run "v1.5 (python engine)" env VV_ENGINE=python python3 tests/test_vv15.py
 run "review regressions" python3 tests/test_panel_findings.py
 run "oracle findings"    python3 tests/test_oracle_findings.py
 run "round-2 review"     python3 tests/test_review_round2.py
+run "read-out follow-ups" python3 tests/test_readout_followups.py
 run "engine parity"      python3 tests/test_engine_parity.py
 run "native read path"   python3 tests/test_native_readpath.py
 run "native graph"        python3 tests/test_graph_parity.py

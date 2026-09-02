@@ -28,7 +28,7 @@ import json, os, re, subprocess, sys, time
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 VAULT = os.environ.get("VV_VAULT") or os.path.expanduser("~/Documents/Obsidian Vault")
 VV = os.path.join(REPO, "vrust/target/release/vrust")
-SINK = os.path.expanduser("~/.claude/metrics/vv-shadow.jsonl")
+SINK = os.environ.get("VV_SHADOW_SINK") or os.path.expanduser("~/.claude/metrics/vv-shadow.jsonl")  # override: tests only
 
 # Bump whenever a NORMALISER, a legacy analog, or the comparison logic changes.
 # Records made by an earlier version measured a different instrument and must
@@ -213,14 +213,24 @@ def adjudicate(argv):
     old way being wrong. That has to be established per case and written down,
     not assumed in either direction.
     """
+    # `-- <args...>` scopes the ruling to one (op, args) case. Without it the
+    # ruling is op-level, which the report honours but labels as reused: the
+    # 2026-09-02 read-out found op-keyed rulings silently covering every case
+    # of that op, so a second disagreement never looked unadjudicated.
+    case_args = None
+    if "--" in argv:
+        i = argv.index("--")
+        argv, case_args = argv[:i], argv[i + 1:]
     if len(argv) < 3:
         sys.exit("usage: shadow.py --adjudicate <op> <vv-correct|legacy-correct|"
-                 "both-defensible|unresolved> <reason...>")
+                 "both-defensible|unresolved> <reason...> [-- <args...>]")
     op, who, reason = argv[0], argv[1], " ".join(argv[2:])
     if who not in ("vv-correct", "legacy-correct", "both-defensible", "unresolved"):
         sys.exit(f"shadow: unknown adjudication {who!r}")
     rec = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S"), "kind": "adjudication",
            "op": op, "who": who, "reason": reason}
+    if case_args is not None:
+        rec["args"] = case_args
     os.makedirs(os.path.dirname(SINK), exist_ok=True)
     with open(SINK, "a") as f:
         f.write(json.dumps(rec) + "\n")
@@ -276,7 +286,13 @@ def main():
             lg_ms, lg_out, lg_rc = 0.0, "", -1
             rec["legacy_error"] = str(e)[:120]
         a, b = norm(quality_out), norm(lg_out)
-        if a == b:
+        if lg_rc != 0:
+            # The legacy one-liner FAILED. Whatever it printed is not an answer,
+            # so comparing it scores the harness, not the tool (3 pairs in the
+            # pilot week landed as "vv-superset" with legacy_exit=2). Recorded
+            # so the report can count it; never a disagreement.
+            verdict = "legacy-error"
+        elif a == b:
             verdict = "match"
         elif isinstance(a, set) and isinstance(b, set):
             # subset/superset is only meaningful for ANSWER SETS. Applying `>`

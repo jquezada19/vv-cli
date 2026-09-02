@@ -7,6 +7,25 @@ and exit codes. A change that makes existing output unparseable is a major chang
 
 ## [Unreleased]
 
+Follow-ups from the 2026-08-27..09-02 shadow-pilot read-out — the affordance
+class: vv was right and unhelpful at the same time.
+
+### Fixed
+- `board FOLDER status open` (a filter without `=`) crashed with a Python
+  traceback and **exit 0**; it is now `usage: board filters are KEY=VALUE …`
+  with exit 1 and a `next:` that shows the shape.
+
+### Changed
+- `journal` (not a command) now hints `did you mean: doctor` — an alias table
+  the edit-distance hint could never reach.
+- `read NOTE` with no section points at `vv outline NOTE` instead of the
+  generic usage line.
+- Shadow harness (`bench/shadow.py`, `bench/shadow_report.py`): a legacy
+  one-liner that exits non-zero is recorded as `legacy-error` and reported as
+  a harness error, never a disagreement; rulings can be scoped to one
+  `(op, args)` case with `--adjudicate … -- <args>`, and an op-level ruling is
+  labelled as reused. `VV_SHADOW_SINK` overrides the sink (tests only).
+
 ## [1.1.0] — 2026-08-27
 
 The agent-ergonomics release: byte budgets, structured output, invocation
