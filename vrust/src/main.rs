@@ -26,10 +26,14 @@ mod readpath;
 mod write;
 
 fn vault() -> PathBuf {
+    // components().collect() drops a trailing separator and "." segments the
+    // way python's normpath does at its source: a "…/vault/" VV_VAULT made
+    // native `orphans .` build a root prefix no walked path shares and answer
+    // a silent zero (third-model seat, round 9).
     if let Ok(v) = env::var("VV_VAULT") {
         if !v.is_empty() {
             // python: `or` — empty means default (Codex parity audit)
-            return PathBuf::from(v);
+            return Path::new(&v).components().collect();
         }
     }
     let home = env::var("HOME").expect("HOME unset");

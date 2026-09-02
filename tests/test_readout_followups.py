@@ -33,8 +33,9 @@ R7  the shadow PRODUCER writes `legacy-error` (not a normal verdict) when the
     exit 1 normally — exercised in-process with a stubbed runner.
 RN  the three affordance errors are identical through the native entry.
 """
-import io, json, os, shutil, signal, subprocess, sys, tempfile
+import fcntl, io, json, os, shutil, signal, subprocess, sys, tempfile
 signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))   # a SIGTERM runs finally + atexit, even mid-fixture-move
+signal.signal(signal.SIGINT, lambda *_: sys.exit(130))    # so does Ctrl-C (KeyboardInterrupt would skip neither, but be explicit)
 
 _VAULT = os.environ.get("VV_VAULT") or os.path.expanduser("~/Documents/Obsidian Vault")
 SB = os.path.join(_VAULT, "Sandbox/vvreadout")
@@ -77,6 +78,16 @@ def vv(*args, env=None, stdin=None):
 
 # ---------- fixture (pre-existing content is set aside and RESTORED at exit) ----------
 _kept = None
+# One run at a time per vault: two concurrent runs would each treat the
+# other's fixture as pre-existing user data and shuffle it through the holding
+# dir (third-model seat, round 9). The lock lives beside the holding dir.
+_LOCKDIR = os.path.expanduser("~/.local/state/vv/test-holding")
+try:
+    os.makedirs(_LOCKDIR, exist_ok=True)
+    _lock = open(os.path.join(_LOCKDIR, "readout.lock"), "w")
+except OSError:
+    _lock = open(os.path.join(tempfile.gettempdir(), "vv-readout.lock"), "w")
+fcntl.flock(_lock, fcntl.LOCK_EX)          # blocks until the other run finishes
 SENTINEL = ".vvreadout-fixture"             # marks a dir this suite made; a leftover is ours, not user data
 if os.path.isdir(SB) and os.path.exists(os.path.join(SB, SENTINEL)):
     shutil.rmtree(SB)
@@ -213,7 +224,7 @@ try:
             if label == "native" and not native_available():
                 continue
             r = runner("props", "type", "Sub/sub-fixture.md")
-            check(f"RI2f {label} props with a FILE scope is refused, not a silent zero", r.returncode == 1
+            check(f"RI2f {label} props with a FILE scope is refused, not a silent zero" + (" (control: python pre-existed)" if label == "python" else ""), r.returncode == 1
                   and r.stderr.startswith("not-found: no such folder"), r.stdout + r.stderr)
             r = runner("orphans", "NoSuchFolder")
             check(f"RI2n {label} orphans on a missing folder is refused, not a clean zero", r.returncode == 1
@@ -221,13 +232,27 @@ try:
         r = vv("orphans", "Sub", env=dict(ienv, VV_VAULT=TV + "//"))
         check("RI2v a non-normalised VV_VAULT (trailing //) still finds orphans in a subfolder",
               r.returncode == 0 and "sub-fixture" in r.stdout, (r.stdout + r.stderr)[:300])
+        if native_available():
+            r = subprocess.run([VRUST, "orphans", "."], capture_output=True, text=True,
+                               env=dict(native_env, VV_VAULT=TV + "/"))
+            check("RI2t native orphans . under a trailing-slash VV_VAULT (was a silent 0)",
+                  r.returncode == 0 and "vvreadout-root-fixture" in r.stdout, (r.stdout + r.stderr)[:300])
+        # an explicitly named SKIP_DIRS member as the scope: every arm answers it
+        for label, runner in (("indexed", lambda *a: vv(*a, env=ienv)),
+                              ("walk", lambda *a: vv(*a, env={"VV_ENGINE": "python", "VV_NO_INDEX": "1", "VV_VAULT": TV})),
+                              ("native", lambda *a: subprocess.run([VRUST, *a], capture_output=True, text=True, env=native_env))):
+            if label == "native" and not native_available():
+                continue
+            r = runner("props", "type", "graphify-out")
+            check(f"RI2h {label} props on an explicit graphify-out scope answers it (walk arm was 0)",
+                  r.returncode == 0 and "\tvvreadout-fixture" in r.stdout, (r.stdout + r.stderr)[:300])
         os.symlink(os.path.join(TV, "Sub"), os.path.join(TV, "Link"))
         for label, runner in (("python", lambda *a: vv(*a, env=ienv)),
                               ("native", lambda *a: subprocess.run([VRUST, *a], capture_output=True, text=True, env=native_env))):
             if label == "native" and not native_available():
                 continue
             r = runner("orphans", "Link")
-            check(f"RI2s {label} orphans through an in-vault symlink resolves the folder (was 0)",
+            check(f"RI2s {label} orphans through an in-vault symlink resolves the folder (was 0)" + (" (control: python pre-existed)" if label == "python" else ""),
                   r.returncode == 0 and "sub-fixture" in r.stdout, (r.stdout + r.stderr)[:300])
         # generated dir parity: graphify-out/ is excluded by the index; the
         # walk and the native engine must exclude it too (three seats, round 3)
@@ -451,6 +476,9 @@ finally:
     try:
         if not fails:
             shutil.rmtree(SB, ignore_errors=True)
+            if os.path.lexists(SB):
+                print(f"FAIL teardown: could not remove the fixture at {SB}")
+                fails.append("teardown")    # a stashed fixture is never a green run
         if os.path.lexists(SB):
             # Never move the original INTO a leftover dir (POSIX move nests it
             # as SB/vvreadout — buddy seat, round 3). Set the leftover aside.

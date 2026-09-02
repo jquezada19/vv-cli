@@ -835,6 +835,19 @@ def cmd_tags(*args):
     _list_out(entries, len(c), "tags", cmd="tags",
               fmt=(lambda r: f"{r['count']}\t{r['tag']}") if counted else (lambda r: r["tag"]))
 
+def _walk_scope(rroot):
+    """Notes under an explicit scope, walked FROM that root — the way board's
+    walk, the index's scoped sync and the native engine all do it. Filtering
+    md_files() by prefix instead pruned a SKIP_DIRS member named explicitly
+    as the scope (`props KEY graphify-out` → 0 on the walk arm, 1 on the
+    indexed and native arms; third-model seat, round 9)."""
+    root = os.path.join(VAULT, rroot) if rroot else VAULT
+    for dirpath, dirs, names in os.walk(root):
+        dirs[:] = [d for d in dirs if not d.startswith(".") and d not in SKIP_DIRS]
+        for n in sorted(names):
+            if n.endswith(".md"):
+                yield os.path.join(dirpath, n)
+
 def cmd_props(key, folder=""):
     rroot = _scope(folder)      # "" = whole vault; a FILE or a missing folder dies here
     from collections import Counter
@@ -842,7 +855,7 @@ def cmd_props(key, folder=""):
     h = index_handle(scope=rroot or None)
     rows = h.props() if h is not None else (
         (rel(p), fm_props(split_fm(open(p, errors="replace").read())[0]))
-        for p in sorted(md_files()))
+        for p in sorted(_walk_scope(rroot) if rroot else md_files()))
     for rp, props in rows:
         if rroot and not (rp == rroot or rp.startswith(rroot + os.sep)):
             continue
