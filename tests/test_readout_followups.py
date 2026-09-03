@@ -176,6 +176,11 @@ try:
     os.symlink(_outside, os.path.join(TV, "Esc"))                          # an escaping symlink
     os.makedirs(os.path.join(TV, "Alias"))
     os.symlink(os.path.join(TV, "Sub"), os.path.join(TV, "Alias", "graphify-out"))   # skip-NAMED, allowed target
+    import unicodedata
+    NFD, NFC = unicodedata.normalize("NFD", "Caf\u00e9"), "Caf\u00e9"                 # the same name, two byte spellings
+    os.makedirs(os.path.join(TV, NFD))
+    with open(os.path.join(TV, NFD, "nfd-fixture.md"), "w") as f:
+        f.write("---\ntype: other\n---\n# accent\n")
     try:
         ienv = {"VV_ENGINE": "python", "VV_INDEX_ROOT": mkdtemp("vv-readout-index-"), "VV_VAULT": TV}
         native_env = dict(os.environ, VV_VAULT=TV, VV_INDEX_ROOT=ienv["VV_INDEX_ROOT"])  # native cache in the temp dir too
@@ -244,8 +249,8 @@ try:
             r = subprocess.run([VRUST, "backlinks", "vvreadout-root-fixture"], capture_output=True, text=True,
                                env=dict(native_env, VV_VAULT=TVL))
             idx_files = [f for f in os.listdir(ienv["VV_INDEX_ROOT"]) if f.endswith(".vvidx")]
-            check("RI2i2 a symlinked VV_VAULT lands on the canonical vault's cache file, never a lexical one (pins _cache_key ⇄ cache.rs)",
-                  r.returncode == 0 and _cache_key(TVL) == _cache_key(TV) and _cache_key(TV) in idx_files and _lexical not in idx_files,
+            check("RI2i2 a symlinked VV_VAULT lands on the canonical vault's cache file, never a lexical one (invariant pin: _cache_key ⇄ cache.rs)",
+                  r.returncode == 0 and _cache_key(TV) in idx_files and _lexical not in idx_files,
                   (idx_files[:4], _lexical, r.stderr[-120:]))
             noidx = mkdtemp("vv-readout-noidx-")
             r = subprocess.run([VRUST, "backlinks", "vvreadout-root-fixture"], capture_output=True, text=True,
@@ -267,6 +272,12 @@ try:
                                env=dict(native_env, VV_INDEX_ROOT=emptyroot, VV_NO_INDEX=""))
             check("RI2m2 an empty VV_NO_INDEX keeps the native cache on", r.returncode == 0 and bool(os.listdir(emptyroot)),
                   os.listdir(emptyroot) or r.stderr[-120:])
+            pyhome = mkdtemp("vv-readout-pyhome-")
+            r = vv("board", ".", "type=vvreadout-fixture", env={"VV_ENGINE": "python", "VV_VAULT": TV, "VV_INDEX_ROOT": "", "VV_JOURNAL_ROOT": "", "HOME": pyhome})   # an empty journal root too: with one set, python keeps the index beside the journal
+            _pyidx = os.path.join(pyhome, ".cache/vv/index")
+            check("RI2m3 python: an empty VV_INDEX_ROOT means unset too (its index lands under HOME; control: python's `or` pre-existed)",
+                  r.returncode == 0 and os.path.isdir(_pyidx) and any(f.endswith(".sqlite") for f in os.listdir(_pyidx)),
+                  (os.path.isdir(_pyidx) and os.listdir(_pyidx)[:3], r.stderr[-120:]))
             r = subprocess.run([VRUST, "orphans", "."], capture_output=True, text=True,
                                env=dict(native_env, VV_VAULT=TV + "/"))
             check("RI2t native orphans . under a trailing-slash VV_VAULT (was a silent 0)",
@@ -340,27 +351,52 @@ try:
                       and f"next: vv board {spelling}" in r.stderr, (r.stdout + r.stderr)[:200])
             # the inverse: the RESOLVED target decides, never the lexical name
             r = runner("orphans", "Alias/graphify-out")
-            check(f"RI2k3 {label} a skip-NAMED symlink to an allowed folder answers (resolved target, not lexical name, is the rule)",
+            check(f"RI2k3 {label} a skip-NAMED symlink to an allowed folder answers (resolved target, not lexical name, is the rule; control: realpath already resolved it)",
                   r.returncode == 0 and "sub-fixture" in r.stdout, (r.stdout + r.stderr)[:200])
             # a case-variant spelling resolves on a case-insensitive filesystem,
             # but realpath keeps the CALLER's casing while every walk prunes
             # and prefix-compares by the on-disk name: `orphans SUB` matched
             # no walked path (a silent 0) and `orphans GRAPHIFY-OUT` dodged
-            # the skip-dir refusal (the same silent 0), both engines.
+            # the skip-dir refusal (the same silent 0). Python only: native's
+            # canonicalize (realpath(3) on Darwin) already answered the stored
+            # spelling — so its RI2ci is a control and its RI2ci2 pins the
+            # python fallback text it execs. The same holds for a unicode
+            # NORMALIZATION variant (NFC argument, NFD on disk): the identity
+            # match is what closes it, and a case rule alone could not.
+            nfc_ok = os.path.isdir(os.path.join(TV, NFC))     # a normalization-insensitive filesystem (APFS)
+            ctl = " (control: native's canonicalize already answered)" if label == "native" else " (was a silent 0)"
             if ci:
                 r = runner("orphans", "SUB")
-                check(f"RI2ci {label} orphans by a case-variant spelling answers by the on-disk name (was a silent 0)",
+                check(f"RI2ci {label} orphans by a case-variant spelling answers by the on-disk name" + ctl,
                       r.returncode == 0 and "sub-fixture" in r.stdout, (r.stdout + r.stderr)[:200])
                 r = runner("orphans", "GRAPHIFY-OUT")
-                check(f"RI2ci2 {label} a case-variant skip dir is still refused (was a silent 0)",
+                check(f"RI2ci2 {label} a case-variant skip dir is still refused (was a silent 0" + (", printed via the python fallback)" if label == "native" else ")"),
                       r.returncode == 1 and r.stderr.startswith("refused: GRAPHIFY-OUT is outside the link graph"), (r.stdout + r.stderr)[:200])
             else:
                 r = runner("orphans", "SUB")
                 check(f"RI2ci {label} on a case-sensitive filesystem a case-variant spelling is not-found (control)",
                       r.returncode == 1 and r.stderr.startswith("not-found"), (r.stdout + r.stderr)[:200])
+            if nfc_ok:
+                r = runner("orphans", NFC)
+                check(f"RI2nf {label} orphans by a normalization-variant spelling (NFC arg, NFD on disk) answers by the on-disk name" + ctl,
+                      r.returncode == 0 and "nfd-fixture" in r.stdout, (r.stdout + r.stderr)[:200])
+            else:
+                r = runner("orphans", NFC)
+                check(f"RI2nf {label} on a normalization-sensitive filesystem the other spelling is not-found (control)",
+                      r.returncode == 1 and r.stderr.startswith("not-found"), (r.stdout + r.stderr)[:200])
+            # a FILE as the scope of every folder-scoped command (the exit-code
+            # case list names orphans <file>; props is RI2f)
+            for cmd_ in (("orphans", "Sub/sub-fixture.md"), ("board", "Sub/sub-fixture.md", "type=vvreadout-fixture")):
+                r = runner(*cmd_)
+                check(f"RI2f4 {label} {cmd_[0]} with a FILE scope is the file refusal (control: shared _scope)",
+                      r.returncode == 1 and r.stderr.startswith("not-found: Sub/sub-fixture.md is a file"), (r.stdout + r.stderr)[:200])
+            # board DOES answer an explicitly named skip dir (props is RI2h)
+            r = runner("board", "graphify-out", "type=vvreadout-fixture")
+            check(f"RI2h2 {label} board on an explicit graphify-out scope answers it (control: always did)",
+                  r.returncode == 0 and "vvreadout-gen-fixture" in r.stdout, (r.stdout + r.stderr)[:200])
         if ci:
             r = vv("props", "type", "SUB", env=ienv)
-            check("RI2ci3 indexed props by a case-variant scope answers by the on-disk name",
+            check("RI2ci3 indexed props by a case-variant scope answers by the on-disk name (control: the index walk kept the caller's spelling and still matched)",
                   r.returncode == 0 and "\tvvreadout-fixture" in r.stdout, (r.stdout + r.stderr)[:200])
         # a RELATIVE VV_VAULT of "." (cd into the vault): python's normpath keeps
         # ".", the native lexical normalise once yielded "" and every raw walk
@@ -486,9 +522,12 @@ try:
     _bl = [l for l in out.splitlines() if l.startswith("backlinks")]
     # bound to the row's own agree/differ/unscored (the n column counts every
     # row for the op, paired or not, so an unpaired fixture row would move it)
-    _m = _re.search(r"(\d+)/(\d+) agree · (\d+) differ · (\d+) unscored", _bl[0]) if _bl else None
-    check("R5p unscored rows leave the agree/differ denominator (agree + differ = scored; the unscored count sits beside it)",
-          bool(_m) and int(_m.group(1)) + int(_m.group(3)) == int(_m.group(2)) and int(_m.group(4)) == 1 and "0/0 agree" not in out,
+    # exact figures for the fixture's backlinks op: 5 paired, 1 unscored, so
+    # 4 scored — 0/4 agree · 4 differ · 1 unscored. (agree + differ ==
+    # denominator is the formatter's own identity and pins nothing.)
+    _m = _re.search(r"(\d+)/(\d+) agree(?: · (\d+) differ)? · (\d+) unscored", _bl[0]) if _bl else None   # `differ` is omitted when nothing differs
+    check("R5p unscored rows leave the agree/differ denominator (backlinks: 0/4 agree · 4 differ · 1 unscored, 4 + 1 = the 5 pairs)",
+          bool(_m) and tuple(int(g or 0) for g in _m.groups()) == (0, 4, 4, 1) and "0/0 agree" not in out,
           _bl[:1] or out)
     check("R5q an op with nothing scored says so", "nothing scored · 1 unscored" in out, out)
     check("R5r the funnel line reconciles reads and scored", "reads − scored = 3 harness error(s) + 2 unscored" in out, out)
@@ -500,13 +539,35 @@ try:
     # shadow_report._harness_error hands every builder a one-element placeholder
     # argv, unguarded — this is the invariant that makes that safe
     from shadow import LEGACY as _LEGACY
-    _bad = [op for op, (b, *_) in _LEGACY.items() if b is not None and not isinstance(b(["_"]), list)]
-    check("R6r every legacy builder accepts the one-element placeholder argv the report's classifier hands it", not _bad, _bad)
-    # the skip list is mirrored by hand into the native engine: pin the mirror
-    import re as _re2
-    _py = set(_re2.findall(r'"([^"]+)"', _re2.search(r"^SKIP_DIRS\s*=\s*\{([^}]*)\}", open(os.path.join(REPO, "src", "vv_impl.py")).read(), _re2.M).group(1)))
-    _rs = set(_re2.findall(r'"([^"]+)"', _re2.search(r"pub const SKIP_DIRS[^=]*=\s*&?\[([^\]]*)\]", open(os.path.join(REPO, "vrust", "src", "main.rs")).read()).group(1)))
-    check("R6s SKIP_DIRS is mirrored whole: the python set and the native const name the same directories", _py == _rs and bool(_py), (sorted(_py), sorted(_rs)))
+    _bad = []
+    for op, (b, *_) in _LEGACY.items():
+        if b is None:
+            continue
+        try:
+            a0, a1 = b(["_"]), b(["other"])
+            if not (isinstance(a0, list) and a0 and a0[0] == a1[0]):
+                _bad.append(op)
+        except Exception as e:        # a builder that raises is a FAIL with a name, never a suite traceback
+            _bad.append(f"{op}: {e!r}")
+    check("R6r every legacy builder accepts a one-element placeholder argv AND its argv[0] is independent of the args (invariant pin)", not _bad, _bad)
+    # the skip list is mirrored by hand into the native engine: pin the mirror.
+    # Python side by ast (a `{...} | {...}` extension is refused, not missed);
+    # native side by regex, guarded so drift FAILS with a name instead of crashing.
+    import ast as _ast, re as _re2
+    _py, _rs = None, None
+    for node in _ast.parse(open(os.path.join(REPO, "src", "vv_impl.py")).read()).body:
+        if isinstance(node, _ast.Assign) and any(isinstance(t, _ast.Name) and t.id == "SKIP_DIRS" for t in node.targets):
+            _py = {e.value for e in node.value.elts} if isinstance(node.value, _ast.Set) and all(isinstance(e, _ast.Constant) for e in node.value.elts) else "not a plain set literal"
+    _mrs = _re2.search(r"pub const SKIP_DIRS[^=]*=\s*&?\[([^\]]*)\]", open(os.path.join(REPO, "vrust", "src", "main.rs")).read())
+    _rs = set(_re2.findall(r'"([^"]+)"', _mrs.group(1))) if _mrs else "no `pub const SKIP_DIRS` found"
+    check("R6s SKIP_DIRS is mirrored whole: the python set literal and the native const name the same directories (invariant pin)",
+          isinstance(_py, set) and _py == _rs and bool(_py), (_py if isinstance(_py, str) else sorted(_py), _rs if isinstance(_rs, str) else sorted(_rs)))
+    # rulings are never window-filtered: every ruling above was stamped NOW,
+    # after the 2026-09-01 report window, and still adjudicated (R6f)
+    _rulings = [x for x in map(json.loads, open(sink)) if x.get("kind") == "adjudication" and "ts" in x]
+    check("R6t rulings stamped after the report window still adjudicate (they are never window-filtered)",
+          len(_rulings) >= 3 and all(x["ts"] > "2026-09-01T23:59:59" for x in _rulings) and "(UNADJUDICATED)" not in out.split("disagreements:")[-1].split("\n")[1],
+          ([x.get("ts") for x in _rulings][:3], out.split("disagreements:")[-1][:200]))
     check("R5i older-harness record set aside, not pooled (control: pre-existing)",
           "set aside 1 record(s)" in out and "Old.md" not in out and "9,999" not in out, out)
     check("R5j report prints the override banner", "VV_SHADOW_SINK override" in out, out)
@@ -586,7 +647,8 @@ finally:
         shutil.rmtree(d, ignore_errors=True)
 
 # hermetic: only THIS suite's vault keys are asserted absent (another process
-# may legitimately write its own vault's cache while we run)
+# may legitimately write its own vault's cache while we run). Load-bearing
+# under the real HOME (the gate); a redirected HOME makes it vacuous by design.
 _leaked = [k for k in map(_cache_key, _OUR_VAULTS) if os.path.exists(os.path.join(_REAL_CACHE, k))]
 check("RI2l the WHOLE suite wrote none of its own vaults' caches to ~/.cache/vv/index", not _leaked, _leaked)
 print(f"\n{len(fails)} failure(s)" if fails else "\nALL PASS")

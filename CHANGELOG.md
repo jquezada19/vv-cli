@@ -28,19 +28,29 @@ time.
   every other path argument: `board ../x` is refused (`escape:`) in both
   engines. Before this it walked and printed frontmatter from outside the
   vault. Residual, pre-existing and unchanged here: a symlinked `.md` *file*
-  inside a legitimate board root is still read by both engines (directory
+  inside a legitimately contained folder is still read by every folder-scoped
+  enumerator (`board`/`props`/`orphans`) in both engines (directory
   symlinks are not followed).
 
 ### Fixed
 - `board FOLDER status open` (a filter without `=`) died as a bare Python
   traceback — exit 1, no usage line, no `next:`, and no metrics row; it is
   now `usage: board filters are KEY=VALUE …` with a runnable `next:`.
-- A case-variant folder spelling on a case-insensitive filesystem (APFS
-  default): `orphans SUB` resolved but named no walked path and answered a
+- A case- or normalization-variant folder spelling on an insensitive
+  filesystem (APFS default): `orphans SUB` or an NFC-spelled `orphans Café`
+  over an NFD directory resolved but named no walked path and answered a
   silent `(0 orphans)`, and `orphans GRAPHIFY-OUT` dodged the skip-dir refusal
-  into the same silent zero. The scope is now respelled to its on-disk names
-  (matched by identity, not by case rule) in the python engine; the native
-  engine's canonicalize already answered the on-disk spelling.
+  into the same silent zero. The python engine now respells the resolved scope
+  to its on-disk names, choosing each component by identity among the
+  directory's non-symlink entries (candidates narrowed by NFC-casefold first;
+  the narrowing can only fall through, never mis-select). The native engine's
+  canonicalize (realpath(3) on Darwin) already answered the stored spelling —
+  observed and pinned, not a documented contract.
+  Known limits, both pre-existing: a case-variant `VV_VAULT` root refuses an
+  absolute in-vault path or a symlink whose target uses the stored spelling
+  as `escape:` (it fails closed; spell `VV_VAULT` as on disk); index rows a
+  scoped query stored under a caller-spelled prefix before this release stay
+  until the next unscoped sync (answers are unaffected).
 - The `next:` a file-as-folder or skip-dir refusal prints is shell-quoted, so a
   path with a space is copy-runnable (board's and read's already were).
 

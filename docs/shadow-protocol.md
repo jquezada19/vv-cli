@@ -87,8 +87,8 @@ records move these counts; the report is the source of truth.)
 Every adjudicated disagreement was either **vv-correct** or a harness artifact.
 No case yet where the old way was right:
 
-- **backlinks** — `grep -rlF "[[CLAUDE"` prefix-matches `[[CLAUDE.md, Rules &
-  Configuration]]` (12 false positives) and cannot see `[CLAUDE.md](CLAUDE.md)`
+- **backlinks** — `grep -rlF "[[CLAUDE"` prefix-matches `[[CLAUDE.md
+  conventions]]`-shaped links (12 false positives) and cannot see `[CLAUDE.md](CLAUDE.md)`
   in AGENTS.md (1 false negative).
 - **links** — grep counts wikilinks quoted in prose: `` `[[wikilinks]]` `` is
   inline code, `superseded_by: "[[New Note]]"` is a quoted YAML value.

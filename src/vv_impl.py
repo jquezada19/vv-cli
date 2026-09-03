@@ -22,7 +22,7 @@ Global:  --vault PATH · --limit N (enumerators)        Help: vv --help
 Every op logs {op, ms, out_bytes} to ~/.claude/metrics/vv.jsonl.
 Exit: 0 ok · 1 not-found/usage · 3 stale hash or drifted plan · 4 pending journal (vv doctor)
 """
-import sys, os, re, json, time, hashlib, shlex
+import sys, os, re, json, time, hashlib
 # subprocess, glob, datetime are imported AT USE SITES: together they cost
 # ~10 ms of startup and most commands touch none of them (Codex perf review
 # 2026-08-27, findings 8-9; measured with -X importtime).
@@ -727,34 +727,50 @@ def _scope(folder):
     root = contain(folder)
     if not os.path.isdir(root):
         if os.path.exists(root):
+            import shlex
             die(f"not-found: {folder} is a file, not a folder — next: vv outline {shlex.quote(folder)}")
         die(f"not-found: no such folder: {folder}")
     rel_ = os.path.relpath(os.path.realpath(root), _VAULT_REAL)
-    return "" if rel_ == "." else _ondisk(rel_)
+    return "" if rel_ == "." else _ondisk(rel_, folder)
 
-def _ondisk(rel_):
-    """`rel_` respelled with each component's ON-DISK name. os.path.realpath
-    is pure python and keeps the caller's casing, so on a case-insensitive
-    filesystem (APFS default) `SUB` resolves but names no walked path — every
-    walk prunes and prefix-compares by the name the directory listing returns
-    — and `orphans SUB` answered a silent 0 while `orphans GRAPHIFY-OUT`
-    dodged the skip-dir refusal into the same silent 0. (The native engine's
-    canonicalize is realpath(3), which already answers the on-disk spelling.)
-    Each component is matched by identity (samestat), never by case rule."""
+def _ondisk(rel_, folder):
+    """`rel_` (a realpath-resolved, vault-relative folder) respelled with each
+    component's ON-DISK name. os.path.realpath is pure python and keeps the
+    caller's spelling, so on a case- or normalization-insensitive filesystem
+    (APFS default) `SUB` or an NFC `Café` resolves but names no walked path —
+    every walk prunes and prefix-compares by the name the directory listing
+    returns — and `orphans SUB` answered a silent 0 while `orphans
+    GRAPHIFY-OUT` dodged the skip-dir refusal into the same silent 0. (The
+    native engine's canonicalize is realpath(3), which on Darwin already
+    answers the stored spelling.)
+    The component is chosen by IDENTITY (samestat) among the directory's
+    non-symlink entries: symlinks are skipped because realpath already
+    resolved every one — an alias whose name merely casefolds equal to the
+    real directory would otherwise win by listing order and undo that
+    resolution. Candidates are narrowed first by NFC-casefold equality so an
+    exact or case/normalization-variant hit costs one stat; only when that
+    narrowing finds nothing is every entry stat-compared, so the narrowing
+    can never mis-select. A component that vanished since _scope's isdir
+    check is refused, not silently respelled."""
+    import unicodedata
+    def key(s):
+        return unicodedata.normalize("NFC", s).casefold()
+    def same(e, want):
+        try:
+            return os.path.samestat(e.stat(), want)
+        except OSError:
+            return False
     cur, out = _VAULT_REAL, []
     for c in rel_.split(os.sep):
-        if not c:
-            continue
-        name = c
         try:
             want = os.stat(os.path.join(cur, c))
             with os.scandir(cur) as it:
-                for e in it:
-                    if e.name.casefold() == c.casefold() and os.path.samestat(e.stat(), want):
-                        name = e.name
-                        break
+                ents = [e for e in it if not e.is_symlink()]
         except OSError:
-            pass
+            die(f"not-found: no such folder: {folder}")
+        hit = next((e for e in ents if key(e.name) == key(c) and same(e, want)), None) \
+            or next((e for e in ents if same(e, want)), None)
+        name = hit.name if hit else c
         out.append(name)
         cur = os.path.join(cur, name)
     return os.sep.join(out)
@@ -770,6 +786,7 @@ def cmd_orphans(folder=""):
         # The check runs on the RESOLVED, on-disk-spelled scope (a `..`, a
         # symlink or a case variant cannot dodge it).
         # board/props DO answer for an explicitly named skip dir.
+        import shlex
         die(f"refused: {folder} is outside the link graph (a skip dir) — next: vv board {shlex.quote(folder)}")
     root = os.path.join(VAULT, rroot) if rroot else VAULT
     files = list(md_files())
@@ -816,6 +833,7 @@ def cmd_board(folder, *filters):
     # vv's — capture exit codes unpiped.)
     bad = [f for f in filters if "=" not in f]
     if bad:
+        import shlex
         die(f"usage: board filters are KEY=VALUE, got {shlex.quote(bad[0])} — "
             f"next: vv board {shlex.quote(folder)} {shlex.quote(bad[0] + '=VALUE')}")
     want = dict(f.split("=", 1) for f in filters)
@@ -2355,6 +2373,7 @@ CMDS = {
 # outline — with the note the caller already named.
 def _next_read(args):
     if args:
+        import shlex
         return f"vv outline {shlex.quote(args[0])}"
     return "vv outline NOTE"
 ARITY_NEXT = {"read": _next_read}   # runnable, per the `next:` contract

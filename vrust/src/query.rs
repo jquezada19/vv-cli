@@ -168,7 +168,9 @@ fn cmd_board(args: &[String], vault: &Path, t0: Instant) -> Outcome {
     // outside the vault (absolute, `..`, or a symlink out) is python's
     // "escape:" refusal — never served natively. readpath::contain is the one
     // native containment RULE and also yields the root (orphans re-joins the
-    // canonical rel onto the vault on top of it, for its prefix compare).
+    // canonical rel onto the vault on top of it, for its prefix compare;
+    // board and props walk FROM the root and emit the walk's own names, so a
+    // case-variant or symlinked spelling needs no respelling here).
     // yagni: kept native so `board` keeps its fast path; drop to python-only
     // if board ever falls back for another reason anyway.
     let root = match readpath::contain(vault, folder) {

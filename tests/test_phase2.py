@@ -83,12 +83,8 @@ def main():
     check("P2h stale patch touched nothing",
           open(f"{tv}/N.md", "rb").read() == open(f"{tb}/N.md", "rb").read())
     shutil.rmtree(tv, ignore_errors=True); shutil.rmtree(tb, ignore_errors=True)
-    for v in (tv, tb):     # the fixtures' cache files too — they used to pile up in the real cache dir
-        try:
-            os.remove(os.path.expanduser("~/.cache/vv/index/"
-                                         + hashlib.sha256(os.path.realpath(v).encode()).hexdigest()[:16] + ".vvidx"))
-        except FileNotFoundError:
-            pass
+    if os.path.exists(cache):   # the fixture's cache file too — they used to pile up in the real cache dir
+        os.remove(cache)        # (`tb` runs python-only with VV_NO_INDEX, so it never has one)
     if fails:
         print(f"\n{len(fails)} failures: {fails}"); return 1
     print(f"\nALL PASS (phase2: {len(ran)})")

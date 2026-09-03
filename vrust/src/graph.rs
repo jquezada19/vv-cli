@@ -517,9 +517,11 @@ fn cmd_orphans(folder: &str, vault: &Path, t0: Instant) -> Outcome {
     } else {
         // Resolve like python's _scope: canonicalize, strip the canonical vault,
         // re-join onto `vault` so the prefix matches walk_ex's own paths.
-        // canonicalize is realpath(3), which answers the ON-DISK spelling of
-        // every component — python's realpath does not, so its _scope
-        // respells the rel itself (a case-variant `SUB` on APFS). An
+        // canonicalize is realpath(3), which on Darwin answers the STORED
+        // spelling of every component (case and unicode normalization) —
+        // observed, not a documented contract; the read-out suite's native
+        // RI2ci/RI2nf pin it. python's realpath does not, so its _scope
+        // respells the rel itself. An
         // in-vault symlinked folder used to answer a silent 0 natively while
         // python answered correctly. A missing folder is
         // python's `not-found` to print.

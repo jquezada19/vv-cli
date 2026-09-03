@@ -64,7 +64,8 @@ def main():
             p = os.path.join(tv, name)
             os.makedirs(os.path.dirname(p), exist_ok=True)
             open(p, "w", newline="").write(content)
-        env = dict(os.environ, VV_NO_METRICS="1", VV_VAULT=tv)
+        env = dict(os.environ, VV_NO_METRICS="1", VV_VAULT=tv,
+                   VV_INDEX_ROOT=tempfile.mkdtemp(prefix="vv-idx-"))   # both engines' caches stay out of ~/.cache
         n = 0
         for args in CASES:
             a = subprocess.run([VR] + args, capture_output=True, env=env)

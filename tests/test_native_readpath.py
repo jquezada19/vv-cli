@@ -46,7 +46,8 @@ def main():
             fp = os.path.join(tv, name)
             os.makedirs(os.path.dirname(fp), exist_ok=True)
             open(fp, "w", newline="").write(content)
-        env = dict(os.environ, VV_NO_METRICS="1", VV_VAULT=tv)
+        env = dict(os.environ, VV_NO_METRICS="1", VV_VAULT=tv,
+                   VV_INDEX_ROOT=tempfile.mkdtemp(prefix="vv-idx-"))   # both engines' caches stay out of ~/.cache
         n = 0
         for name in sorted(FIXTURES):
             for args in (["outline", name], ["head", name], ["read", name, "H0"],

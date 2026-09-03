@@ -29,7 +29,8 @@ try:
     t_old, t_new = 1700000000, 1700000100   # fixed epochs: deterministic
     os.utime(os.path.join(tv, "Old.md"), (t_old, t_old))
     os.utime(os.path.join(tv, "New.md"), (t_new, t_new))
-    env = dict(os.environ, VV_NO_METRICS="1", VV_VAULT=tv)
+    env = dict(os.environ, VV_NO_METRICS="1", VV_VAULT=tv,
+               VV_INDEX_ROOT=tempfile.mkdtemp(prefix="vv-idx-"))   # both engines' caches stay out of ~/.cache
 
     def run(cmd, *args, stdin=None):
         return subprocess.run(cmd + list(args), capture_output=True, text=True,
