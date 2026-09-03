@@ -12,7 +12,9 @@ Contract now:
     differs from the binary's baked version, ONE warning line on stderr; the
     command still runs (a warning, not a wall).
 """
-import os, shutil, subprocess, sys, tempfile
+import os, shutil, subprocess, sys, tempfile, atexit
+def _idx_root():   # a throwaway index root for both engines, removed at exit
+    d = tempfile.mkdtemp(prefix="vv-idx-"); atexit.register(shutil.rmtree, d, True); return d
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 VR = os.path.join(REPO, "vrust/target/release/vrust")
@@ -33,6 +35,7 @@ try:
     open(os.path.join(tv, "Note.md"), "w").write("---\nstatus: open\n---\n# N\nbody\n")
     VVBIN = os.path.join(pkg, "vv")
     base_env = {k: v for k, v in os.environ.items() if not k.startswith("VV_")}
+    base_env["VV_INDEX_ROOT"] = _idx_root()   # both engines' caches stay out of ~/.cache
     base_env.update(VV_NO_METRICS="1", VV_VAULT=tv)
 
     def run(*args, **env_over):

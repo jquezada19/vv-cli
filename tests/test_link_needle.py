@@ -13,14 +13,17 @@ dropped markdown links from the candidate set — neither exercised a target tha
 resolves without containing the basename. Only URL-encoding separates them.
 Every case below must FAIL on a build that needles markdown links.
 """
-import os, subprocess, sys, tempfile
+import os, subprocess, sys, tempfile, atexit, shutil
+def _idx_root():   # a throwaway index root for both engines, removed at exit
+    d = tempfile.mkdtemp(prefix="vv-idx-"); atexit.register(shutil.rmtree, d, True); return d
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 VR = os.path.join(REPO, "vrust/target/release/vrust")
 VV = os.path.join(REPO, "src/vv.py")
 
 def run(cmd, vault, py=False):
-    env = dict(os.environ, VV_NO_METRICS="1", VV_VAULT=vault)
+    env = dict(os.environ, VV_NO_METRICS="1", VV_VAULT=vault,
+               VV_INDEX_ROOT=_idx_root())   # both engines' caches stay out of ~/.cache
     argv = [sys.executable, VV] + cmd if py else [VR] + cmd
     if py:
         env["VV_NO_INDEX"] = "1"

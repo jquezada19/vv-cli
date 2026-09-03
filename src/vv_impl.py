@@ -748,10 +748,13 @@ def _ondisk(rel_, folder):
     resolved every one — an alias whose name merely casefolds equal to the
     real directory would otherwise win by listing order and undo that
     resolution. Candidates are narrowed first by NFC-casefold equality so an
-    exact or case/normalization-variant hit costs one stat; only when that
+    exact or case/normalization-variant hit costs one stat beyond the one
+    directory read every call makes; only when that
     narrowing finds nothing is every entry stat-compared, so the narrowing
-    can never mis-select. A component that vanished since _scope's isdir
-    check is refused, not silently respelled."""
+    can never mis-select (it is an unpinned optimisation: the identity pass
+    behind it is what the tests pin). A component that vanished since _scope's isdir
+    check, or one whose directory cannot be listed, is refused with the
+    reason — never silently respelled to the caller's spelling."""
     import unicodedata
     def key(s):
         return unicodedata.normalize("NFC", s).casefold()
@@ -766,13 +769,16 @@ def _ondisk(rel_, folder):
             want = os.stat(os.path.join(cur, c))
             with os.scandir(cur) as it:
                 ents = [e for e in it if not e.is_symlink()]
+        except PermissionError:
+            die(f"refused: cannot list {folder} (permission denied)")
         except OSError:
             die(f"not-found: no such folder: {folder}")
         hit = next((e for e in ents if key(e.name) == key(c) and same(e, want)), None) \
             or next((e for e in ents if same(e, want)), None)
-        name = hit.name if hit else c
-        out.append(name)
-        cur = os.path.join(cur, name)
+        if hit is None:      # it stat'd but no listed entry IS it: it vanished mid-walk
+            die(f"not-found: no such folder: {folder}")
+        out.append(hit.name)
+        cur = os.path.join(cur, hit.name)
     return os.sep.join(out)
 
 def cmd_orphans(folder=""):

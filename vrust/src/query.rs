@@ -329,7 +329,9 @@ fn cmd_props(args: &[String], vault: &Path, t0: Instant) -> Outcome {
         // readpath::contain is the one native containment rule (a missing or
         // escaping folder falls back; python emits the canonical text). A FILE
         // scope falls back too: python refuses it (a file as a sync scope used
-        // to retire that file's own index row) — parity with board.
+        // to retire that file's own index row) — parity with board. Like board,
+        // props walks FROM the root and emits the walk's own names, so a
+        // case-variant or symlinked spelling needs no respelling here.
         let full = match readpath::contain(vault, &folder) {
             Some(p) => p,
             None => return Outcome::Fallback,

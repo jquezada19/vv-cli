@@ -15,13 +15,12 @@ export VV_NO_METRICS=1
 # integrity, cache torture) deliberately exercise the HOME-derived native
 # cache path and go red with it set; a suite that wants both engines' caches
 # in a throwaway dir sets it itself (the read-out suite does). Every other
-# suite that drives the native engine either sets VV_INDEX_ROOT to a temp
-# dir or, for the two HOME-path suites, removes its fixture's .vvidx on the
-# way out (cache torture redirects HOME). Measured: every entry below, run
-# alone under the real HOME, leaves the real ~/.cache/vv/index unchanged —
-# yet a whole gate run has been seen to add a few files (three python
-# .sqlite + one native .vvidx, distinct temp-vault keys) that no entry adds
-# alone. Unattributed; stale files there are harmless and unswept.
+# suite that indexes a temp vault sets VV_INDEX_ROOT to a temp dir; the two
+# HOME-path suites remove their fixture's .vvidx on the way out; cache
+# torture redirects HOME. A suite that leaves a file behind names itself:
+# `strings ~/.cache/vv/index/<key>.sqlite | grep '\.md$'` prints the
+# fixture's note paths (test_jsonl, test_surface5, test_packaged, test_link_needle were found that way). Files older gate runs left
+# there are stale, harmless and unswept.
 
 # src/vv_impl.py uses PEP 701 multi-line f-string expressions (3.12+). On an
 # older interpreter the python oracle dies at import, and the differential

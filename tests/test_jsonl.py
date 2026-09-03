@@ -11,7 +11,9 @@ Contract (docs/roadmap-v1.1-spec.md P3):
   * the NATIVE entry hands any --jsonl invocation to python (schema has one
     author); search --jsonl must not shell back to the rust engine.
 """
-import json, os, subprocess, sys, tempfile, shutil
+import json, os, subprocess, sys, tempfile, shutil, atexit
+def _idx_root():   # a throwaway index root for both engines, removed at exit
+    d = tempfile.mkdtemp(prefix="vv-idx-"); atexit.register(shutil.rmtree, d, True); return d
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 VR = os.path.join(REPO, "vrust/target/release/vrust")
@@ -27,7 +29,8 @@ try:
     os.makedirs(os.path.join(tv, "Wk"))
     open(os.path.join(tv, "Wk/A.md"), "w").write("---\nstatus: open\ntype: t1\ntags: [alpha]\n---\n[[B]]\nneedle text\n")
     open(os.path.join(tv, "Wk/B.md"), "w").write("---\nstatus: done\ntype: t2\ntags: [alpha, beta]\n---\n[[A]]\nneedle too\n")
-    env = dict(os.environ, VV_NO_METRICS="1", VV_VAULT=tv)
+    env = dict(os.environ, VV_NO_METRICS="1", VV_VAULT=tv,
+               VV_INDEX_ROOT=_idx_root())   # both engines' caches stay out of ~/.cache
 
     def run(cmd, *args):
         return subprocess.run(cmd + list(args), capture_output=True, text=True, env=env)

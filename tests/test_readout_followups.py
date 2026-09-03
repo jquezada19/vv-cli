@@ -5,9 +5,11 @@ The week's friction was the AFFORDANCE class — vv was right and unhelpful at
 the same time. Each pin below names what motivated it.
 
 Window: 2026-08-26T21:06 → 2026-09-02 (the pilot register's window).
-Checks suffixed "(control…)" pass on pre-fix code by design and "(setup)"
-checks only gate what follows; every other check was watched to fail with its
-fix reverted (a mutation pass). The suite runs in a throwaway vault.
+Checks suffixed "(control…)" pass at the PR BASE (origin/main) by design —
+that is the reference point, never the previous commit — "(invariant pin)"
+checks pin a property no single fix introduced, and "(setup)" checks only
+gate what follows; every other check fails at the base or with its fix
+reverted (a mutation pass). The suite runs in a throwaway vault.
 
 R1  `board FOLDER status open` (space, not `=`) died as a bare Python
     traceback: exit 1, no usage line, no `next:`, no metrics row. Found by
@@ -246,12 +248,13 @@ try:
             TVL = os.path.join(mkdtemp("vv-readout-vlink-"), "link")
             os.symlink(TV, TVL)
             _lexical = hashlib.sha256(TVL.encode()).hexdigest()[:16] + ".vvidx"
+            _before = set(os.listdir(ienv["VV_INDEX_ROOT"]))
             r = subprocess.run([VRUST, "backlinks", "vvreadout-root-fixture"], capture_output=True, text=True,
                                env=dict(native_env, VV_VAULT=TVL))
-            idx_files = [f for f in os.listdir(ienv["VV_INDEX_ROOT"]) if f.endswith(".vvidx")]
-            check("RI2i2 a symlinked VV_VAULT lands on the canonical vault's cache file, never a lexical one (invariant pin: _cache_key ⇄ cache.rs)",
-                  r.returncode == 0 and _cache_key(TV) in idx_files and _lexical not in idx_files,
-                  (idx_files[:4], _lexical, r.stderr[-120:]))
+            _new = set(os.listdir(ienv["VV_INDEX_ROOT"])) - _before
+            check("RI2i2 a symlinked VV_VAULT lands on the canonical vault's cache file — no NEW file under any other key (invariant pin: _cache_key ⇄ cache.rs)",
+                  r.returncode == 0 and _cache_key(TV) in _before and not _new,
+                  (sorted(_new), _lexical, r.stderr[-120:]))
             noidx = mkdtemp("vv-readout-noidx-")
             r = subprocess.run([VRUST, "backlinks", "vvreadout-root-fixture"], capture_output=True, text=True,
                                env=dict(native_env, VV_INDEX_ROOT=noidx, VV_NO_INDEX="1"))
@@ -351,7 +354,7 @@ try:
                       and f"next: vv board {spelling}" in r.stderr, (r.stdout + r.stderr)[:200])
             # the inverse: the RESOLVED target decides, never the lexical name
             r = runner("orphans", "Alias/graphify-out")
-            check(f"RI2k3 {label} a skip-NAMED symlink to an allowed folder answers (resolved target, not lexical name, is the rule; control: realpath already resolved it)",
+            check(f"RI2k3 {label} a skip-NAMED symlink to an allowed folder answers (resolved target, not lexical name, is the rule; was a silent 0 at the base in both engines)",
                   r.returncode == 0 and "sub-fixture" in r.stdout, (r.stdout + r.stderr)[:200])
             # a case-variant spelling resolves on a case-insensitive filesystem,
             # but realpath keeps the CALLER's casing while every walk prunes
@@ -364,8 +367,9 @@ try:
             # NORMALIZATION variant (NFC argument, NFD on disk): the identity
             # match is what closes it, and a case rule alone could not.
             nfc_ok = os.path.isdir(os.path.join(TV, NFC))     # a normalization-insensitive filesystem (APFS)
-            ctl = " (control: native's canonicalize already answered)" if label == "native" else " (was a silent 0)"
+            ctl = " (was a silent 0 at the base: the canonicalize-and-rejoin is this branch's)" if label == "native" else " (was a silent 0)"
             if ci:
+                print(f"SKIP RI2ca {label}: a casefold-equal symlink alias is not constructible on a case-insensitive filesystem — the symlink-skip in _ondisk is exercised only on a case-sensitive volume")
                 r = runner("orphans", "SUB")
                 check(f"RI2ci {label} orphans by a case-variant spelling answers by the on-disk name" + ctl,
                       r.returncode == 0 and "sub-fixture" in r.stdout, (r.stdout + r.stderr)[:200])
@@ -376,6 +380,19 @@ try:
                 r = runner("orphans", "SUB")
                 check(f"RI2ci {label} on a case-sensitive filesystem a case-variant spelling is not-found (control)",
                       r.returncode == 1 and r.stderr.startswith("not-found"), (r.stdout + r.stderr)[:200])
+                # a symlink ALIAS whose name casefolds equal to the real sibling
+                # (constructible only here): the respell must never pick the
+                # alias — realpath resolved it, and only non-symlink entries are
+                # candidates. Against the old code this fails only when the
+                # listing yields the alias first, so it is a pin of the
+                # invariant, not of one listing order.
+                if not os.path.lexists(os.path.join(TV, "SUB")):
+                    os.symlink(os.path.join(TV, "Sub"), os.path.join(TV, "SUB"))
+                for spelling in ("Sub", "SUB"):
+                    r = runner("orphans", spelling)
+                    check(f"RI2ca {label} orphans {spelling!r} beside a casefold-equal symlink alias answers the real folder (alias never chosen)",
+                          r.returncode == 0 and "sub-fixture" in r.stdout, (r.stdout + r.stderr)[:200])
+                os.remove(os.path.join(TV, "SUB"))
             if nfc_ok:
                 r = runner("orphans", NFC)
                 check(f"RI2nf {label} orphans by a normalization-variant spelling (NFC arg, NFD on disk) answers by the on-disk name" + ctl,
@@ -388,7 +405,7 @@ try:
             # case list names orphans <file>; props is RI2f)
             for cmd_ in (("orphans", "Sub/sub-fixture.md"), ("board", "Sub/sub-fixture.md", "type=vvreadout-fixture")):
                 r = runner(*cmd_)
-                check(f"RI2f4 {label} {cmd_[0]} with a FILE scope is the file refusal (control: shared _scope)",
+                check(f"RI2f4 {label} {cmd_[0]} with a FILE scope is the file refusal (was exit 0 at the base, both engines)",
                       r.returncode == 1 and r.stderr.startswith("not-found: Sub/sub-fixture.md is a file"), (r.stdout + r.stderr)[:200])
             # board DOES answer an explicitly named skip dir (props is RI2h)
             r = runner("board", "graphify-out", "type=vvreadout-fixture")
@@ -554,20 +571,28 @@ try:
     # Python side by ast (a `{...} | {...}` extension is refused, not missed);
     # native side by regex, guarded so drift FAILS with a name instead of crashing.
     import ast as _ast, re as _re2
-    _py, _rs = None, None
+    _py = "no SKIP_DIRS assignment found"
     for node in _ast.parse(open(os.path.join(REPO, "src", "vv_impl.py")).read()).body:
-        if isinstance(node, _ast.Assign) and any(isinstance(t, _ast.Name) and t.id == "SKIP_DIRS" for t in node.targets):
+        _targets = node.targets if isinstance(node, _ast.Assign) else [node.target] if isinstance(node, _ast.AnnAssign) else []
+        if any(isinstance(t, _ast.Name) and t.id == "SKIP_DIRS" for t in _targets):
             _py = {e.value for e in node.value.elts} if isinstance(node.value, _ast.Set) and all(isinstance(e, _ast.Constant) for e in node.value.elts) else "not a plain set literal"
-    _mrs = _re2.search(r"pub const SKIP_DIRS[^=]*=\s*&?\[([^\]]*)\]", open(os.path.join(REPO, "vrust", "src", "main.rs")).read())
+    _mrs = _re2.search(r"pub const SKIP_DIRS\s*:[^=]*=\s*&?\[([^\]]*)\]", open(os.path.join(REPO, "vrust", "src", "main.rs")).read())   # anchored: a renamed const fails by name
     _rs = set(_re2.findall(r'"([^"]+)"', _mrs.group(1))) if _mrs else "no `pub const SKIP_DIRS` found"
     check("R6s SKIP_DIRS is mirrored whole: the python set literal and the native const name the same directories (invariant pin)",
           isinstance(_py, set) and _py == _rs and bool(_py), (_py if isinstance(_py, str) else sorted(_py), _rs if isinstance(_rs, str) else sorted(_rs)))
     # rulings are never window-filtered: every ruling above was stamped NOW,
     # after the 2026-09-01 report window, and still adjudicated (R6f)
     _rulings = [x for x in map(json.loads, open(sink)) if x.get("kind") == "adjudication" and "ts" in x]
+    # the rulings are stamped now (a tautology on any sane clock, kept as the
+    # premise); the pin is that every RULED case in the disagreements block is
+    # adjudicated — the block's only UNADJUDICATED rows are the three the
+    # fixture leaves unruled on purpose (R6f counts them)
+    _block = out.split("disagreements:")[-1]
+    _adj_lines = [l for l in _block.splitlines() if "→" in l and "(UNADJUDICATED)" not in l]
     check("R6t rulings stamped after the report window still adjudicate (they are never window-filtered)",
-          len(_rulings) >= 3 and all(x["ts"] > "2026-09-01T23:59:59" for x in _rulings) and "(UNADJUDICATED)" not in out.split("disagreements:")[-1].split("\n")[1],
-          ([x.get("ts") for x in _rulings][:3], out.split("disagreements:")[-1][:200]))
+          len(_rulings) >= 3 and all(x["ts"] > "2026-09-01T23:59:59" for x in _rulings)
+          and len(_adj_lines) >= 4 and _block.count("(UNADJUDICATED)") == 3,
+          ([x.get("ts") for x in _rulings][:3], _block[:300]))
     check("R5i older-harness record set aside, not pooled (control: pre-existing)",
           "set aside 1 record(s)" in out and "Old.md" not in out and "9,999" not in out, out)
     check("R5j report prints the override banner", "VV_SHADOW_SINK override" in out, out)

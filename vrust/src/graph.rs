@@ -530,6 +530,8 @@ fn cmd_orphans(folder: &str, vault: &Path, t0: Instant) -> Outcome {
             None => return Outcome::Fallback,
         };
         if !joined.is_dir() {
+            // a FILE scope: python refuses it by name (a file as a sync scope
+            // used to retire that file's own index row) — parity with board/props
             return Outcome::Fallback;
         }
         // Resolve first, then test every component of the RESOLVED rel against
@@ -556,7 +558,11 @@ fn cmd_orphans(folder: &str, vault: &Path, t0: Instant) -> Outcome {
                     }
                     // an empty rel is the root itself: never vault.join("") (a
                     // trailing separator that no walked path shares)
-                    if rel.as_os_str().is_empty() { vault.to_path_buf() } else { vault.join(rel) }
+                    if rel.as_os_str().is_empty() {
+                        vault.to_path_buf()
+                    } else {
+                        vault.join(rel)
+                    }
                 }
                 Err(_) => return Outcome::Fallback,
             },

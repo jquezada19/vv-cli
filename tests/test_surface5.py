@@ -11,7 +11,9 @@
   * templates — lists template stems; new --template refuses an AMBIGUOUS
     prefix instead of silently taking the first lexicographic hit.
 """
-import json, os, subprocess, sys, tempfile, shutil
+import json, os, subprocess, sys, tempfile, shutil, atexit
+def _idx_root():   # a throwaway index root for both engines, removed at exit
+    d = tempfile.mkdtemp(prefix="vv-idx-"); atexit.register(shutil.rmtree, d, True); return d
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 VR = os.path.join(REPO, "vrust/target/release/vrust")
@@ -32,7 +34,8 @@ try:
     open(os.path.join(tv, "FM.md"), "w", newline="").write("---\ntype: x\n---\nbody line\n")
     open(os.path.join(tv, "NoFM.md"), "w", newline="").write("just body\n")
     open(os.path.join(tv, "Crlf.md"), "wb").write(b"---\r\ntype: x\r\n---\r\nbody\r\n")
-    env = dict(os.environ, VV_NO_METRICS="1", VV_VAULT=tv)
+    env = dict(os.environ, VV_NO_METRICS="1", VV_VAULT=tv,
+               VV_INDEX_ROOT=_idx_root())   # both engines' caches stay out of ~/.cache
 
     def run(cmd, *args, stdin=None):
         return subprocess.run(cmd + list(args), capture_output=True, text=True, env=env, input=stdin)

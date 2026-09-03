@@ -46,11 +46,13 @@ time.
   the narrowing can only fall through, never mis-select). The native engine's
   canonicalize (realpath(3) on Darwin) already answered the stored spelling —
   observed and pinned, not a documented contract.
-  Known limits, both pre-existing: a case-variant `VV_VAULT` root refuses an
-  absolute in-vault path or a symlink whose target uses the stored spelling
-  as `escape:` (it fails closed; spell `VV_VAULT` as on disk); index rows a
+  Known limit, pre-existing and an engine divergence: with a case-variant
+  `VV_VAULT` root, the python engine refuses an absolute in-vault path (or a
+  symlink whose target uses the stored spelling) as `escape:` — an
+  over-refusal, it fails closed — while the native engine, which canonicalizes
+  both sides, answers it. Spell `VV_VAULT` as it is on disk. (Index rows a
   scoped query stored under a caller-spelled prefix before this release stay
-  until the next unscoped sync (answers are unaffected).
+  until the next unscoped sync; answers are unaffected.)
 - The `next:` a file-as-folder or skip-dir refusal prints is shell-quoted, so a
   path with a space is copy-runnable (board's and read's already were).
 

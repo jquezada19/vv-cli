@@ -40,8 +40,8 @@ fn normpath(p: &Path) -> PathBuf {
                 Some(Component::Normal(_)) => {
                     out.pop();
                 }
-                Some(Component::RootDir) => {}          // "/.." is "/"
-                _ => out.push(c),                       // relative: keep the ".."
+                Some(Component::RootDir) => {} // "/.." is "/"
+                _ => out.push(c),              // relative: keep the ".."
             },
             other => out.push(other),
         }
