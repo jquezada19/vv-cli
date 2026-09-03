@@ -33,9 +33,10 @@ def run(cmd, vault, py=False):
 def main():
     if not os.path.exists(VR):
         print("SKIP: binary not built"); return 0
-    fails = []
+    fails, ran = [], []
     def check(lbl, ok, info=""):
         print(("PASS " if ok else "FAIL ") + lbl + ("" if ok else f"  [{str(info)[:200]}]"))
+        ran.append(lbl)
         if not ok: fails.append(lbl)
 
     tv = tempfile.mkdtemp(prefix="vv-integ-")
@@ -84,7 +85,7 @@ def main():
 
     shutil.rmtree(tv, ignore_errors=True)
     if os.path.exists(cp): os.remove(cp)
-    print(("ALL PASS (cache integrity: %d)" % (6 - len(fails))) if not fails
+    print(("ALL PASS (cache integrity: %d)" % len(ran)) if not fails
           else "FAILURES: " + ", ".join(fails))
     return 1 if fails else 0
 

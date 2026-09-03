@@ -11,6 +11,16 @@ cd "$(dirname "$0")"
 # window (found 2026-08-26, hour one of the pilot). One export covers every
 # child process, including any suite added later.
 export VV_NO_METRICS=1
+# NOT exported gate-wide: VV_INDEX_ROOT. Three cache suites (phase2, cache
+# integrity, cache torture) deliberately exercise the HOME-derived native
+# cache path and go red with it set; a suite that wants both engines' caches
+# in a throwaway dir sets it itself (the read-out suite does). Every other
+# suite that indexes a temp vault sets VV_INDEX_ROOT to a temp dir; the two
+# HOME-path suites remove their fixture's .vvidx on the way out; cache
+# torture redirects HOME. A suite that leaves a file behind names itself:
+# `strings ~/.cache/vv/index/<key>.sqlite | grep '\.md$'` prints the
+# fixture's note paths (test_jsonl, test_surface5, test_packaged, test_link_needle were found that way). Files older gate runs left
+# there are stale, harmless and unswept.
 
 # src/vv_impl.py uses PEP 701 multi-line f-string expressions (3.12+). On an
 # older interpreter the python oracle dies at import, and the differential
@@ -76,6 +86,7 @@ run "v1.5 (python engine)" env VV_ENGINE=python python3 tests/test_vv15.py
 run "review regressions" python3 tests/test_panel_findings.py
 run "oracle findings"    python3 tests/test_oracle_findings.py
 run "round-2 review"     python3 tests/test_review_round2.py
+run "read-out follow-ups" python3 tests/test_readout_followups.py
 run "engine parity"      python3 tests/test_engine_parity.py
 run "native read path"   python3 tests/test_native_readpath.py
 run "native graph"        python3 tests/test_graph_parity.py

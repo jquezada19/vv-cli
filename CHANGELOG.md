@@ -3,9 +3,99 @@
 Notable changes to `vv`. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html), where
 the public API is the **CLI surface**: command names, flag names, output shape,
-and exit codes. A change that makes existing output unparseable is a major change.
+and exit codes. A change that makes existing output unparseable, or that
+changes an exit code, is a major change.
 
 ## [Unreleased]
+
+Version to be set by the release commit. Note for that decision: the
+**Exit-code change** below moves five cases across three commands
+from exit 0 to exit 1 (`props KEY <file>`, `orphans <file>`,
+`orphans <missing>`, `orphans <skip dir>`, `board ../x`), which breaks a
+script that tested for success — a MAJOR change under this file's header
+(exit codes are part of the CLI surface; an exit-code change counts
+alongside "output unparseable"), i.e. 2.0.0 unless the release commit
+decides otherwise. Precedent note: 1.1.0 shipped `new --template` refusing
+an ambiguous prefix (exit 0 → 1) as a minor; the header rule applies from
+this release forward.
+
+Follow-ups from the shadow-pilot read-out (window 2026-08-26T21:06 →
+2026-09-02) — the affordance class: vv was right and unhelpful at the same
+time.
+
+### Security
+- `board FOLDER`'s folder argument now carries the same vault containment as
+  every other path argument: `board ../x` is refused (`escape:`) in both
+  engines. Before this it walked and printed frontmatter from outside the
+  vault. Residual, pre-existing and unchanged here: a symlinked `.md` *file*
+  inside a legitimately contained folder is still read by every folder-scoped
+  enumerator (`board`/`props`/`orphans`) in both engines (directory
+  symlinks are not followed).
+
+### Fixed
+- `board FOLDER status open` (a filter without `=`) died as a bare Python
+  traceback — exit 1, no usage line, no `next:`, and no metrics row; it is
+  now `usage: board filters are KEY=VALUE …` with a runnable `next:`.
+- A case- or normalization-variant folder spelling on an insensitive
+  filesystem (APFS default): `orphans SUB` or an NFC-spelled `orphans Café`
+  over an NFD directory resolved but named no walked path and answered a
+  silent `(0 orphans)`, and `orphans GRAPHIFY-OUT` dodged the skip-dir refusal
+  into the same silent zero. The python engine now respells the resolved scope
+  to its on-disk names, choosing each component by identity among the
+  directory's non-symlink entries (candidates narrowed by NFC-casefold first;
+  the narrowing can only fall through, never mis-select). The native engine's
+  canonicalize (realpath(3) on Darwin) already answered the stored spelling —
+  observed and pinned, not a documented contract.
+  Known limit, pre-existing and an engine divergence: with a case-variant
+  `VV_VAULT` root, the python engine refuses an absolute in-vault path (or a
+  symlink whose target uses the stored spelling) as `escape:` — an
+  over-refusal, it fails closed — while the native engine, which canonicalizes
+  both sides, answers it. Spell `VV_VAULT` as it is on disk. (Index rows a
+  scoped query stored under a caller-spelled prefix before this release stay
+  until the next unscoped sync; answers are unaffected.)
+- The `next:` a file-as-folder or skip-dir refusal prints is shell-quoted, so a
+  path with a space is copy-runnable (board's and read's already were).
+
+### Changed
+- Environment contract: `VV_VAULT` is normalised lexically (like
+  `os.path.normpath`) in BOTH engines before use, so a value containing `..`
+  through a symlink names the lexical directory in both — previously python
+  and the native engine could address different vaults (known lexical
+  divergence: POSIX keeps a leading `//`, the native normalise collapses it
+  to `/`). `VV_NO_INDEX` and
+  `VV_INDEX_ROOT` now bind the native engine's link cache too (they were
+  python-only; README documented them without an engine qualifier), and an
+  exported-but-empty value means unset in both engines.
+- `journal` (not a command) now hints `did you mean: doctor` — an alias table
+  the edit-distance hint could never reach.
+- `read NOTE` with no section points at `vv outline <that note>` instead of
+  the generic usage line. (The read-out's other `read` bucket — wrong note
+  names — already prints `did you mean:` suggestions and is unchanged.)
+- `board .` / `board ""` / `props KEY .` / `orphans .` now cover the vault
+  root in both engines (they returned zero rows before — `board` on the
+  indexed path, `props` on both python paths, `orphans` on every path in
+  both engines) and sync the index unscoped
+  instead of reparsing every note per call. The `board` walk in both engines
+  now skips the same generated directory the index skips (`graphify-out/`),
+  so indexed, walk and native answers agree at the root. A skip dir named
+  explicitly as the scope — at any depth, by any spelling — IS answered by
+  `board`/`props` (its own notes), and `orphans` refuses it with a `next:`
+  (those notes are outside the link graph; it printed a silent zero).
+  **Exit-code change:**
+  `props KEY <file>` and `orphans <file|missing>` are refused (exit 1) like
+  `board <file>` in both engines (`props` used to retire that note's index
+  row and answer a count; `orphans <missing>` answered a clean zero and
+  `orphans <file>` listed the file itself as an orphan, both exit 0).
+  `orphans <in-vault symlink>` now resolves the folder in both engines (it
+  answered zero).
+- Shadow harness (`bench/shadow.py`, `bench/shadow_report.py`): a legacy
+  one-liner that *fails* (`grep` exit 2+, anything else non-zero — `grep`
+  exit 1 is an answer) is recorded as `legacy-error` and reported as a
+  harness error, never a disagreement, with no answer-set diff kept; rulings
+  can be scoped to one `(op, args)` case with `--adjudicate … -- <args>`, an
+  op-level ruling is labelled as reused, rulings are never window-filtered,
+  and a sink of nothing but failed pairs aborts loudly instead of printing a
+  clean zero. `VV_SHADOW_SINK` overrides the sink (tests only; banner printed).
 
 ## [1.1.0] — 2026-08-27
 

@@ -132,14 +132,16 @@ fn scan_fm_parallel(files: &[PathBuf]) -> Result<Vec<HashMap<String, String>>, (
     Ok(result)
 }
 
-// ---------- board: dot-dirs-only exclusion, exactly cmd_board's live os.walk ----------
+use crate::SKIP_DIRS; // one mirror of python's list, shared with walk_ex
+
+// ---------- board: exactly cmd_board's live os.walk — dot-dirs + SKIP_DIRS ----------
 fn walk_board(dir: &Path, out: &mut Vec<PathBuf>) {
     if let Ok(rd) = fs::read_dir(dir) {
         for e in rd.flatten() {
             let name = e.file_name().to_string_lossy().to_string();
             let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
             if is_dir {
-                if name.starts_with('.') {
+                if name.starts_with('.') || SKIP_DIRS.contains(&name.as_str()) {
                     continue;
                 }
                 walk_board(&e.path(), out);
@@ -159,10 +161,22 @@ fn cmd_board(args: &[String], vault: &Path, t0: Instant) -> Outcome {
     for f in &args[1..] {
         match f.find('=') {
             Some(i) => filters.push((f[..i].to_string(), f[i + 1..].to_string())),
-            None => return Outcome::Fallback, // python: dict(...) unpack crashes -> let it
+            None => return Outcome::Fallback, // python owns the usage error for a non-KEY=VALUE filter
         }
     }
-    let root = vault.join(folder);
+    // Containment parity with python's contain(): a folder that canonicalizes
+    // outside the vault (absolute, `..`, or a symlink out) is python's
+    // "escape:" refusal — never served natively. readpath::contain is the one
+    // native containment RULE and also yields the root (orphans re-joins the
+    // canonical rel onto the vault on top of it, for its prefix compare;
+    // board and props walk FROM the root and emit the walk's own names, so a
+    // case-variant or symlinked spelling needs no respelling here).
+    // yagni: kept native so `board` keeps its fast path; drop to python-only
+    // if board ever falls back for another reason anyway.
+    let root = match readpath::contain(vault, folder) {
+        Some(p) => p,
+        None => return Outcome::Fallback,
+    };
     if !root.is_dir() {
         return Outcome::Fallback; // python dies not-found: canonical text is python's
     }
@@ -268,7 +282,7 @@ fn tag_tokens(s: &str) -> Vec<String> {
 fn cmd_tags(args: &[String], vault: &Path, t0: Instant) -> Outcome {
     let counts_flag = args.iter().any(|a| a == "--counts");
     let mut files = Vec::new();
-    crate::walk_ex(vault, &mut files, false); // matches md_files(): dot-dirs + graphify-out only
+    crate::walk_ex(vault, &mut files, false); // matches md_files(): dot-dirs + SKIP_DIRS
     files.sort_by_key(|p| p.to_string_lossy().into_owned());
     let props_list = match scan_fm_parallel(&files) {
         Ok(v) => v,
@@ -312,21 +326,17 @@ fn cmd_props(args: &[String], vault: &Path, t0: Instant) -> Outcome {
     let key = &args[0];
     let folder = args.get(1).cloned().unwrap_or_default();
     let root: PathBuf = if !folder.is_empty() {
-        let full = vault.join(&folder);
-        // contain(): realpath-resolve and require it stays under the vault.
-        // Unlike python's realpath (which needs no existence), fs::canonicalize
-        // requires the path to exist — a nonexistent folder Falls back here
-        // where python would silently print "(0 notes with KEY)"; documented
-        // as a deliberately conservative (never-wrong) divergence.
-        let real = match fs::canonicalize(&full) {
-            Ok(r) => r,
-            Err(_) => return Outcome::Fallback,
+        // readpath::contain is the one native containment rule (a missing or
+        // escaping folder falls back; python emits the canonical text). A FILE
+        // scope falls back too: python refuses it (a file as a sync scope used
+        // to retire that file's own index row) — parity with board. Like board,
+        // props walks FROM the root and emits the walk's own names, so a
+        // case-variant or symlinked spelling needs no respelling here.
+        let full = match readpath::contain(vault, &folder) {
+            Some(p) => p,
+            None => return Outcome::Fallback,
         };
-        let vreal = match fs::canonicalize(vault) {
-            Ok(r) => r,
-            Err(_) => return Outcome::Fallback,
-        };
-        if !(real == vreal || real.starts_with(&vreal)) {
+        if !full.is_dir() {
             return Outcome::Fallback;
         }
         full

@@ -8,7 +8,9 @@ Fixtures cover: duplicate basenames (same-folder winner vs shortest-path
 winner vs lexicographic tie), a fenced/table-embedded link that must NOT
 count, a percent-encoded markdown link, and a plain orphan/deadend pair.
 """
-import os, subprocess, sys, tempfile, shutil
+import os, subprocess, sys, tempfile, shutil, atexit
+def _idx_root():   # a throwaway index root for both engines, removed at exit
+    d = tempfile.mkdtemp(prefix="vv-idx-"); atexit.register(shutil.rmtree, d, True); return d
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 VR = os.path.join(REPO, "vrust/target/release/vrust")
@@ -64,7 +66,8 @@ def main():
             p = os.path.join(tv, name)
             os.makedirs(os.path.dirname(p), exist_ok=True)
             open(p, "w", newline="").write(content)
-        env = dict(os.environ, VV_NO_METRICS="1", VV_VAULT=tv)
+        env = dict(os.environ, VV_NO_METRICS="1", VV_VAULT=tv,
+                   VV_INDEX_ROOT=_idx_root())   # both engines' caches stay out of ~/.cache
         n = 0
         for args in CASES:
             a = subprocess.run([VR] + args, capture_output=True, env=env)

@@ -4,7 +4,9 @@ head/resolve itself and MUST be byte-identical (stdout+stderr+exit) to the
 Python implementation; anything it can't handle execs Python, so error grammar
 is Python-canonical by construction. Fixtures are specification pins for the
 grammar corners the corpus may not contain (panel-prescribed 2026-08-27)."""
-import os, subprocess, sys, tempfile, shutil
+import os, subprocess, sys, tempfile, shutil, atexit
+def _idx_root():   # a throwaway index root for both engines, removed at exit
+    d = tempfile.mkdtemp(prefix="vv-idx-"); atexit.register(shutil.rmtree, d, True); return d
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 VR = os.path.join(REPO, "vrust/target/release/vrust")
@@ -46,7 +48,8 @@ def main():
             fp = os.path.join(tv, name)
             os.makedirs(os.path.dirname(fp), exist_ok=True)
             open(fp, "w", newline="").write(content)
-        env = dict(os.environ, VV_NO_METRICS="1", VV_VAULT=tv)
+        env = dict(os.environ, VV_NO_METRICS="1", VV_VAULT=tv,
+                   VV_INDEX_ROOT=_idx_root())   # both engines' caches stay out of ~/.cache
         n = 0
         for name in sorted(FIXTURES):
             for args in (["outline", name], ["head", name], ["read", name, "H0"],

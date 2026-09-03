@@ -515,9 +515,58 @@ fn cmd_orphans(folder: &str, vault: &Path, t0: Instant) -> Outcome {
     let root: PathBuf = if folder.is_empty() {
         vault.to_path_buf()
     } else {
-        match readpath::contain(vault, folder) {
+        // Resolve like python's _scope: canonicalize, strip the canonical vault,
+        // re-join onto `vault` so the prefix matches walk_ex's own paths.
+        // canonicalize is realpath(3), which on Darwin answers the STORED
+        // spelling of every component (case and unicode normalization) —
+        // observed, not a documented contract; the read-out suite's native
+        // RI2ci/RI2nf pin it. python's realpath does not, so its _scope
+        // respells the rel itself. An
+        // in-vault symlinked folder used to answer a silent 0 natively while
+        // python answered correctly. A missing folder is
+        // python's `not-found` to print.
+        let joined = match readpath::contain(vault, folder) {
             Some(p) => p,
             None => return Outcome::Fallback,
+        };
+        if !joined.is_dir() {
+            // a FILE scope: python refuses it by name (a file as a sync scope
+            // used to retire that file's own index row) — parity with board/props
+            return Outcome::Fallback;
+        }
+        // Resolve first, then test every component of the RESOLVED rel against
+        // the skip list — python refuses a skip dir at any depth, reached by
+        // any spelling (`Sub/../graphify-out`, a symlink named otherwise), and
+        // that refusal is python's to print. readpath::contain is the one
+        // containment RULE; orphans additionally re-joins the canonical rel
+        // onto `vault` because it prefix-compares against walk_ex's paths.
+        // yagni: needed for parity, not defence — walk_ex prunes skip dirs by
+        // child name, so the root itself would be walked; drop only if walk_ex
+        // ever rejects a skip-dir root.
+        match (fs::canonicalize(&joined), fs::canonicalize(vault)) {
+            (Ok(real), Ok(vreal)) => match real.strip_prefix(&vreal) {
+                Ok(rel) => {
+                    let skipped = rel.components().any(|c| match c {
+                        std::path::Component::Normal(n) => {
+                            let n = n.to_string_lossy();
+                            n.starts_with('.') || crate::SKIP_DIRS.contains(&n.as_ref())
+                        }
+                        _ => false,
+                    });
+                    if skipped {
+                        return Outcome::Fallback;
+                    }
+                    // an empty rel is the root itself: never vault.join("") (a
+                    // trailing separator that no walked path shares)
+                    if rel.as_os_str().is_empty() {
+                        vault.to_path_buf()
+                    } else {
+                        vault.join(rel)
+                    }
+                }
+                Err(_) => return Outcome::Fallback,
+            },
+            _ => return Outcome::Fallback,
         }
     };
     let mut files = Vec::new();

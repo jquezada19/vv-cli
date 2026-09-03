@@ -27,7 +27,10 @@ import sys, os, re, json, time, hashlib
 # ~10 ms of startup and most commands touch none of them (Codex perf review
 # 2026-08-27, findings 8-9; measured with -X importtime).
 
-VAULT = os.environ.get("VV_VAULT") or os.path.expanduser("~/Documents/Obsidian Vault")
+# normpath ONCE at the source: a non-normalised VV_VAULT ("…/vault//",
+# "…/v/./") made the walk's paths and a normalised scope root disagree, so
+# `orphans Sub` answered a silent zero
+VAULT = os.path.normpath(os.environ.get("VV_VAULT") or os.path.expanduser("~/Documents/Obsidian Vault"))
 VRUST = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "vrust/target/release/vrust")
 METRICS = os.path.expanduser("~/.claude/metrics/vv.jsonl")
 SKIP_DIRS = {".git", ".obsidian", ".claude", ".trash", "graphify-out"}
@@ -707,8 +710,91 @@ def cmd_links(ref):
             seen.append(t)
     _list_out([{"path": l} for l in seen], len(seen), "links", cmd="links")
 
+def _scope(folder):
+    """The resolved, vault-relative scope of a folder argument — "" for the
+    vault root. One rule for board/props/orphans (the engines drifted on it
+    three separate times before it was written down once):
+      * contained (an escape dies here), and must be a directory (a FILE as a
+        sync scope retired that file's own index row);
+      * resolved, not lexical: `<in-vault symlink>/..` relpaths to "."
+        lexically while its real root is a subfolder; an in-vault symlink
+        resolves to its real folder;
+      * "." (the root) is "" — no indexed path starts with "./", and a "."
+        SYNC scope matched nothing, reparsed every note per call and never
+        retired rows."""
+    if not folder:
+        return ""
+    root = contain(folder)
+    if not os.path.isdir(root):
+        if os.path.exists(root):
+            import shlex
+            die(f"not-found: {folder} is a file, not a folder — next: vv outline {shlex.quote(folder)}")
+        die(f"not-found: no such folder: {folder}")
+    rel_ = os.path.relpath(os.path.realpath(root), _VAULT_REAL)
+    return "" if rel_ == "." else _ondisk(rel_, folder)
+
+def _ondisk(rel_, folder):
+    """`rel_` (a realpath-resolved, vault-relative folder) respelled with each
+    component's ON-DISK name. os.path.realpath is pure python and keeps the
+    caller's spelling, so on a case- or normalization-insensitive filesystem
+    (APFS default) `SUB` or an NFC `Café` resolves but names no walked path —
+    every walk prunes and prefix-compares by the name the directory listing
+    returns — and `orphans SUB` answered a silent 0 while `orphans
+    GRAPHIFY-OUT` dodged the skip-dir refusal into the same silent 0. (The
+    native engine's canonicalize is realpath(3), which on Darwin already
+    answers the stored spelling.)
+    The component is chosen by IDENTITY (samestat) among the directory's
+    non-symlink entries: symlinks are skipped because realpath already
+    resolved every one — an alias whose name merely casefolds equal to the
+    real directory would otherwise win by listing order and undo that
+    resolution. Candidates are narrowed first by NFC-casefold equality so an
+    exact or case/normalization-variant hit costs one stat beyond the one
+    directory read every call makes; only when that
+    narrowing finds nothing is every entry stat-compared, so the narrowing
+    can never mis-select (it is an unpinned optimisation: the identity pass
+    behind it is what the tests pin). A component that vanished since _scope's isdir
+    check, or one whose directory cannot be listed, is refused with the
+    reason — never silently respelled to the caller's spelling."""
+    import unicodedata
+    def key(s):
+        return unicodedata.normalize("NFC", s).casefold()
+    def same(e, want):
+        try:
+            return os.path.samestat(e.stat(), want)
+        except OSError:
+            return False
+    cur, out = _VAULT_REAL, []
+    for c in rel_.split(os.sep):
+        try:
+            want = os.stat(os.path.join(cur, c))
+            with os.scandir(cur) as it:
+                ents = [e for e in it if not e.is_symlink()]
+        except PermissionError:
+            die(f"refused: cannot list {folder} (permission denied)")
+        except OSError:
+            die(f"not-found: no such folder: {folder}")
+        hit = next((e for e in ents if key(e.name) == key(c) and same(e, want)), None) \
+            or next((e for e in ents if same(e, want)), None)
+        if hit is None:      # it stat'd but no listed entry IS it: it vanished mid-walk
+            die(f"not-found: no such folder: {folder}")
+        out.append(hit.name)
+        cur = os.path.join(cur, hit.name)
+    return os.sep.join(out)
+
 def cmd_orphans(folder=""):
-    root = contain(folder) if folder else VAULT
+    # re-joined onto VAULT so the prefix compares against the walk's own
+    # absolute paths even when VAULT itself is a symlink (same form as board)
+    rroot = _scope(folder)
+    if any(c.startswith(".") or c in SKIP_DIRS for c in rroot.split(os.sep) if c):
+        # Notes under a skip dir — at ANY depth, since the walk prunes by name
+        # at every level — are outside the link graph, so "orphans of
+        # graphify-out" has no answer; a silent `(0 orphans)` is the wrong one.
+        # The check runs on the RESOLVED, on-disk-spelled scope (a `..`, a
+        # symlink or a case variant cannot dodge it).
+        # board/props DO answer for an explicitly named skip dir.
+        import shlex
+        die(f"refused: {folder} is outside the link graph (a skip dir) — next: vv board {shlex.quote(folder)}")
+    root = os.path.join(VAULT, rroot) if rroot else VAULT
     files = list(md_files())
     idx = basename_index()
     # a note is linked if ANY note resolves a link to it — using the SAME winner
@@ -743,32 +829,41 @@ def cmd_orphans(folder=""):
     _list_out(entries, len(entries), "orphans", cmd="orphans")
 
 def cmd_board(folder, *filters):
+    # A filter without "=" used to reach dict() and die as a bare TRACEBACK:
+    # exit 1, no usage line, no `next:`, and no metrics row (the traceback
+    # bypasses the logger) — so the pilot sink holds ZERO occurrences and the
+    # defect was found by probing, not by telemetry. (The 7 board usage rows
+    # in the pilot week were the bare `vv board` arity error, already clean.)
+    # Validate at the boundary, like arity. (An earlier version of this comment
+    # claimed "exit 0"; that came from reading a pipe's exit status instead of
+    # vv's — capture exit codes unpiped.)
+    bad = [f for f in filters if "=" not in f]
+    if bad:
+        import shlex
+        die(f"usage: board filters are KEY=VALUE, got {shlex.quote(bad[0])} — "
+            f"next: vv board {shlex.quote(folder)} {shlex.quote(bad[0] + '=VALUE')}")
     want = dict(f.split("=", 1) for f in filters)
-    root = os.path.join(VAULT, folder)
-    if not os.path.isdir(root):
-        die(f"not-found: no such folder: {folder}")
+    # `board .` / `board ""` returned ZERO rows on the indexed path while the
+    # walk and the native engine returned every note — see _scope for the
+    # rule that fixed it for every sibling.
+    rroot = _scope(folder or ".")
     rows = []
-    rroot0 = os.path.relpath(root, VAULT)
-    h = index_handle(scope=rroot0)
+    h = index_handle(scope=rroot or None)
     if h is not None:
-        rroot = rroot0
         for rp, props in h.props():
-            if not (rp == rroot or rp.startswith(rroot + os.sep)):
+            if rroot and not (rp == rroot or rp.startswith(rroot + os.sep)):
                 continue
             if all(props.get(k) == v for k, v in want.items()):
                 rows.append((os.path.basename(rp)[:-3], props.get("status", "-"),
                              props.get("type", "-")))
         rows.sort()
     else:
-        for dirpath, dirs, names in os.walk(root):
-            dirs[:] = [d for d in dirs if not d.startswith(".")]
-            for n in sorted(names):
-                if not n.endswith(".md"):
-                    continue
-                fm, _ = split_fm(open(os.path.join(dirpath, n), errors="replace").read())
-                props = fm_props(fm)
-                if all(props.get(k) == v for k, v in want.items()):
-                    rows.append((n[:-3], props.get("status", "-"), props.get("type", "-")))
+        for p_ in _walk_scope(rroot):      # same prune rules as the index and the native walk
+            n = os.path.basename(p_)
+            fm, _ = split_fm(open(p_, errors="replace").read())
+            props = fm_props(fm)
+            if all(props.get(k) == v for k, v in want.items()):
+                rows.append((n[:-3], props.get("status", "-"), props.get("type", "-")))
         rows.sort()   # deterministic + identical to the indexed path on nested
         # folders (they disagreed in walk order until 2026-08-27 — caught by the
         # native-port fixture suite, a latent inconsistency from the index change)
@@ -793,17 +888,29 @@ def cmd_tags(*args):
     _list_out(entries, len(c), "tags", cmd="tags",
               fmt=(lambda r: f"{r['count']}\t{r['tag']}") if counted else (lambda r: r["tag"]))
 
+def _walk_scope(rroot):
+    """Notes under an explicit scope, walked FROM that root — the way board's
+    walk, the index's scoped sync and the native engine all do it. Filtering
+    md_files() by prefix instead pruned a SKIP_DIRS member named explicitly
+    as the scope (`props KEY graphify-out` → 0 on the walk arm, 1 on the
+    indexed and native arms)."""
+    root = os.path.join(VAULT, rroot) if rroot else VAULT
+    for dirpath, dirs, names in os.walk(root):
+        dirs[:] = [d for d in dirs if not d.startswith(".") and d not in SKIP_DIRS]
+        for n in sorted(names):
+            if n.endswith(".md"):
+                yield os.path.join(dirpath, n)
+
 def cmd_props(key, folder=""):
-    root = contain(folder) if folder else VAULT
-    rroot = os.path.relpath(root, VAULT) if folder else ""
+    rroot = _scope(folder)      # "" = whole vault; a FILE or a missing folder dies here
     from collections import Counter
     c = Counter()
     h = index_handle(scope=rroot or None)
     rows = h.props() if h is not None else (
         (rel(p), fm_props(split_fm(open(p, errors="replace").read())[0]))
-        for p in sorted(md_files()))
+        for p in sorted(_walk_scope(rroot)))
     for rp, props in rows:
-        if folder and not (rp == rroot or rp.startswith(rroot + os.sep)):
+        if rroot and not (rp == rroot or rp.startswith(rroot + os.sep)):
             continue
         v = props.get(key)
         if v:
@@ -2258,6 +2365,31 @@ CMDS = {
     "rename": cmd_rename, "move": cmd_move, "lint": cmd_lint, "doctor": cmd_doctor, "index": cmd_index,
 }
 
+# Per-command "next" for an arity miss. The generic pointer (the no-args usage
+# line) is right and unhelpful: `read` arity misses (no note, or a note with
+# no section — the sink cannot tell the two apart) were 9 of 228 read calls
+# at the moment of the 2026-09-02 pilot read-out (8 of 226 before that
+# day's own probing) — counts over the pilot register's INTERACTIVE rows, i.e.
+# after its contamination filter removed the 1,938 machine-paced/synthetic
+# rows of the 2026-08-27 bursts (383 of them post-stamping and unmarked; the
+# raw sink is 159 reads higher; `bench/pilot_report.py --since
+# 2026-08-26T21:06 --until 2026-09-02T10:00` re-derives the 228, and the 9 is
+# the op=read, kind=usage rows in that window — the report aggregates error
+# kinds across ops). The honest next step is the
+# outline — with the note the caller already named.
+def _next_read(args):
+    if args:
+        import shlex
+        return f"vv outline {shlex.quote(args[0])}"
+    return "vv outline NOTE"
+ARITY_NEXT = {"read": _next_read}   # runnable, per the `next:` contract
+
+# Words the pilot week typed that are not commands but name a real one.
+# `journal` (two rows, one double-logged attempt, before 2026-09-02): journals
+# are surfaced and resolved by `doctor`. An alias wins over the edit-distance
+# hint, which could never reach it.
+CMD_ALIASES = {"journal": "doctor"}
+
 def _check_arity(cmd, fn, args):
     """Positional-arg validation at the boundary, so an INTERNAL TypeError is a
     defect (traceback), never mislabeled as user error (review 2026-08-26)."""
@@ -2271,7 +2403,7 @@ def _check_arity(cmd, fn, args):
     if len(args) < req or (hi is not None and len(args) > hi):
         want = f"{req}+" if hi is None else (str(req) if req == hi else f"{req}-{hi}")
         die(f"usage: {cmd} takes {want} positional args, got {len(args)} — "
-            f"next: run vv with no args for the command list")
+            f"next: {ARITY_NEXT[cmd](args) if cmd in ARITY_NEXT else 'run vv with no args for the command list'}")
 
 VERSION_FALLBACK = "1.1.0"  # used only when VERSION is absent (bare-file deploys)
 
@@ -2435,7 +2567,8 @@ def main():
         print(__doc__.rstrip()); sys.exit(0)
     fn = CMDS.get(a[0])
     if not fn:
-        sugg = suggest_names(a[0], [c + ".md" for c in CMDS], n=1)  # same tiered ranking notes get
+        alias = CMD_ALIASES.get(a[0])
+        sugg = [alias] if alias else suggest_names(a[0], [c + ".md" for c in CMDS], n=1)  # same tiered ranking notes get
         hint = f" (did you mean: {sugg[0]})" if sugg else ""
         die(f"usage: unknown command {a[0]}{hint} — next: run vv --help for the command list")
     _check_arity(a[0], fn, a[1:])

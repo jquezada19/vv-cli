@@ -25,16 +25,53 @@ mod query;
 mod readpath;
 mod write;
 
+/// python's os.path.normpath, LEXICALLY: drops trailing separators and "."
+/// segments and collapses ".." against the previous segment without touching
+/// the filesystem. components().collect() alone kept ".." — so a VV_VAULT of
+/// "/a/link/../vault" resolved through the symlink natively but lexically in
+/// python, and the two engines could address different vaults.
+fn normpath(p: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out: Vec<Component> = Vec::new();
+    for c in p.components() {
+        match c {
+            Component::CurDir => {}
+            Component::ParentDir => match out.last() {
+                Some(Component::Normal(_)) => {
+                    out.pop();
+                }
+                Some(Component::RootDir) => {} // "/.." is "/"
+                _ => out.push(c),              // relative: keep the ".."
+            },
+            other => out.push(other),
+        }
+    }
+    if out.is_empty() {
+        // python: normpath(".") == normpath("Sub/..") == "." — never "".
+        // yagni: parity, not defence; drop only if no raw walk consumes vault().
+        return PathBuf::from(".");
+    }
+    out.iter().collect()
+}
+
 fn vault() -> PathBuf {
+    // Normalised at the source the way python does: a "…/vault/" VV_VAULT made
+    // native `orphans .` build a root prefix no walked path shares and answer
+    // a silent zero.
     if let Ok(v) = env::var("VV_VAULT") {
         if !v.is_empty() {
             // python: `or` — empty means default (Codex parity audit)
-            return PathBuf::from(v);
+            return normpath(Path::new(&v));
         }
     }
     let home = env::var("HOME").expect("HOME unset");
     Path::new(&home).join("Documents/Obsidian Vault")
 }
+
+/// python's `SKIP_DIRS` (src/vv_impl.py), mirrored WHOLE so a future non-dot
+/// member cannot drift the engines apart (query.rs::walk_board reads the same
+/// list). Every member but graphify-out is a dot-dir today.
+pub const SKIP_DIRS: [&str; 5] = [".git", ".obsidian", ".claude", ".trash", "graphify-out"];
 
 /// `exclude_sandbox` is a SEARCH-relevance choice, never a graph-correctness one:
 /// link/graph scans must see every note the Python side sees.
@@ -48,7 +85,7 @@ pub fn walk_ex(dir: &Path, out: &mut Vec<PathBuf>, exclude_sandbox: bool) {
             let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
             if is_dir {
                 if name.starts_with('.')
-                    || name == "graphify-out"
+                    || SKIP_DIRS.contains(&name.as_str())
                     || (exclude_sandbox && name == "Sandbox")
                 {
                     continue;
