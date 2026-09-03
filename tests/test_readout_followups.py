@@ -405,7 +405,7 @@ try:
             # case list names orphans <file>; props is RI2f)
             for cmd_ in (("orphans", "Sub/sub-fixture.md"), ("board", "Sub/sub-fixture.md", "type=vvreadout-fixture")):
                 r = runner(*cmd_)
-                check(f"RI2f4 {label} {cmd_[0]} with a FILE scope is the file refusal (was exit 0 at the base, both engines)",
+                check(f"RI2f4 {label} {cmd_[0]} with a FILE scope is the file refusal" + (" (was exit 0 at the base, both engines)" if cmd_[0] == "orphans" else " (control: board already refused at the base, with the generic not-found text)"),
                       r.returncode == 1 and r.stderr.startswith("not-found: Sub/sub-fixture.md is a file"), (r.stdout + r.stderr)[:200])
             # board DOES answer an explicitly named skip dir (props is RI2h)
             r = runner("board", "graphify-out", "type=vvreadout-fixture")
