@@ -8,16 +8,17 @@ changes an exit code, is a major change.
 
 ## [Unreleased]
 
-Version to be set by the release commit. Note for that decision: the
-**Exit-code change** below moves five cases across three commands
-from exit 0 to exit 1 (`props KEY <file>`, `orphans <file>`,
+## [2.0.0] — 2026-09-02
+
+The affordance release: a refusal names the next command to run, and a
+folder argument means the same thing to both engines. MAJOR because the
+**Exit-code change** below moves five cases across three commands from
+exit 0 to exit 1 (`props KEY <file>`, `orphans <file>`,
 `orphans <missing>`, `orphans <skip dir>`, `board ../x`), which breaks a
-script that tested for success — a MAJOR change under this file's header
-(exit codes are part of the CLI surface; an exit-code change counts
-alongside "output unparseable"), i.e. 2.0.0 unless the release commit
-decides otherwise. Precedent note: 1.1.0 shipped `new --template` refusing
-an ambiguous prefix (exit 0 → 1) as a minor; the header rule applies from
-this release forward.
+script that tested for success — exit codes are part of the CLI surface
+under this file's header. Precedent note: 1.1.0 shipped `new --template`
+refusing an ambiguous prefix (exit 0 → 1) as a minor; the header rule
+applies from this release forward.
 
 Follow-ups from the shadow-pilot read-out (window 2026-08-26T21:06 →
 2026-09-02) — the affordance class: vv was right and unhelpful at the same

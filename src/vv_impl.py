@@ -2405,7 +2405,7 @@ def _check_arity(cmd, fn, args):
         die(f"usage: {cmd} takes {want} positional args, got {len(args)} — "
             f"next: {ARITY_NEXT[cmd](args) if cmd in ARITY_NEXT else 'run vv with no args for the command list'}")
 
-VERSION_FALLBACK = "1.1.0"  # used only when VERSION is absent (bare-file deploys)
+VERSION_FALLBACK = "2.0.0"  # used only when VERSION is absent (bare-file deploys)
 
 def _version():
     try:
