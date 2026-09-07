@@ -22,14 +22,16 @@ agent cannot infer from the tree.
   ```
   FIX=$(mktemp -d)            # unique per run — a shared fixed path lets concurrent sessions clobber each other's fixture
   python3 .github/workflows/fixture_vault.py "$FIX"
-  env -u VV_INDEX_ROOT -u VV_NO_INDEX -u SEEDS -u STRESS_ITER VV_VAULT="$FIX" VV_TEST_SEARCH_TERMS="tenant check" VV_NO_METRICS=1 ./run_tests.sh
+  env -i HOME="$HOME" PATH="$PATH" TMPDIR="${TMPDIR:-/tmp}" \
+      VV_VAULT="$FIX" VV_TEST_SEARCH_TERMS="tenant check" VV_NO_METRICS=1 ./run_tests.sh
   ```
 
-  `VV_INDEX_ROOT` and `VV_NO_INDEX` must not be inherited from your shell: the
-  native cache honors both (`vrust/src/cache.rs`), and the cache suites expect
-  the `HOME`-derived location CI has. `SEEDS` and `STRESS_ITER` must not be
-  inherited either — `run_tests.sh` and `tests/test_stress.py` read them, and an
-  inherited value shrinks the fuzz coverage CI runs with its defaults. The `fmt-clippy` job (check name
+  `env -i` with that allowlist is deliberate: the suites read several knobs
+  from the environment (`VV_INDEX_ROOT`, `VV_NO_INDEX`, `VV_ENGINE`, `SEEDS`,
+  `STRESS_ITER`, `TORTURE_WORKERS`, …) and any value inherited from your shell
+  changes what CI's clean runner would test — the cache suites, for one, expect
+  the `HOME`-derived cache location. Listing the knobs to unset is a treadmill;
+  starting from an empty environment is not. The `fmt-clippy` job (check name
   `rustfmt + clippy`, ubuntu) runs:
 
   ```
@@ -40,8 +42,10 @@ agent cannot infer from the tree.
   A local run with different flags, a different vault, or inherited cache
   variables can pass while missing exactly the failures CI exposes.
 - Releases: bump `VERSION`, `vrust/Cargo.toml` (and the resulting
-  `vrust/Cargo.lock`) and `CHANGELOG.md` together on a PR branch — the gate's
-  `version-cargo-skew` check fails when `VERSION` and the manifest disagree.
+  `vrust/Cargo.lock`), `VERSION_FALLBACK` in `src/vv_impl.py` (what a bare-file
+  deploy without `VERSION` reports) and `CHANGELOG.md` together on a PR branch —
+  the gate's `version-cargo-skew` check fails when `VERSION` and the manifest
+  disagree.
   After that PR merges, tag the resulting commit on `origin/main` as `vX.Y.Z`
   where `X.Y.Z` equals the `VERSION` in that commit; the tag push is what
   triggers `.github/workflows/release.yml`. Never tag a commit that is not on
