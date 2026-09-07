@@ -12,7 +12,8 @@ agent cannot infer from the tree.
 - Stage explicit paths (`git add <file> ...`). Never `git add -A` or `git add .`:
   more than one working session may have this clone checked out, and a blanket
   add sweeps a peer's uncommitted work into your commit.
-- Run CI's exact commands before opening the PR, not an approximation of them.
+- Run what CI runs before opening the PR — the same commands, in an environment
+  as clean as CI's runner — not an approximation of them.
   `.github/workflows/ci.yml` has two jobs. The `gate` job (ubuntu + macos)
   builds a fixture vault and runs the suite against it — a bare
   `./run_tests.sh` instead targets the default vault path hard-coded in both
@@ -20,10 +21,15 @@ agent cannot infer from the tree.
   unset) — a real vault, not what CI tests:
 
   ```
-  FIX=$(mktemp -d)            # unique per run — a shared fixed path lets concurrent sessions clobber each other's fixture
-  python3 .github/workflows/fixture_vault.py "$FIX"
+  FIX=$(mktemp -d) &&         # unique per run — a shared fixed path lets concurrent sessions clobber each other's fixture
+  python3 .github/workflows/fixture_vault.py "$FIX" &&
   env -i HOME="$HOME" PATH="$PATH" TMPDIR="${TMPDIR:-/tmp}" \
-      VV_VAULT="$FIX" VV_TEST_SEARCH_TERMS="tenant check" VV_NO_METRICS=1 ./run_tests.sh
+      VV_VAULT="$FIX" VV_TEST_SEARCH_TERMS="tenant check" VV_NO_METRICS=1 ./run_tests.sh;
+  rm -rf "$FIX"
+
+  The `&&` chain matters: if `mktemp` fails, an empty `VV_VAULT` selects the
+  real default vault (see above), and the generator treats `""` as the current
+  directory.
   ```
 
   `env -i` with that allowlist is deliberate: the suites read several knobs
