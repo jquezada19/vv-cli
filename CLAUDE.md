@@ -15,9 +15,9 @@ agent cannot infer from the tree.
 - Run CI's exact commands before opening the PR, not an approximation of them.
   `.github/workflows/ci.yml` has two jobs. The `gate` job (ubuntu + macos)
   builds a fixture vault and runs the suite against it — a bare
-  `./run_tests.sh` instead targets the default vault at
-  `~/Documents/Obsidian Vault` (`src/vv_impl.py`, `VAULT`), which is not what CI
-  tests:
+  `./run_tests.sh` instead targets the default vault path hard-coded in
+  `src/vv_impl.py` (`VAULT`, when `VV_VAULT` is unset) — a real vault, not what
+  CI tests:
 
   ```
   python3 .github/workflows/fixture_vault.py /tmp/fixture-vault
@@ -41,10 +41,13 @@ agent cannot infer from the tree.
 Why the rule is written down: while the repository was private, branch
 protection was unavailable on that plan and a direct-to-`main` collision on
 2026-08-27 made this a standing rule. The repository is public now and the
-`protect-main` ruleset (active since 2026-08-27) requires a pull request,
-required status checks, and forbids force-pushes and deletion of `main` — but
-it carries an always-on admin bypass, so for the repository admin (and any
-agent acting with that identity) the rule is still discipline, not machinery.
+`protect-main` ruleset (active since 2026-08-27) requires a pull request with
+one approving review (a push after approval dismisses it), requires the two
+`gate` status checks (`fmt-clippy` runs on PRs but is not a required check),
+allows merge or squash but not rebase, and forbids force-pushes and deletion of
+`main` — but it carries an always-on admin bypass, so for the repository admin
+(and any agent acting with that identity) the rule is still discipline, not
+machinery.
 
 ## The parity rule
 
