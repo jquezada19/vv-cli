@@ -68,7 +68,9 @@ def main():
     # a search-permission failure on an ANCESTOR is reported against that
     # directory, not against the caller's folder argument (which was never listed)
     sub = os.path.join(_VAULT, "Sub")
-    if os.geteuid() == 0:
+    if os.name != "posix":
+        print("SKIP OI3: POSIX directory permission bits only (chmod 0 is not a refusal on Windows)")
+    elif os.geteuid() == 0:
         print("SKIP OI3: running as root, permission bits are not enforced")
     else:
         os.chmod(sub, 0)
