@@ -8,6 +8,11 @@ changes an exit code, is a major change.
 
 ## [Unreleased]
 
+## [2.0.1] — 2026-09-06
+
+Patch release; also the first tag to exercise the bumped release workflow
+(`actions/upload-artifact@v7`, `actions/download-artifact@v8`).
+
 ### Fixed
 - `_ondisk` (folder-scope respelling) compared entry identity with
   `DirEntry.stat()`, which on Windows reports `st_ino == st_dev == 0` — so
