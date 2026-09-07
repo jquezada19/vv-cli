@@ -20,30 +20,39 @@ agent cannot infer from the tree.
   CI tests:
 
   ```
-  python3 .github/workflows/fixture_vault.py /tmp/fixture-vault
-  VV_VAULT=/tmp/fixture-vault VV_TEST_SEARCH_TERMS="tenant check" VV_NO_METRICS=1 ./run_tests.sh
+  FIX=$(mktemp -d)            # unique per run — a shared fixed path lets concurrent sessions clobber each other's fixture
+  python3 .github/workflows/fixture_vault.py "$FIX"
+  env -u VV_INDEX_ROOT -u VV_NO_INDEX VV_VAULT="$FIX" VV_TEST_SEARCH_TERMS="tenant check" VV_NO_METRICS=1 ./run_tests.sh
   ```
 
-  The `fmt-clippy` job (ubuntu) runs:
+  `VV_INDEX_ROOT` and `VV_NO_INDEX` must not be inherited from your shell: the
+  native cache honors both (`vrust/src/cache.rs`), and the cache suites expect
+  the `HOME`-derived location CI has. The `fmt-clippy` job (check name
+  `rustfmt + clippy`, ubuntu) runs:
 
   ```
   cargo fmt --manifest-path vrust/Cargo.toml --check
   cargo clippy --manifest-path vrust/Cargo.toml --all-targets -- -D warnings
   ```
 
-  A local run with different flags or a different vault passes locally and
-  fails the PR.
-- Releases: bump `VERSION` and `CHANGELOG.md` on a PR branch like any other
-  change; after that PR merges, push the tag `vX.Y.Z` on the merge commit — the
-  tag push is what triggers `.github/workflows/release.yml`. Never edit
-  version files or push tags from an unmerged `main`.
+  A local run with different flags, a different vault, or inherited cache
+  variables can pass while missing exactly the failures CI exposes.
+- Releases: bump `VERSION`, `vrust/Cargo.toml` (and the resulting
+  `vrust/Cargo.lock`) and `CHANGELOG.md` together on a PR branch — the gate's
+  `version-cargo-skew` check fails when `VERSION` and the manifest disagree.
+  After that PR merges, tag the resulting commit on `origin/main` as `vX.Y.Z`
+  where `X.Y.Z` equals the `VERSION` in that commit; the tag push is what
+  triggers `.github/workflows/release.yml`. Never tag a commit that is not on
+  `origin/main`.
 
 Why the rule is written down: while the repository was private, branch
 protection was unavailable on that plan and a direct-to-`main` collision on
 2026-08-27 made this a standing rule. The repository is public now and the
-`protect-main` ruleset (active since 2026-08-27) requires a pull request with
-one approving review (a push after approval dismisses it), requires the two
-`gate` status checks (`fmt-clippy` runs on PRs but is not a required check),
+`protect-main` ruleset (active since 2026-08-27; GitHub configuration recorded
+here as of 2026-09-06 — verify live with `gh api repos/jquezada19/vv-cli/rulesets`)
+requires a pull request with one approving review (a push after approval
+dismisses it, and unattributed changes need an extra approval), requires the two
+`gate` status checks (`rustfmt + clippy` runs on PRs but is not a required check),
 allows merge or squash but not rebase, and forbids force-pushes and deletion of
 `main` — but it carries an always-on admin bypass, so for the repository admin
 (and any agent acting with that identity) the rule is still discipline, not
