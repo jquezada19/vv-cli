@@ -8,6 +8,19 @@ changes an exit code, is a major change.
 
 ## [Unreleased]
 
+### Fixed
+- `_ondisk` (folder-scope respelling) compared entry identity with
+  `DirEntry.stat()`, which on Windows reports `st_ino == st_dev == 0` — so
+  `samestat` never matched and every scoped `board`/`props`/`orphans` would
+  refuse `not-found:` on a folder that exists (latent: no Windows CI; the
+  lexical fallback removed in 2.0.0 had masked it). Identity now comes from
+  `os.stat(entry.path)`. Pinned by `tests/test_ondisk_identity.py`, which
+  simulates the zero-inode entries. Found in review, 2026-09-06.
+- A permission failure while resolving a scoped folder is reported against the
+  directory that could not be read (`refused: cannot read <dir> while resolving
+  <folder>`), not as "cannot list <folder>" — the unreadable directory may be an
+  ancestor, and the failing call may be the `stat`, not the listing.
+
 ## [2.0.0] — 2026-09-02
 
 The affordance release: a refusal names the next command to run, and a

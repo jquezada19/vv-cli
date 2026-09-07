@@ -759,8 +759,11 @@ def _ondisk(rel_, folder):
     def key(s):
         return unicodedata.normalize("NFC", s).casefold()
     def same(e, want):
+        # os.stat(e.path), never e.stat(): on Windows DirEntry.stat() reports
+        # st_ino == st_dev == 0, so samestat would be False for every entry and
+        # every scoped command would die not-found on a folder that exists.
         try:
-            return os.path.samestat(e.stat(), want)
+            return os.path.samestat(os.stat(e.path), want)
         except OSError:
             return False
     cur, out = _VAULT_REAL, []
@@ -770,7 +773,8 @@ def _ondisk(rel_, folder):
             with os.scandir(cur) as it:
                 ents = [e for e in it if not e.is_symlink()]
         except PermissionError:
-            die(f"refused: cannot list {folder} (permission denied)")
+            where = os.path.relpath(cur, _VAULT_REAL)
+            die(f"refused: cannot read {where} while resolving {folder} (permission denied)")
         except OSError:
             die(f"not-found: no such folder: {folder}")
         hit = next((e for e in ents if key(e.name) == key(c) and same(e, want)), None) \
