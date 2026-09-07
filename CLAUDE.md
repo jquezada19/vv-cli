@@ -15,19 +15,21 @@ agent cannot infer from the tree.
 - Run CI's exact commands before opening the PR, not an approximation of them.
   `.github/workflows/ci.yml` has two jobs. The `gate` job (ubuntu + macos)
   builds a fixture vault and runs the suite against it — a bare
-  `./run_tests.sh` instead targets the default vault path hard-coded in
-  `src/vv_impl.py` (`VAULT`, when `VV_VAULT` is unset) — a real vault, not what
-  CI tests:
+  `./run_tests.sh` instead targets the default vault path hard-coded in both
+  engines (`src/vv_impl.py` `VAULT`, `vrust/src/main.rs`, when `VV_VAULT` is
+  unset) — a real vault, not what CI tests:
 
   ```
   FIX=$(mktemp -d)            # unique per run — a shared fixed path lets concurrent sessions clobber each other's fixture
   python3 .github/workflows/fixture_vault.py "$FIX"
-  env -u VV_INDEX_ROOT -u VV_NO_INDEX VV_VAULT="$FIX" VV_TEST_SEARCH_TERMS="tenant check" VV_NO_METRICS=1 ./run_tests.sh
+  env -u VV_INDEX_ROOT -u VV_NO_INDEX -u SEEDS -u STRESS_ITER VV_VAULT="$FIX" VV_TEST_SEARCH_TERMS="tenant check" VV_NO_METRICS=1 ./run_tests.sh
   ```
 
   `VV_INDEX_ROOT` and `VV_NO_INDEX` must not be inherited from your shell: the
   native cache honors both (`vrust/src/cache.rs`), and the cache suites expect
-  the `HOME`-derived location CI has. The `fmt-clippy` job (check name
+  the `HOME`-derived location CI has. `SEEDS` and `STRESS_ITER` must not be
+  inherited either — `run_tests.sh` and `tests/test_stress.py` read them, and an
+  inherited value shrinks the fuzz coverage CI runs with its defaults. The `fmt-clippy` job (check name
   `rustfmt + clippy`, ubuntu) runs:
 
   ```
