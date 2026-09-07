@@ -12,29 +12,45 @@ agent cannot infer from the tree.
 - Stage explicit paths (`git add <file> ...`). Never `git add -A` or `git add .`:
   more than one working session may have this clone checked out, and a blanket
   add sweeps a peer's uncommitted work into your commit.
-- Run CI's exact commands before opening the PR, not an approximation of them:
+- Run CI's exact commands before opening the PR, not an approximation of them.
+  `.github/workflows/ci.yml` has two jobs. The `gate` job (ubuntu + macos)
+  builds a fixture vault and runs the suite against it — a bare
+  `./run_tests.sh` instead targets the default vault at
+  `~/Documents/Obsidian Vault` (`src/vv_impl.py`, `VAULT`), which is not what CI
+  tests:
 
   ```
-  ./run_tests.sh
+  python3 .github/workflows/fixture_vault.py /tmp/fixture-vault
+  VV_VAULT=/tmp/fixture-vault VV_TEST_SEARCH_TERMS="tenant check" VV_NO_METRICS=1 ./run_tests.sh
+  ```
+
+  The `fmt-clippy` job (ubuntu) runs:
+
+  ```
   cargo fmt --manifest-path vrust/Cargo.toml --check
   cargo clippy --manifest-path vrust/Cargo.toml --all-targets -- -D warnings
   ```
 
-  These are the three gating steps in `.github/workflows/ci.yml`. A local run
-  with different flags passes locally and fails the PR.
-- Release tags and version bumps go through the existing release flow
-  (`VERSION`, `CHANGELOG.md`, `.github/workflows/release.yml`), never by hand
-  on `main`.
+  A local run with different flags or a different vault passes locally and
+  fails the PR.
+- Releases: bump `VERSION` and `CHANGELOG.md` on a PR branch like any other
+  change; after that PR merges, push the tag `vX.Y.Z` on the merge commit — the
+  tag push is what triggers `.github/workflows/release.yml`. Never edit
+  version files or push tags from an unmerged `main`.
 
-Why: this rule was discipline-only while the repository was private (branch
-protection was unavailable on that plan) and a direct-to-`main` collision on
-2026-08-27 is what made it a standing rule. Now that the repository is public,
-branch protection on `main` (require a PR, no force-push) is the mechanical
-enforcement — enable it rather than relying on this paragraph.
+Why the rule is written down: while the repository was private, branch
+protection was unavailable on that plan and a direct-to-`main` collision on
+2026-08-27 made this a standing rule. The repository is public now and the
+`protect-main` ruleset (active since 2026-08-27) requires a pull request,
+required status checks, and forbids force-pushes and deletion of `main` — but
+it carries an always-on admin bypass, so for the repository admin (and any
+agent acting with that identity) the rule is still discipline, not machinery.
 
 ## The parity rule
 
 Two implementations of one semantics: the Rust binary is the default entry, the
-Python implementation is the semantic authority. A semantic change lands in both
-or in neither, and `./run_tests.sh` is the proof. Full statement and what a good
+Python implementation is the semantic authority. Changing an *existing* native
+command's behavior lands in both engines or in neither, and `./run_tests.sh` is
+the proof. A Python-only addition is complete on its own — the native entry
+execs Python for anything it does not handle. Full statement and what a good
 change looks like: [CONTRIBUTING.md](CONTRIBUTING.md).
