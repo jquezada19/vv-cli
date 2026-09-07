@@ -24,13 +24,14 @@ agent cannot infer from the tree.
   FIX=$(mktemp -d) &&         # unique per run — a shared fixed path lets concurrent sessions clobber each other's fixture
   python3 .github/workflows/fixture_vault.py "$FIX" &&
   env -i HOME="$HOME" PATH="$PATH" TMPDIR="${TMPDIR:-/tmp}" \
-      VV_VAULT="$FIX" VV_TEST_SEARCH_TERMS="tenant check" VV_NO_METRICS=1 ./run_tests.sh;
-  rm -rf "$FIX"
+      VV_VAULT="$FIX" VV_TEST_SEARCH_TERMS="tenant check" VV_NO_METRICS=1 ./run_tests.sh
+  rc=$?; rm -rf "$FIX"; echo "gate EXIT=$rc"
+  ```
 
   The `&&` chain matters: if `mktemp` fails, an empty `VV_VAULT` selects the
   real default vault (see above), and the generator treats `""` as the current
-  directory.
-  ```
+  directory. Capture `rc` before the cleanup — a bare `rm` after the gate would
+  report success for a failed run.
 
   `env -i` with that allowlist is deliberate: the suites read several knobs
   from the environment (`VV_INDEX_ROOT`, `VV_NO_INDEX`, `VV_ENGINE`, `SEEDS`,
