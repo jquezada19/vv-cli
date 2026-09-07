@@ -65,6 +65,20 @@ def main():
     out, err = _ondisk_under(_WinScandir)
     check("OI2 _ondisk resolves Sub/Deep when DirEntry.stat() reports st_ino=st_dev=0 (Windows) — identity must come from os.stat(entry.path)",
           out == os.path.join("Sub", "Deep"), (out, err))
+    # a search-permission failure on an ANCESTOR is reported against that
+    # directory, not against the caller's folder argument (which was never listed)
+    sub = os.path.join(_VAULT, "Sub")
+    if os.geteuid() == 0:
+        print("SKIP OI3: running as root, permission bits are not enforced")
+    else:
+        os.chmod(sub, 0)
+        try:
+            out, err = _ondisk_under(_real_scandir)
+        finally:
+            os.chmod(sub, 0o755)
+        check("OI3 a permission failure names the unreadable ancestor (Sub) while resolving Sub/Deep, and refuses (exit 1)",
+              isinstance(out, SystemExit) and out.code == 1
+              and err.startswith("refused: cannot read Sub while resolving Sub/Deep"), (out, err))
     print(f"\n{len(fails)} failure(s)" if fails else "\nall passed")
     return 1 if fails else 0
 
