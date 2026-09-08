@@ -96,6 +96,7 @@ NOTES = {
     "Dash/25001 – EnDash.md": "# en\n",
     "Dash/25002-NoSpace.md": "# ns\n",
     "Dash/x 25003 - Mid.md": "# mid\n",
+    "Dup.md": "# D\n\n## Same\n\na\n\n## Same\n\nb\n",
 }
 
 class Engine:
@@ -188,6 +189,10 @@ def section_a(eng, tag):
             "usage: --apply takes an 8-hex plan id, got 'zzzzzzzz'", "vv move A Dest")
     refused(eng, tag, "2b junk after a valid id", ["move", "A", "Dest", "--apply", "deadbeef", "C"],
             "usage: move takes NOTE FOLDER, got extra positional 'C'", "vv move NOTE FOLDER")
+    refused(eng, tag, "2b' …on rename", ["rename", "A", "A2", "--apply", "deadbeef", "C"],
+            "usage: rename takes NOTE NEWNAME, got extra positional 'C'", "vv rename NOTE NEWNAME")
+    refused(eng, tag, "2b'' …and trash", ["trash", "C", "--apply", "deadbeef", "junk"],
+            "usage: trash takes NOTE, got extra positional 'junk'", "vv trash NOTE")
     refused(eng, tag, "2c --apply twice", ["move", "A", "Dest", "--apply", "--apply"],
             "usage: --apply given twice", "vv move A Dest")
     refused(eng, tag, "2d unknown flag is named as a flag", ["move", "A", "Dest", "--apply=deadbeef"],
@@ -294,6 +299,8 @@ def section_a(eng, tag):
     check(f"{tag}3e trash plain --apply still works — the table now says [--apply [SHA8]] (control: behaviour)",
           r.returncode == 0 and not os.path.exists(os.path.join(eng.vault, "Dest2", "C.md")), r.stdout + r.stderr)
     import vv_impl
+    check(f"{tag}3g the refuse-on-unprovable set is exactly the write ops plus batch (a new write command must be added here by hand)",
+          vv_impl._WRITE_OPS == {"set", "unset", "append", "appendsec", "prepend", "patch", "rename", "move", "trash", "batch"}, vv_impl._WRITE_OPS)
     check(f"{tag}3f the table says trash takes [--apply [SHA8]]",
           next(c["args"] for c in vv_impl.COMMAND_TABLE if c["name"] == "trash") == "NOTE [--apply [SHA8]]")
     # A4: under-arity wording no longer contradicts the strict tail
@@ -322,6 +329,7 @@ def section_b(eng, tag):
         (["read", "A"],                    "usage: read takes 2 positional args, got 1",    "vv outline A"),   # control: pre-existing special case (labelled below)
         (["read", "Work Items/24995 - Some title.md"], "usage: read takes 2 positional args, got 1", "vv outline 'Work Items/24995 - Some title.md'"),  # control
         (["read", "A", "NoSuchSec"],        "not-found: no section NoSuchSec",              "vv outline A"),
+        (["read", "Dup", "Same"],           "ambiguous: 2 sections are titled 'Same'",      "vv outline Dup"),
         (["props", "status", "Work", "Items"], "usage: props takes 1-2 positional args, got 3", "vv props status"),       # no join into KEY
         (["unset", "A", "b", "c"],         "usage: unset takes 2 positional args, got 3",   "vv unset A b"),
         (["backlinks", "A", "extra"],      "usage: backlinks takes 1 positional args, got 2", "vv backlinks A"),
@@ -331,10 +339,12 @@ def section_b(eng, tag):
         r = eng.run(*args)
         label = " ".join(args)
         # a parenthetical hint is new, and so is the relocate wording (base said "2+")
-        new_text = "(" in prefix or args[0] in ("move", "rename", "trash") or prefix.startswith("not-found")
-        check(f"{tag}1 `{label}` message" + ("" if new_text else " (control: arity text pre-existed)"),
+        new_text = "(" in prefix or args[0] in ("move", "rename", "trash")
+        check(f"{tag}1 `{label}` message" + ("" if new_text else " (control: error text pre-existed)"),
               r.returncode == 1 and r.stderr.startswith(prefix), f"rc={r.returncode} {r.stderr}")
-        check(f"{tag}1 `{label}` next" + (" (control: read's outline hint pre-existed)" if args[0] == "read" else ""), next_of(r.stderr) == nxt, r.stderr)
+        # read's ARITY hint pre-existed (control); read's SECTION-miss next is new (it names the note)
+        next_ctl = args[0] == "read" and prefix.startswith("usage")
+        check(f"{tag}1 `{label}` next" + (" (control: read's outline hint pre-existed)" if next_ctl else ""), next_of(r.stderr) == nxt, r.stderr)
         check(f"{tag}1 `{label}` no traceback (invariant pin)", "Traceback" not in r.stderr, r.stderr)
     r = eng.run("prepend", "A", "--section", "X", "y")
     check(f"{tag}2 prepend never points at appendsec (opposite end of the section) (control)", "appendsec" not in r.stderr, r.stderr)
@@ -434,7 +444,11 @@ def section_c(eng, tag):
         r = eng.run(*cmd)
         check(f"{tag}7r …and it cannot be READ through the bare name either ({cmd[0]})", r.returncode == 1 and r.stderr.startswith("escape:"), r.stdout + r.stderr)
     r = eng.run("head", "Ext/24999 - External.md")
-    check(f"{tag}7t …nor through the TYPED path (natively the resolver fell through a failed containment into the walk)",
+    check(f"{tag}7t …nor through a subfolder TYPED path (control: contained at the base in both engines)",
+          r.returncode == 1 and r.stderr.startswith("escape:"), r.stdout + r.stderr)
+    os.symlink(ext, os.path.join(eng.vault, "Escapee.md"))
+    r = eng.run("head", "Escapee.md")
+    check(f"{tag}7u …nor through a typed path at the VAULT ROOT (natively the failed containment fell into the basename walk at the base)",
           r.returncode == 1 and r.stderr.startswith("escape:"), r.stdout + r.stderr)
     os.symlink(os.path.join(eng.vault, "Missing.md"), os.path.join(eng.vault, "Ext", "31001 - Dangling.md"))
     for ref in ("31001", "31001 - Dangling"):
@@ -474,6 +488,9 @@ def section_c(eng, tag):
             r = eng.run("move", "Vis/25000 - Seen", "Dest")
             check(f"{tag}8v a PATH-qualified relocate under the lock is refused too (the link rewrite cannot be complete)",
                   r.returncode == 1 and r.stderr.startswith("refused: cannot prove the link graph is complete") and next_of(r.stderr) == "vv doctor", f"rc={r.returncode} {r.stderr}")
+            r = eng.run("rename", "Vis/25000 - Seen", "Renamed")
+            check(f"{tag}8u' …and rename",
+                  r.returncode == 1 and r.stderr.startswith("refused: cannot prove the link graph is complete"), f"rc={r.returncode} {r.stderr}")
             r = eng.run("trash", "Vis/25000 - Seen")
             check(f"{tag}8u …and so is trash (its broken-link report would be partial)",
                   r.returncode == 1 and r.stderr.startswith("refused: cannot prove the link graph is complete"), f"rc={r.returncode} {r.stderr}")
@@ -483,6 +500,21 @@ def section_c(eng, tag):
             r = eng.run("impact", "Vis/25000 - Seen")
             check(f"{tag}8g' …and so does impact (the blast-radius report)",
                   r.returncode == 0 and r.stderr.startswith("warning: cannot prove the link graph is complete"), f"rc={r.returncode} {r.stderr}")
+            r = eng.run("deadends")
+            check(f"{tag}8g'' …and deadends, the one graph read that never touches basename_index (both engines)",
+                  r.returncode == 0 and r.stderr.startswith("warning: cannot prove the link graph is complete") and "(" in r.stdout, f"rc={r.returncode} {r.stderr}")
+            bad = os.path.join(eng.vault, b"Hid\xff".decode("utf-8", "surrogateescape"))
+            try:
+                os.makedirs(bad, exist_ok=True)   # APFS refuses invalid UTF-8 names (Errno 92); ext4 allows them
+            except OSError:
+                bad = None
+                print(f"SKIP {tag}8f undecodable-name pin (this filesystem refuses invalid UTF-8 names)")
+            if bad:
+                bmode = os.stat(bad).st_mode; os.chmod(bad, 0); _RESTORE.append((bad, bmode))
+                r = eng.run("resolve", "25000")
+                os.chmod(bad, bmode)
+                check(f"{tag}8f an undecodable directory name is escaped in the warning and the answer still prints",
+                      r.returncode == 0 and r.stdout.strip() == "Vis/25000 - Seen.md" and "\\udcff" in r.stderr and "Traceback" not in r.stderr, f"rc={r.returncode} {r.stdout} {r.stderr[:200]}")
             r = eng.run("set", "No Such Note", "k", "v")
             check(f"{tag}8y a bare-name MISS under the lock refuses a write, never a definitive not-found",
                   r.returncode == 1 and r.stderr.startswith("refused: cannot prove 'No Such Note' is absent") and next_of(r.stderr) == "vv doctor", f"rc={r.returncode} {r.stderr}")
@@ -490,6 +522,12 @@ def section_c(eng, tag):
             check(f"{tag}8t batch (multi-op) refuses rather than warns (control: base refused every op)", '"exit": 1' in r.stdout and "refused: cannot prove" in r.stdout, r.stdout[:300])
             r = eng.run("head", "25099")
             check(f"{tag}8s a digit-ref MISS on a read warns exactly once", r.stderr.count("warning:") == 1 and r.stderr.count(" — next: ") == 1, repr(r.stderr))
+            unr = os.path.join(eng.vault, "Vis", "25000 - Seen.md")
+            umode = os.stat(unr).st_mode; os.chmod(unr, 0); _RESTORE.append((unr, umode))
+            r = eng.run("head", "Vis/25000 - Seen")
+            os.chmod(unr, umode)
+            check(f"{tag}8m an unreadable NOTE is a refusal in the grammar, never a traceback",
+                  r.returncode == 1 and r.stderr.startswith("refused: cannot read Vis/25000 - Seen.md") and "Traceback" not in r.stderr and next_of(r.stderr) == "vv doctor", f"rc={r.returncode} {r.stderr[:200]}")
             sd = os.path.join(eng.vault, "Standups"); os.makedirs(sd, exist_ok=True)
             smode = os.stat(sd).st_mode; os.chmod(sd, 0); _RESTORE.append((sd, smode))
             r = eng.run("daily-append", "x")
@@ -510,6 +548,8 @@ def section_c(eng, tag):
             os.chmod(hidden, mode)
             r = eng.run("doctor")
             check(f"{tag}8w …and doctor reports none once readable", "unreadable: none" in r.stdout, r.stdout + r.stderr)
+            r = eng.run("resolve", "24996")
+            check(f"{tag}8w' …and a read over a complete walk carries NO warning (control)", r.returncode == 0 and r.stderr == "", repr(r.stderr))
             os.chmod(hidden, 0)
             r = eng.run("batch", stdin=json.dumps({"cmd": "orphans", "args": []}) + "\n" + json.dumps({"cmd": "resolve", "args": ["24996"]}) + "\n")
             os.chmod(hidden, mode)
@@ -531,6 +571,15 @@ def section_c(eng, tag):
                     else: os.environ["VV_VAULT"] = prev
                     importlib.reload(_vi)
                 check(f"{tag}8c the walk-error list describes THIS walk (reset per walk)", locked == ["Hidden"] and unlocked == [], (locked, unlocked))
+                # the warning is billed: _out_total grows by exactly the bytes written
+                os.chmod(hidden, 0); list(_vi.md_files())
+                import io, contextlib
+                before_total = _vi._out_total; _vi._warned_incomplete = False; _vi._op = "resolve"
+                with contextlib.redirect_stderr(io.StringIO()) as errbuf:
+                    _vi._incomplete("id 25000 is unique")
+                os.chmod(hidden, mode)
+                check(f"{tag}8c' the warning's bytes are billed to the metrics row",
+                      _vi._out_total - before_total == len(errbuf.getvalue().encode("utf-8")) > 0, (before_total, _vi._out_total, len(errbuf.getvalue())))
             os.chmod(hidden, 0)
             r = eng.run("set", "25000 - Seen", "status", "x")
             r2 = eng.run("head", "25000 - Seen")

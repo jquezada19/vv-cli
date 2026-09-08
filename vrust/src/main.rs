@@ -89,10 +89,11 @@ pub fn walk_checked(dir: &Path, out: &mut Vec<PathBuf>, exclude_sandbox: bool) -
     match fs::read_dir(dir) {
         Ok(rd) => {
             for e in rd {
-                // an iterator error or an unreadable file type is an entry we
-                // could not evaluate: the walk is marked incomplete (the entry
-                // itself is still collected by name — its consumers discard an
-                // incomplete walk, or never needed completeness)
+                // an entry we could not evaluate marks the walk incomplete: a
+                // failed iterator step is skipped, a failed file_type() is
+                // kept by name (it may be a note). readpath/graph discard an
+                // incomplete walk; the other walk_ex callers never needed
+                // completeness and keep the partial list
                 let e = match e {
                     Ok(e) => e,
                     Err(_) => {

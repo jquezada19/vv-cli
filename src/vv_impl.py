@@ -90,7 +90,7 @@ def out(s=""):
     _out_total += len(s.encode("utf-8")) + 1
     print(s)
 
-_CTL = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]")
+_CTL = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029\udc80-\udcff]")   # incl. surrogate-escaped undecodable bytes
 # The suggestion line is the one newline the error grammar allows. Its marker
 # is a NUL sentinel: neither argv nor a filename can carry NUL, so only code
 # can introduce a second line — a token containing the literal text
@@ -165,10 +165,14 @@ def _walk_onerror(err):
     if d not in _walk_errors:
         _walk_errors.append(d)
 
+_walked = 0   # walks this process — a completeness probe reuses the last one
+
 def md_files():
+    global _walked
     # the list describes THIS walk: `batch` runs many ops in one process, and a
     # stale entry from an earlier op refused later resolutions (3 seats, 2026-09-07)
     _walk_errors.clear()
+    _walked += 1
     for dirpath, dirs, names in os.walk(VAULT, onerror=_walk_onerror):
         dirs[:] = [d for d in dirs if not d.startswith(".") and d not in SKIP_DIRS]
         for n in names:
@@ -423,7 +427,7 @@ def sec_text(lines, s):
 def sha8(t):
     return hashlib.sha256(t.encode()).hexdigest()[:8]
 
-def find_sec(lines, secs, sid, ref=None):
+def find_sec(lines, secs, sid, ref):
     """Resolve a section by id, and forgive the four ways agents actually ask.
 
     A replay of 50 real sessions (2026-08-26) found section addressing was
@@ -453,8 +457,8 @@ def find_sec(lines, secs, sid, ref=None):
     if len(matches) > 1:
         ids = ", ".join(m["id"] for m in matches)
         die(f"ambiguous: {len(matches)} sections are titled {want!r} ({ids})",
-            nxt="pass the id from vv outline NOTE")
-    die(f"not-found: no section {sid}", nxt=f"vv outline {_q(ref)}" if ref else "vv outline NOTE")
+            nxt=f"vv outline {_q(ref)}")
+    die(f"not-found: no section {sid}", nxt=f"vv outline {_q(ref)}")
 
 def split_fm(text):
     fm, body, _tail, _bom = split_fm_full(text)
@@ -506,6 +510,9 @@ def read_raw(fp):
             return f.read()
     except UnicodeDecodeError as e:
         die(f"utf8: {rel(fp)} is not valid UTF-8 ({e.reason} at byte {e.start}) — vv only edits UTF-8 notes", 5)
+    except PermissionError as e:
+        # a note we cannot read is a refusal in the error grammar, never a traceback
+        die(f"refused: cannot read {rel(fp)} ({e.strerror})", nxt="vv doctor")
 
 def eol_of(text):
     return "\r\n" if "\r\n" in text else "\n"
@@ -1696,7 +1703,8 @@ def basename_index():
     idx = {}
     h = index_handle()
     if h is not None:
-        list(md_files())             # the index does not walk; a probe walk does
+        if not _walked:
+            list(md_files())         # the index does not walk; a probe walk does (once per invocation)
         paths = (os.path.join(VAULT, r) for r in h.rel_paths())
     else:
         paths = list(md_files())
@@ -1793,6 +1801,8 @@ def cmd_deadends():
     entries = []
     h = index_handle()
     if h is not None:
+        if not _walked:
+            list(md_files())         # completeness probe: this read never touches basename_index()
         linked = {r[0] for r in h.con.execute(
             "SELECT DISTINCT f.path FROM links l JOIN files f ON f.id = l.file_id")}
         entries = [{"path": rp} for rp in h.rel_paths() if rp not in linked]
@@ -1800,6 +1810,8 @@ def cmd_deadends():
         for p in sorted(rel(p) for p in md_files()):
             if not any(True for _ in link_targets_in(open(os.path.join(VAULT, p), errors="replace").read())):
                 entries.append({"path": p})
+    if _walk_errors:
+        _incomplete("the link graph is complete")
     _list_out(entries, len(entries), "deadends", cmd="deadends")
 
 def cmd_changed(*args):
@@ -2564,7 +2576,7 @@ def cmd_doctor(*args):
     dirty = _git(["status", "--porcelain"])
     out(f"git: {'clean' if not dirty else f'{len(dirty.splitlines())} dirty paths'}")
     out(f"journals: {'none pending' if not js else 'UNRESOLVED (writes blocked): '
-        + ', '.join(os.path.basename(j) for j in js) + ' — vv doctor --rollback | --discard'}")
+        + _neutralise(_esc(', '.join(os.path.basename(j) for j in js))) + ' — vv doctor --rollback | --discard'}")
     list(md_files())   # a complete walk is what bare-name and id resolution need
     out("unreadable: " + (_neutralise(_esc(", ".join(_walk_errors[:10]))) + " (bare-name and id lookups: writes refuse, reads warn, until readable)"
                           if _walk_errors else "none"))

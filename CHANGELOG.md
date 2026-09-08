@@ -56,16 +56,19 @@ A/B of every listed input against 2.0.1, both engines:
   the vault is `escape:` in both engines, for reads (`head`, `show`, `read`,
   `resolve`) as well as writes. In Python a typed path was always contained
   and only the walk-derived alias was not (`set`/`append`/`patch` through it
-  wrote outside the vault); natively even a typed path escaped, because the
-  resolver fell through a failed containment into the walk — so the typed
-  spelling is **0 → 1 natively** as well. Found in review. (The id spelling
+  wrote outside the vault); natively a typed path AT THE VAULT ROOT
+  escaped too, because the resolver fell through a failed containment into
+  the basename walk (a subfolder path already refused in both engines) — so
+  that spelling is **0 → 1 natively** as well. Found in review. (The id spelling
   of the same case is `escape:` too, but that is a kind change from
   `not-found:`, exit 1 either way — ids did not resolve before this
   release.)
 - **0 → 1 for writes** — a WRITE (`set`/`unset`/`append`/`appendsec`/
-  `prepend`/`patch`, `batch`) through a bare-name or id hit under an
-  incomplete walk (an unreadable directory somewhere in the vault) is
-  `refused:` in both engines — the directory may hold a second note, so
+  `prepend`/`patch`) through a bare-name or id hit under an incomplete walk
+  (an unreadable directory somewhere in the vault) is `refused:` in both
+  engines — and so is every op inside `batch`, which is read-only but
+  captures each op's stderr and surfaces it only on a non-zero exit, so a
+  warning there would be swallowed — the directory may hold a second note, so
   "unique" is unprovable; a bare-name MISS under the same condition is
   `refused:` too (a kind change, exit 1 either way: absence is as
   unprovable). A READ (`head`/`read`/`show`/
@@ -76,17 +79,27 @@ A/B of every listed input against 2.0.1, both engines:
   like an error, once per invocation, billed to the metrics row, and under
   `--jsonl` it is a `{"kind": "warning", …}` row, never a bare line. A
   `batch` op's JSON arguments have `\u0000` escaped before dispatch (the
-  one byte argv and filenames cannot carry, and the suggestion sentinel). `vv doctor` — the next step both name —
-  lists the unreadable directories. The native walk treats a
+  one byte argv and filenames cannot carry, and the suggestion sentinel).
+  `daily-append` under an unreadable `Standups/` is `refused:` instead of
+  `not-found:` with "create it" (exit 1 either way). `vv doctor` grows by
+  17 bytes on a clean vault (`unreadable: none`). `vv doctor` — the next step both name —
+  lists the unreadable directories (its journal and directory lists are
+  escaped like an error). A note that cannot be read is `refused:` in the
+  error grammar instead of a traceback (pre-existing). The native walk treats a
   directory-iterator error or an unreadable entry type as incomplete, never
   as "a file". The same probe sits in the link graph itself (the basename
   index every link scan goes through), in both engines: a `rename`/`move`/
   `trash` — even by exact path — is `refused:` under the condition
   (**0 → 1**, the rewrite or broken-link report would be planned over a
-  partial corpus and still verify "clean"), and a graph READ (`backlinks`,
-  `links`, `impact`, `orphans`, `unresolved`, `lint`) answers with the
-  `warning:` instead of silently under-reporting over an index that prunes
-  what the walk could not see.
+  partial corpus and still verify "clean"), and a graph READ over the corpus
+  (`backlinks`, `impact`, `orphans`, `unresolved`, `deadends`, `lint
+  --quick`) answers with the `warning:` instead of silently under-reporting
+  over an index that prunes what the walk could not see. `links` reads one
+  note and needs no walk; the default `lint` delegates to the vault's own
+  linter before the graph is touched. The probe walks once per invocation
+  — a walk the command already did is the evidence. Not covered: an
+  enumeration that fails mid-listing without a permission error (an I/O
+  fault `glob` swallows) is invisible to `daily-append`'s gate.
 - A dangling symlink whose name matches is no longer a hit: `not-found:`
   instead of a resolved path followed by a traceback on the read (`head`,
   `set`: exit 1 as before; **`resolve`: 0 → 1**, it used to print the
