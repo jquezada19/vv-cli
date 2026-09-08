@@ -91,36 +91,50 @@ def out(s=""):
     print(s)
 
 _CTL = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]")
-_DYM = "\ndid you mean: "   # the one newline the error grammar allows: the suggestion line
+# The suggestion line is the one newline the error grammar allows. Its marker
+# is a NUL sentinel: neither argv nor a filename can carry NUL, so only code
+# can introduce a second line — a token containing the literal text
+# "\ndid you mean: " is escaped like any other newline (round 3, 2026-09-07).
+_DYM = "\x00did you mean: "
 
 def _esc(s):
-    """Message text made safe for the one-line error contract: every control
-    character (and the two Unicode line separators) escaped, and a literal
-    ` — next: ` inside the message neutralised so the separator that die()
-    writes is the only one on the line. Applied centrally in die() — a caller
-    or filesystem token reaches the message through any of ~40 sites, and
-    per-site sanitising missed three of them (review rounds 1–2, 2026-09-07)."""
+    """Every control character (and the two Unicode line separators) escaped."""
     def esc(m):
         c = m.group()
         return {"\n": "\\n", "\r": "\\r", "\t": "\\t"}.get(c, f"\\x{ord(c):02x}" if ord(c) < 256 else f"\\u{ord(c):04x}")
-    return _CTL.sub(esc, s).replace(" — next: ", " —next: ")
+    return _CTL.sub(esc, s)
+
+def _neutralise(s):
+    """A literal ` — next: ` inside message text is rewritten until none is
+    left, so the separator die() appends is the only one on the line. To
+    convergence, over the JOINED text: `str.replace` is non-overlapping and
+    the separator overlaps itself (` — next: — next: `), and the suggestion
+    line's own space can complete one across the join (security seat,
+    round 3)."""
+    while " — next: " in s:
+        s = s.replace(" — next: ", " —next: ")
+    return s
 
 def die(msg, code=1, nxt=None):
     """Errors are `kind: message — next: <command>`. The next step is an
     explicit argument — never parsed back out of the message — so no token
-    that lands in the message can become the --jsonl envelope's `next` field."""
-    msg = _DYM.join(_esc(part) for part in msg.split(_DYM, 1))
-    line = msg + (f" — next: {_esc(nxt)}" if nxt is not None else "")
+    that lands in the message can become the --jsonl envelope's `next` field.
+    The message is escaped centrally: a caller or filesystem token reaches
+    it through any of ~40 sites, and per-site sanitising missed three
+    (review rounds 1–3, 2026-09-07)."""
+    msg = _neutralise("\ndid you mean: ".join(_esc(part) for part in msg.split(_DYM, 1)))
+    nxt = _neutralise(_esc(nxt)) if nxt is not None else None
     if _JSONL:
         head, _, body = msg.partition(": ")
-        sys.stderr.write(json.dumps(
-            {"kind": head.split("\n")[0], "message": body or msg,
-             "next": _esc(nxt) if nxt is not None else "", "exit": code}, ensure_ascii=False) + "\n")
+        wire = json.dumps({"kind": head.split("\n")[0], "message": body or msg,
+                           "next": nxt or "", "exit": code}, ensure_ascii=False) + "\n"
     else:
-        sys.stderr.write(line + "\n")
+        wire = msg + (f" — next: {nxt}" if nxt is not None else "") + "\n"
+    sys.stderr.write(wire)
     first = msg.split("\n", 1)[0].split(" ", 1)[0]
-    # Error text enters the caller's context too — bill it, don't log a zero.
-    _log(_out_total + len(line.encode("utf-8")) + 1, code,
+    # Error text enters the caller's context too — bill the bytes actually
+    # written (the JSONL envelope is longer than the plain line), never a zero.
+    _log(_out_total + len(wire.encode("utf-8")), code,
          first[:-1] if first.endswith(":") else None)
     sys.exit(code)
 
@@ -131,7 +145,7 @@ def use_rust():
     matrix, adapted); unset = rust when built. Unknown values refuse loudly."""
     eng = os.environ.get("VV_ENGINE", "")
     if eng not in ("", "rust", "python"):
-        die(f"engine: unknown VV_ENGINE '{eng}'", nxt=f"use rust|python or unset")
+        die(f"engine: unknown VV_ENGINE '{eng}'", nxt="use rust|python or unset")
     if eng == "python":
         return False
     if eng == "rust" and not os.path.exists(VRUST):
@@ -225,20 +239,42 @@ def resolve(ref):
         idhit = _resolve_id_prefix(want, all_notes)
         if idhit:
             return _cf(idhit)
+        if _walk_errors:
+            _incomplete(f"'{ref}' is absent")
         sugg = suggest_names(want, all_notes)
-        extra = ("\ndid you mean: " + " | ".join(sugg)) if sugg else ""
+        extra = (_DYM + " | ".join(sugg)) if sugg else ""
         die(f"not-found: no note matches '{ref}'{extra}")
     die("ambiguous: " + " | ".join(os.path.relpath(h, VAULT) for h in sorted(hits)[:5]), nxt=f"vv resolve {_q(os.path.relpath(sorted(hits)[0], VAULT))}")
 
+def _require_complete_walk(what):
+    """A link rewrite (rename/move/trash) plans over EVERY note; an unreadable
+    directory may hold a backlink the plan cannot see, and the post-write
+    verification would still print clean. The index-backed link scans do not
+    walk, so completeness is probed explicitly here (review round 3)."""
+    list(md_files())
+    if _walk_errors:
+        die(f"refused: cannot prove the {what} is complete — unreadable: {', '.join(_walk_errors[:3])}",
+            nxt="vv doctor")
+
+_WRITE_OPS = {"set", "unset", "append", "appendsec", "prepend", "patch", "rename", "move", "trash", "batch"}
+
+def _incomplete(claim):
+    """An incomplete walk cannot prove a bare name or id unique (or absent):
+    the unreadable directory may hold a second note. A WRITE through such a
+    hit is refused; a READ answers the visible hit with a warning — the
+    wrong note in a read is loud and recoverable, one unreadable directory
+    turning every bare-name read into an outage is not (review round 3,
+    2026-09-07). `batch` is read-only but multi-op, so it refuses too."""
+    where = ", ".join(_walk_errors[:3])
+    if _op in _WRITE_OPS:
+        die(f"refused: cannot prove {claim} — unreadable: {where}", nxt="vv doctor")
+    sys.stderr.write(f"warning: cannot prove {claim} — unreadable: {where} — next: vv doctor\n")
+
 def _name_hits(want, all_notes):
-    """Exact-basename matches from a completed walk. An incomplete walk cannot
-    prove a bare name unique (the unreadable directory may hold a second
-    note), so a hit under one is refused, not returned — the same rule the
-    id branch applies (review round 2, 2026-09-07)."""
+    """Exact-basename matches from a completed walk (see _incomplete)."""
     hits = [p for p in all_notes if os.path.basename(p)[:-3].lower() == want]
     if hits and _walk_errors:
-        die(f"refused: cannot prove '{want}' is unique — unreadable: {', '.join(_walk_errors[:3])}",
-            nxt="vv doctor")
+        _incomplete(f"'{want}' is unique")
     return hits
 
 def _contained(p):
@@ -272,10 +308,8 @@ def _resolve_id_prefix(want, all_notes):
     cands = sorted(p for p in all_notes if os.path.basename(p).startswith(prefix))
     if _walk_errors:
         # zero visible candidates is not "none": the unreadable directory may
-        # hold the note (or a second one) — refuse either way
-        nxt = f"vv resolve {_q(rel(cands[0]))}" if cands else "vv doctor"
-        die(f"refused: cannot prove id {digits} is unique — unreadable: "
-            f"{', '.join(d for d in _walk_errors[:3])}", nxt=f"{nxt}")
+        # hold the note (or a second one)
+        _incomplete(f"id {digits} is unique")
     if not cands:
         return None
     if len(cands) > 1:
@@ -416,7 +450,7 @@ def find_sec(lines, secs, sid):
         ids = ", ".join(m["id"] for m in matches)
         die(f"ambiguous: {len(matches)} sections are titled {want!r} ({ids})",
             nxt="pass the id from vv outline NOTE")
-    die(f"not-found: no section {sid}", nxt=f"vv outline NOTE")
+    die(f"not-found: no section {sid}", nxt="vv outline NOTE")
 
 def split_fm(text):
     fm, body, _tail, _bom = split_fm_full(text)
@@ -691,7 +725,7 @@ def cmd_set(ref, key, value):
     else:
         fm_lines = fm.replace("\r\n", "\n").split("\n")
         if block_scalar_key(fm_lines, key):
-            die(f"refused: '{key}' has a multi-line/block value", nxt=f"edit the note directly (set would orphan continuation lines)")
+            die(f"refused: '{key}' has a multi-line/block value", nxt="edit the note directly (set would orphan continuation lines)")
         pat = re.compile(rf"^{re.escape(key)}:")
         hit = [i for i, l in enumerate(fm_lines) if pat.match(l)]
         if hit:
@@ -712,7 +746,7 @@ def cmd_unset(ref, key):
     eol = eol_of(text)
     fm_lines = fm.replace("\r\n", "\n").split("\n")
     if block_scalar_key(fm_lines, key):
-        die(f"refused: '{key}' has a multi-line/block value", nxt=f"edit the note directly (unset would orphan continuation lines)")
+        die(f"refused: '{key}' has a multi-line/block value", nxt="edit the note directly (unset would orphan continuation lines)")
     kept = [l for l in fm_lines if not re.match(rf"^{re.escape(key)}:", l)]
     if kept == fm_lines:
         die(f"not-found: no key {key} in {rel(fp)}")
@@ -734,7 +768,7 @@ def cmd_new(*args):
         die("usage: new PATH [--template NAME] [--key value ...]")
     fp = contain(path if path.endswith(".md") else path + ".md")
     if os.path.exists(fp):
-        die(f"exists: {rel(fp)}", nxt=f"pick another name or edit it")
+        die(f"exists: {rel(fp)}", nxt="pick another name or edit it")
     d = os.path.dirname(fp)
     if d:
         os.makedirs(d, exist_ok=True)
@@ -751,11 +785,11 @@ def cmd_new(*args):
             # the same stem exists in more than one Templates/ subfolder — the
             # exact-match rule must not become a silent lexicographic pick
             names = " | ".join(os.path.relpath(h, os.path.join(VAULT, "Templates"))[:-3] for h in exact[:5])
-            die(f"ambiguous: template '{template}' exists as {names}", nxt=f"vv templates")
+            die(f"ambiguous: template '{template}' exists as {names}", nxt="vv templates")
         elif len(hits) > 1:
             # never silently take the first lexicographic hit (it did, until 2026-08-27)
             names = " | ".join(os.path.basename(h)[:-3] for h in hits[:5])
-            die(f"ambiguous: template '{template}' matches {names}", nxt=f"vv templates")
+            die(f"ambiguous: template '{template}' matches {names}", nxt="vv templates")
         content = read_raw(hits[0])
     missing = []
     for k, v in kv.items():
@@ -1201,7 +1235,7 @@ def cmd_daily_append(text):
     today = datetime.date.today().isoformat()
     hits = glob.glob(os.path.join(VAULT, "Standups", f"*{today}*.md"))
     if not hits:
-        die(f"not-found: no standup note for {today} under Standups/", nxt=f"create it, then re-run")
+        die(f"not-found: no standup note for {today} under Standups/", nxt="create it, then re-run")
     # Three defects lived in this one line (Codex review 2026-08-26), and this is
     # the most-used writer in the tool:
     #   1. no CAS -- the "every writer is guarded" claim skipped daily-append;
@@ -1733,7 +1767,7 @@ def cmd_show(ref, *args):
         out(t)
         used += tb + 1
     if not started:
-        die(f"not-found: no section {start}", nxt=f"vv outline NOTE")
+        die(f"not-found: no section {start}", nxt=f"vv outline {_q(ref)}")
 
 def cmd_deadends():
     entries = []
@@ -1763,7 +1797,7 @@ def cmd_changed(*args):
             try:
                 since = datetime.datetime.fromisoformat(raw).timestamp()
             except ValueError:
-                die(f"usage: --since {raw} is neither epoch seconds nor ISO", nxt=f"vv changed --since 2026-08-27")
+                die(f"usage: --since {raw} is neither epoch seconds nor ISO", nxt="vv changed --since 2026-08-27")
     if since is None:
         die("usage: changed requires --since <epoch|ISO>", nxt="vv changed --since 2026-08-27")
     hits = []
@@ -1792,6 +1826,7 @@ def cmd_trash(ref, *args):
     apply_, expect = _relocate_tail("trash", (ref,), args)   # before resolve: syntax outranks lookup
     fp = resolve(ref)
     src_rel = rel(fp)
+    _require_complete_walk("broken-link report")
     hits, ambiguous = occurrences(fp, include_bare=True)
     if ambiguous:
         die("refused: source basename is ambiguous in vault", nxt="resolve duplicate notes first")
@@ -1814,7 +1849,7 @@ def cmd_trash(ref, *args):
         out(f"(dry-run — apply with: --apply {plan_id} to bind to THIS plan)")
         return
     if expect and expect != plan_id:
-        die(f"stale: plan is now {plan_id}, you reviewed {expect}", 3, nxt=f"re-run the dry-run")
+        die(f"stale: plan is now {plan_id}, you reviewed {expect}", 3, nxt="re-run the dry-run")
     _dirty_gate()
     jdir = _journal_start("trash", [fp], src=src_rel, dest=dest_rel)
     try:
@@ -2068,7 +2103,7 @@ def _journal_rollback(jdir, written=None):
         # is nothing to restore and nothing was written yet; refuse loudly rather
         # than raising a traceback out of doctor.
         die(f"conflict: journal {os.path.basename(jdir)} has no manifest (killed during "
-            f"preparation)", 1, nxt=f"vv doctor --discard")
+            f"preparation)", 1, nxt="vv doctor --discard")
     man = json.load(open(mpath))
     import shutil as _sh
     left = []
@@ -2219,23 +2254,23 @@ def _relocate_tail(cmd, operands, tail):
     for tok in it:
         if tok == "--apply":
             if apply_:
-                die(f"usage: --apply given twice", nxt=f"{dry}")
+                die(f"usage: --apply given twice", nxt=dry)
             apply_ = True
-            nxt = next(it, None)
-            if nxt is None:
+            tok2 = next(it, None)
+            if tok2 is None:
                 break
-            if _is_flag(nxt):
-                if nxt == "--apply":
-                    die(f"usage: --apply given twice", nxt=f"{dry}")
-                die(f"usage: {synopsis} [--apply [SHA8]], got unknown flag '{nxt}'", nxt=f"{dry}")
-            if not re.fullmatch(r"[0-9a-fA-F]{8}", nxt):
-                die(f"usage: --apply takes an 8-hex plan id, got '{nxt}'", nxt=f"{dry}")
-            token = nxt.lower()
+            if _is_flag(tok2):
+                if tok2 == "--apply":
+                    die(f"usage: --apply given twice", nxt=dry)
+                die(f"usage: {synopsis} [--apply [SHA8]], got unknown flag '{tok2}'", nxt=dry)
+            if not re.fullmatch(r"[0-9a-fA-F]{8}", tok2):
+                die(f"usage: --apply takes an 8-hex plan id, got '{tok2}'", nxt=dry)
+            token = tok2.lower()
         elif _is_flag(tok):
-            die(f"usage: {synopsis} [--apply [SHA8]], got unknown flag '{tok}'", nxt=f"{dry}")
+            die(f"usage: {synopsis} [--apply [SHA8]], got unknown flag '{tok}'", nxt=dry)
         else:
             hint = " (one note per call)" if cmd == "move" else ""
-            die(f"usage: {synopsis}, got extra positional '{tok}'{hint}", nxt=f"{template}")
+            die(f"usage: {synopsis}, got extra positional '{tok}'{hint}", nxt=template)
     return apply_, token
 
 def _do_relocate(ref, dest_rel_noext, apply_, opname, expect_plan=None):
@@ -2252,12 +2287,13 @@ def _do_relocate(ref, dest_rel_noext, apply_, opname, expect_plan=None):
     idx = basename_index()
     if rename_base and rename_base.lower() in idx:
         die(f"refused: another note already has basename '{new_base}' — bare links would be ambiguous")
+    _require_complete_walk("link rewrite")
     hits, ambiguous = occurrences(fp, include_bare=bool(rename_base))
     if ambiguous:
         # rename: bare links can't be rewritten safely. move: bare links aren't
         # rewritten at all, but relocating one duplicate CHANGES which note the
         # same-folder/shortest-path tiers resolve them to — silent repointing.
-        die(f"refused: source basename is ambiguous in vault", nxt=f"resolve duplicate notes first")
+        die(f"refused: source basename is ambiguous in vault", nxt="resolve duplicate notes first")
     # plan digest: operation + destination + every affected file's byte hash.
     # `--apply <digest>` then executes exactly the previewed blast radius or
     # exits stale — an edit or new link between preview and apply changes it.
@@ -2274,7 +2310,7 @@ def _do_relocate(ref, dest_rel_noext, apply_, opname, expect_plan=None):
         out(f"(dry-run — apply with: --apply, or --apply {plan_id} to bind to THIS plan)")
         return
     if expect_plan and expect_plan != plan_id:
-        die(f"stale: plan is now {plan_id}, you reviewed {expect_plan}", 3, nxt=f"re-run the dry-run")
+        die(f"stale: plan is now {plan_id}, you reviewed {expect_plan}", 3, nxt="re-run the dry-run")
     # journal every file that will be written, plus the moved file itself (once)
     _dirty_gate()
     journal_targets = list(hits.keys()) + ([fp] if fp not in hits else [])
@@ -2508,6 +2544,9 @@ def cmd_doctor(*args):
     out(f"git: {'clean' if not dirty else f'{len(dirty.splitlines())} dirty paths'}")
     out(f"journals: {'none pending' if not js else 'UNRESOLVED (writes blocked): '
         + ', '.join(os.path.basename(j) for j in js) + ' — vv doctor --rollback | --discard'}")
+    list(md_files())   # a complete walk is what bare-name and id resolution need
+    out("unreadable: " + (", ".join(_walk_errors[:10]) + " (bare-name and id lookups refuse until readable)"
+                          if _walk_errors else "none"))
     try:
         with open(METRICS, "a"):
             pass
@@ -2610,8 +2649,9 @@ def _arity_hint(cmd, args):
     """Parenthetical BEFORE `— next:` (the next line itself stays a bare command)."""
     if cmd == "append" and _wants_section(args):
         return " (append has no --section; append inside a section is appendsec)"
-    if _surplus_slot(_table_operands(cmd), args):
-        return f" ({_table_operands(cmd)[-1]} is one argument; quote it)"
+    ops = _table_operands(cmd)
+    if _surplus_slot(ops, args):
+        return f" ({ops[-1]} is one argument; quote it)"
     return ""
 
 # Words the pilot week typed that are not commands but name a real one.
@@ -2638,7 +2678,7 @@ def _check_arity(cmd, fn, args):
         exact_tail = cmd in _RELOCATE               # the *args tail is flags-only, never operands
         want = str(req) if exact_tail else (f"{req}+" if hi is None else (str(req) if req == hi else f"{req}-{hi}"))
         nxt = ARITY_NEXT[cmd](args) if cmd in ARITY_NEXT else _next_from_table(cmd, args)
-        die(f"usage: {cmd} takes {want} positional args, got {len(args)}{_arity_hint(cmd, args)}", nxt=f"{nxt}")
+        die(f"usage: {cmd} takes {want} positional args, got {len(args)}{_arity_hint(cmd, args)}", nxt=nxt)
 
 VERSION_FALLBACK = "2.0.1"  # used only when VERSION is absent (bare-file deploys)
 
@@ -2761,7 +2801,7 @@ def _generate(kind):
         L = [f"complete -c vv -f -n '__fish_use_subcommand' -a {c['name']} -d '{c['summary'].replace(chr(39), '')}'"
              for c in COMMAND_TABLE]
         print("\n".join(L)); return
-    die(f"usage: unknown --generate kind '{kind}'", nxt=f"vv --generate man|complete-bash|complete-zsh|complete-fish")
+    die(f"usage: unknown --generate kind '{kind}'", nxt="vv --generate man|complete-bash|complete-zsh|complete-fish")
 
 def main():
     global VAULT, _VAULT_REAL, _op
@@ -2805,7 +2845,7 @@ def main():
         alias = CMD_ALIASES.get(a[0])
         sugg = [alias] if alias else suggest_names(a[0], [c + ".md" for c in CMDS], n=1)  # same tiered ranking notes get
         hint = f" (did you mean: {sugg[0]})" if sugg else ""
-        die(f"usage: unknown command {a[0]}{hint}", nxt=f"run vv --help for the command list")
+        die(f"usage: unknown command {a[0]}{hint}", nxt="run vv --help for the command list")
     _check_arity(a[0], fn, a[1:])
     fn(*a[1:])
     _log(_out_total)

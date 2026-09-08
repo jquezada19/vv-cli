@@ -49,17 +49,33 @@ A/B of every listed input against 2.0.1, both engines:
   (`vv set 24995 status done`), and the `#NNNNN` spelling wherever `NNNNN`
   would have resolved (`'#24998'` → a literal `24998.md`). A script whose
   fallback branch fired on not-found now writes instead.
-- **0 → 1** — a bare name or id whose unique hit is a symlink to a file
-  OUTSIDE the vault is `escape:` in both engines, for reads (`head`, `show`,
-  `read`) as well as writes. Typed paths were always contained; the
+- **0 → 1** — a bare name whose unique hit is a symlink to a file OUTSIDE
+  the vault is `escape:` in both engines, for reads (`head`, `show`, `read`,
+  `resolve`) as well as writes. Typed paths were always contained; the
   walk-derived alias was not, and `set`/`append`/`patch` through it wrote
-  outside the vault. Found in review.
-- **0 → 1** — a bare-name hit under an incomplete walk (an unreadable
-  directory somewhere in the vault) is `refused:` like an id hit, in both
-  engines — the directory may hold a second note, so "unique" is unprovable.
+  outside the vault. Found in review. (The id spelling of the same case is
+  `escape:` too, but that is a kind change from `not-found:`, exit 1 either
+  way — ids did not resolve before this release.)
+- **0 → 1 for writes** — a WRITE (`set`/`unset`/`append`/`appendsec`/
+  `prepend`/`patch`, `batch`) through a bare-name or id hit under an
+  incomplete walk (an unreadable directory somewhere in the vault) is
+  `refused:` in both engines — the directory may hold a second note, so
+  "unique" is unprovable; a bare-name MISS under the same condition is
+  `refused:` too (absence is as unprovable). A READ (`head`/`read`/`show`/
+  `resolve`/graph commands) answers the visible hit and prints a
+  `warning:` line on stderr naming the directory — exit 0, output
+  unchanged — because one unreadable directory turning every bare-name read
+  into an outage is the larger harm. `vv doctor` — the next step both name —
+  lists the unreadable directories. The native walk treats a
+  directory-iterator error or an unreadable entry type as incomplete, never
+  as "a file". A `rename`/`move`/`trash` — even by exact path — is
+  `refused:` under the same condition (**0 → 1**): the link rewrite or
+  broken-link report would be planned over a partial corpus and still verify
+  "clean".
 - A dangling symlink whose name matches is no longer a hit: `not-found:`
-  (exit 1, as before the change) instead of a resolved path followed by a
-  traceback on the read.
+  instead of a resolved path followed by a traceback on the read (`head`,
+  `set`: exit 1 as before; **`resolve`: 0 → 1**, it used to print the
+  dangling path since it never opened the file).
 
 ### Fixed
 - The relocate tail is a grammar (`--apply` optionally followed by ONE 8-hex
@@ -68,15 +84,22 @@ A/B of every listed input against 2.0.1, both engines:
   previews the wrong move. Short flags (`-h`) count as flags; a name that
   starts with `-` is spelled `./-name`, and the refusal says so.
 - The error envelope: `die()` takes the next step as an explicit argument
-  and never parses it back out of the message, so no caller or filesystem
-  token — in any of the ~40 sites that interpolate one — can become the
-  `--jsonl` `next` field (three pre-existing sites could: `board`, `orphans`,
-  `props`' folder scope, and every `did you mean:` suggestion). The message
+  (every call that carried an inline ` — next: ` — 26 at 2.0.1 — now passes
+  `nxt=`; 41 do at this commit) and never parses it back out of the message,
+  so no caller or filesystem token can become the `--jsonl` `next` field
+  (three pre-existing sites could: `board`, `orphans`, `props`' folder scope,
+  and every `did you mean:` suggestion). The message
   is escaped centrally: every control character (and U+2028/2029) rendered
   as `\n`/`\x1b`-style escapes, a literal ` — next: ` inside a token
-  neutralised, so an error is always one line. A token that would carry a
-  control character or the separator into a runnable next step is replaced
-  by its placeholder.
+  neutralised to convergence over the joined line (the separator overlaps
+  itself, and the `did you mean:` join could complete one), so an error is
+  always one line and carries exactly one separator. The suggestion line's
+  marker is a NUL sentinel no argv or filename can carry. A token that would
+  carry a control character or the separator into a runnable next step is
+  replaced by its placeholder. "One line" means the error line plus, for a
+  name miss, the `did you mean:` line — the only newline the grammar allows,
+  and only code can introduce it. The metrics row bills the bytes actually
+  written (the `--jsonl` envelope, not the plain line — pre-existing).
 - Arity misses name a runnable next step derived from the command table —
   the caller's own operands, shell-quoted, in the slots they filled
   (`vv set A status VALUE`); surplus arguments with no flag among them are
@@ -90,7 +113,9 @@ A/B of every listed input against 2.0.1, both engines:
   quoted operand may: `vv read '[x]'` is correct quoting). `move NOTE` no
   longer advertises "2+" positionals.
 - The table entry for `trash` says `[--apply [SHA8]]` — a bare `--apply` was
-  always accepted; the synopsis overstated (pinned).
+  always accepted; the synopsis overstated (pinned). `vv --help` grows by
+  188 bytes: the corrected synopsis, the one-note-per-call tail rule, and
+  the bare-id form of `NOTE` — the operand grammar this release changes.
 
 ## [2.0.1] — 2026-09-06
 

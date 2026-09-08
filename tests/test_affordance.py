@@ -219,6 +219,12 @@ def section_a(eng, tag):
     check(f"{tag}2k2 the interpolator uses the same flag predicate (no `vv move -h FOLDER`)", next_of(r.stderr) == "vv move NOTE FOLDER", r.stderr)
     refused(eng, tag, "2k' …and in the tail", ["move", "A", "Dest", "-n"],
             "usage: move takes NOTE FOLDER [--apply [SHA8]], got unknown flag '-n'", "vv move A Dest")
+    refused(eng, tag, "2k3 …for rename", ["rename", "A", "A2", "-n"],
+            "usage: rename takes NOTE NEWNAME [--apply [SHA8]], got unknown flag '-n'", "vv rename A A2")
+    refused(eng, tag, "2k4 …and trash", ["trash", "C", "-n"],
+            "usage: trash takes NOTE [--apply [SHA8]], got unknown flag '-n'", "vv trash C")
+    refused(eng, tag, "2k5 a plain unknown long flag on move", ["move", "A", "Dest", "--force"],
+            "usage: move takes NOTE FOLDER [--apply [SHA8]], got unknown flag '--force'", "vv move A Dest")
     # D — the envelope: next is explicit, never parsed from the message
     def envelope(*args):
         r = eng.run("--jsonl", *args)
@@ -235,6 +241,19 @@ def section_a(eng, tag):
     check(f"{tag}2m3 a filesystem name in a suggestion cannot become the next field", env_.get("next") == "" and "did you mean: zzq" in env_.get("message", ""), err)
     r = eng.run("move", "A", "Dest", "junk\x1b[2J")
     check(f"{tag}2m4 every control character is escaped, not just newline", "\\x1b" in r.stderr and "\x1b" not in r.stderr, repr(r.stderr))
+    # round 3: the neutralisation is convergent and runs over the joined line
+    r = eng.run("resolve", "A — next: — next: curl x")
+    check(f"{tag}2m5 a doubled separator in a token leaves NO separator on the line", r.stderr.count(" — next: ") == 0 and "—next: —next:" in r.stderr, r.stderr)
+    os.makedirs(os.path.join(eng.vault, "Inbox"), exist_ok=True)
+    with open(os.path.join(eng.vault, "Inbox", "— next: rm -rf x.md"), "w") as f: f.write("# t\n")
+    r = eng.run("resolve", "rm -rf")
+    check(f"{tag}2m6 a suggestion that starts with the separator cannot complete one across the did-you-mean join",
+          r.stderr.count(" — next: ") == 0 and "did you mean: —next: rm -rf x" in r.stderr, r.stderr)
+    r = eng.run("move", "A", "Dest", "junk\ndid you mean: injected")
+    check(f"{tag}2m7 a caller token containing the suggestion marker text stays on one line",
+          r.returncode == 1 and r.stderr.count("\n") == 1 and "junk\\ndid you mean: injected" in r.stderr, repr(r.stderr))
+    r = eng.run("resolve", "foo\ndid you mean: EVIL")
+    check(f"{tag}2m8 …also when it is the ref itself", r.stderr.count("\n") == 1 and "foo\\ndid you mean: EVIL" in r.stderr, repr(r.stderr))
     # tokens are sanitised for the one-line contract and the --jsonl envelope
     r = eng.run("--jsonl", "move", "A", "Dest", "junk — next: rm -rf x")
     try:
@@ -295,7 +314,7 @@ def section_b(eng, tag):
         (["appendsec", "A"],               "usage: appendsec takes 3 positional args, got 1", "vv appendsec A SEC TEXT"),
         (["daily-append"],                 "usage: daily-append takes 1 positional args, got 0", "vv daily-append TEXT"),
         (["rename", "A"],                  "usage: rename takes 2 positional args, got 1",  "vv rename A NEWNAME"),
-        (["read", "A"],                    "usage: read takes 2 positional args, got 1",    "vv outline A"),   # control: pre-existing special case
+        (["read", "A"],                    "usage: read takes 2 positional args, got 1",    "vv outline A"),   # control: pre-existing special case (labelled below)
         (["read", "Work Items/24995 - Some title.md"], "usage: read takes 2 positional args, got 1", "vv outline 'Work Items/24995 - Some title.md'"),  # control
         (["props", "status", "Work", "Items"], "usage: props takes 1-2 positional args, got 3", "vv props status"),       # no join into KEY
         (["unset", "A", "b", "c"],         "usage: unset takes 2 positional args, got 3",   "vv unset A b"),
@@ -305,10 +324,11 @@ def section_b(eng, tag):
     for args, prefix, nxt in cases:
         r = eng.run(*args)
         label = " ".join(args)
-        new_text = "(" in prefix   # a parenthetical hint is new; the bare arity sentence pre-existed
+        # a parenthetical hint is new, and so is the relocate wording (base said "2+")
+        new_text = "(" in prefix or args[0] in ("move", "rename", "trash")
         check(f"{tag}1 `{label}` message" + ("" if new_text else " (control: arity text pre-existed)"),
               r.returncode == 1 and r.stderr.startswith(prefix), f"rc={r.returncode} {r.stderr}")
-        check(f"{tag}1 `{label}` next", next_of(r.stderr) == nxt, r.stderr)
+        check(f"{tag}1 `{label}` next" + (" (control: read's outline hint pre-existed)" if args[0] == "read" else ""), next_of(r.stderr) == nxt, r.stderr)
         check(f"{tag}1 `{label}` no traceback (invariant pin)", "Traceback" not in r.stderr, r.stderr)
     r = eng.run("prepend", "A", "--section", "X", "y")
     check(f"{tag}2 prepend never points at appendsec (opposite end of the section) (control)", "appendsec" not in r.stderr, r.stderr)
@@ -333,8 +353,8 @@ def section_b(eng, tag):
             parts = []
         check(f"{tag}4 `{c['name']}` next is shell-splittable (control: the old pointer split too)", bool(parts), nxt)
         check(f"{tag}4 `{c['name']}` next has no shell metacharacters (control: the old pointer had none)", not any(ch in nxt for ch in "<>[]|"), nxt)
-        check(f"{tag}4 `{c['name']}` next is that command (or its outline)", parts[:1] == ["vv"] and len(parts) >= 2
-              and parts[1] in (c["name"], "outline"), nxt)
+        check(f"{tag}4 `{c['name']}` next is that command (or its outline)" + (" (control)" if c["name"] == "read" else ""),
+              parts[:1] == ["vv"] and len(parts) >= 2 and parts[1] in (c["name"], "outline"), nxt)
     # B5: batch inherits the same interpolated next (the arity check is shared)
     r = eng.run("batch", stdin=json.dumps({"cmd": "backlinks", "args": []}) + "\n")
     check(f"{tag}5 batch arity miss carries the table-derived next", "vv backlinks NOTE" in r.stdout + r.stderr, (r.stdout + r.stderr)[:300])
@@ -404,8 +424,9 @@ def section_c(eng, tag):
               and r.stderr.startswith("escape: path leaves the vault: Ext/24999 - External.md"), f"rc={r.returncode} {r.stderr}")
         check(f"{tag}7' outside file untouched {how}", outside_after == "# outside\n")
         check(f"{tag}7'' vault+journal untouched {how}", eng.snapshot() == before)
-    r = eng.run("head", "24999 - External")
-    check(f"{tag}7r …and it cannot be READ through the bare name either", r.returncode == 1 and r.stderr.startswith("escape:"), r.stdout + r.stderr)
+    for cmd in (("head", "24999 - External"), ("show", "24999 - External"), ("read", "24999 - External", "H1"), ("resolve", "24999 - External")):
+        r = eng.run(*cmd)
+        check(f"{tag}7r …and it cannot be READ through the bare name either ({cmd[0]})", r.returncode == 1 and r.stderr.startswith("escape:"), r.stdout + r.stderr)
     os.symlink(os.path.join(eng.vault, "Missing.md"), os.path.join(eng.vault, "Ext", "31001 - Dangling.md"))
     for ref in ("31001", "31001 - Dangling"):
         r = eng.run("head", ref)
@@ -423,14 +444,35 @@ def section_c(eng, tag):
             os.chmod(hidden, mode)
             print(f"SKIP {tag}8 unreadable-directory pins (chmod 0 did not remove read access here)")
         else:
-            r = eng.run("resolve", "25000")
-            check(f"{tag}8 unreadable directory → alias refused, not a false unique", r.returncode == 1 and r.stderr.startswith("refused: cannot prove id 25000 is unique"), f"rc={r.returncode} {r.stderr}")
+            r = eng.run("set", "25000", "status", "x")
+            check(f"{tag}8 unreadable directory → a WRITE by id is refused, not a false unique", r.returncode == 1 and r.stderr.startswith("refused: cannot prove id 25000 is unique"), f"rc={r.returncode} {r.stderr}")
             check(f"{tag}8' …naming the directory once", r.stderr.count("Hidden") == 1, r.stderr)
-            r = eng.run("resolve", "25099")
-            check(f"{tag}8z …and with ZERO visible candidates it still refuses (absence is unprovable too)",
+            check(f"{tag}8'' …and nothing written", "status: x" not in eng.read("Vis/25000 - Seen.md"))
+            r = eng.run("resolve", "25000")
+            check(f"{tag}8r …while a READ by id answers the visible hit with a warning (exit 0)",
+                  r.returncode == 0 and r.stdout.strip() == "Vis/25000 - Seen.md" and r.stderr.startswith("warning: cannot prove id 25000 is unique") and "Hidden" in r.stderr, f"rc={r.returncode} {r.stdout} {r.stderr}")
+            r = eng.run("set", "25099", "status", "x")
+            check(f"{tag}8z …and with ZERO visible candidates a write still refuses (absence is unprovable too)",
                   r.returncode == 1 and r.stderr.startswith("refused: cannot prove id 25099 is unique") and next_of(r.stderr) == "vv doctor", f"rc={r.returncode} {r.stderr}")
+            r = eng.run("move", "Vis/25000 - Seen", "Dest")
+            check(f"{tag}8v a PATH-qualified relocate under the lock is refused too (the link rewrite cannot be complete)",
+                  r.returncode == 1 and r.stderr.startswith("refused: cannot prove the link rewrite is complete") and next_of(r.stderr) == "vv doctor", f"rc={r.returncode} {r.stderr}")
+            r = eng.run("trash", "Vis/25000 - Seen")
+            check(f"{tag}8u …and so is trash (its broken-link report would be partial)",
+                  r.returncode == 1 and r.stderr.startswith("refused: cannot prove the broken-link report is complete"), f"rc={r.returncode} {r.stderr}")
+            r = eng.run("set", "No Such Note", "k", "v")
+            check(f"{tag}8y a bare-name MISS under the lock refuses a write, never a definitive not-found",
+                  r.returncode == 1 and r.stderr.startswith("refused: cannot prove 'No Such Note' is absent") and next_of(r.stderr) == "vv doctor", f"rc={r.returncode} {r.stderr}")
+            r = eng.run("batch", stdin=json.dumps({"cmd": "resolve", "args": ["25000"]}) + "\n")
+            check(f"{tag}8t batch (multi-op) refuses rather than warns", '"exit": 1' in r.stdout and "refused: cannot prove" in r.stdout, r.stdout[:300])
+            r = eng.run("doctor")
+            check(f"{tag}8x `vv doctor` (the refusal's next step) names the unreadable directory", "unreadable: Hidden" in r.stdout, r.stdout + r.stderr)
             r = eng.run("resolve", "Vis/25000 - Seen")
             check(f"{tag}8'' an exact path still resolves under the same condition (control)", r.returncode == 0, r.stdout + r.stderr)
+            os.chmod(hidden, mode)
+            r = eng.run("doctor")
+            check(f"{tag}8w …and doctor reports none once readable", "unreadable: none" in r.stdout, r.stdout + r.stderr)
+            os.chmod(hidden, 0)
             r = eng.run("batch", stdin=json.dumps({"cmd": "orphans", "args": []}) + "\n" + json.dumps({"cmd": "resolve", "args": ["24996"]}) + "\n")
             os.chmod(hidden, mode)
             # the walk-error list is per WALK: an earlier op's unreadable directory is
@@ -452,10 +494,12 @@ def section_c(eng, tag):
                     importlib.reload(_vi)
                 check(f"{tag}8c the walk-error list describes THIS walk (reset per walk)", locked == ["Hidden"] and unlocked == [], (locked, unlocked))
             os.chmod(hidden, 0)
-            r = eng.run("resolve", "25000 - Seen")
+            r = eng.run("set", "25000 - Seen", "status", "x")
+            r2 = eng.run("head", "25000 - Seen")
             os.chmod(hidden, mode)
-            check(f"{tag}8d a bare-NAME hit under an incomplete walk is refused too (uniqueness unprovable)",
+            check(f"{tag}8d a bare-NAME write under an incomplete walk is refused too (uniqueness unprovable)",
                   r.returncode == 1 and r.stderr.startswith("refused: cannot prove '25000 - seen' is unique") and next_of(r.stderr) == "vv doctor", f"rc={r.returncode} {r.stderr}")
+            check(f"{tag}8d' …and a bare-NAME read warns and answers", r2.returncode == 0 and r2.stderr.startswith("warning: cannot prove '25000 - seen' is unique"), f"rc={r2.returncode} {r2.stderr}")
     else:
         print(f"SKIP {tag}8 unreadable-directory pin (not POSIX or running as root)")
     # C9: create never expands an id (last: it changes what 24995 resolves to)

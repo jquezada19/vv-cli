@@ -88,12 +88,27 @@ pub fn walk_checked(dir: &Path, out: &mut Vec<PathBuf>, exclude_sandbox: bool) -
     let mut complete = true;
     match fs::read_dir(dir) {
         Ok(rd) => {
-            for e in rd.flatten() {
+            for e in rd {
+                // an iterator error or an unreadable file type is an entry we
+                // could not evaluate: the walk is incomplete, never "a file"
+                let e = match e {
+                    Ok(e) => e,
+                    Err(_) => {
+                        complete = false;
+                        continue;
+                    }
+                };
                 let p = e.path();
                 let name = e.file_name().to_string_lossy().to_string();
                 // file_type() does NOT follow symlinks — parity with os.walk(followlinks=False):
                 // a symlinked directory is never descended (Codex parity audit 2026-08-27)
-                let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
+                let is_dir = match e.file_type() {
+                    Ok(t) => t.is_dir(),
+                    Err(_) => {
+                        complete = false;
+                        false
+                    }
+                };
                 if is_dir {
                     if name.starts_with('.')
                         || SKIP_DIRS.contains(&name.as_str())
