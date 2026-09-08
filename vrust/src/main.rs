@@ -76,26 +76,42 @@ pub const SKIP_DIRS: [&str; 5] = [".git", ".obsidian", ".claude", ".trash", "gra
 /// `exclude_sandbox` is a SEARCH-relevance choice, never a graph-correctness one:
 /// link/graph scans must see every note the Python side sees.
 pub fn walk_ex(dir: &Path, out: &mut Vec<PathBuf>, exclude_sandbox: bool) {
-    if let Ok(rd) = fs::read_dir(dir) {
-        for e in rd.flatten() {
-            let p = e.path();
-            let name = e.file_name().to_string_lossy().to_string();
-            // file_type() does NOT follow symlinks — parity with os.walk(followlinks=False):
-            // a symlinked directory is never descended (Codex parity audit 2026-08-27)
-            let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
-            if is_dir {
-                if name.starts_with('.')
-                    || SKIP_DIRS.contains(&name.as_str())
-                    || (exclude_sandbox && name == "Sandbox")
-                {
-                    continue;
+    walk_checked(dir, out, exclude_sandbox);
+}
+
+/// Like `walk_ex`, but reports whether EVERY directory could be listed. A
+/// resolver that claims a bare name or id is unique needs a complete walk —
+/// an unreadable directory may hold a second note — so `readpath::resolve`
+/// hands an incomplete walk to Python, which refuses (parity with
+/// `_walk_errors` in vv_impl.py, review round 2, 2026-09-07).
+pub fn walk_checked(dir: &Path, out: &mut Vec<PathBuf>, exclude_sandbox: bool) -> bool {
+    let mut complete = true;
+    match fs::read_dir(dir) {
+        Ok(rd) => {
+            for e in rd.flatten() {
+                let p = e.path();
+                let name = e.file_name().to_string_lossy().to_string();
+                // file_type() does NOT follow symlinks — parity with os.walk(followlinks=False):
+                // a symlinked directory is never descended (Codex parity audit 2026-08-27)
+                let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
+                if is_dir {
+                    if name.starts_with('.')
+                        || SKIP_DIRS.contains(&name.as_str())
+                        || (exclude_sandbox && name == "Sandbox")
+                    {
+                        continue;
+                    }
+                    if !walk_checked(&p, out, exclude_sandbox) {
+                        complete = false;
+                    }
+                } else if name.ends_with(".md") {
+                    out.push(p);
                 }
-                walk_ex(&p, out, exclude_sandbox);
-            } else if name.ends_with(".md") {
-                out.push(p);
             }
         }
+        Err(_) => complete = false,
     }
+    complete
 }
 
 fn score_one(

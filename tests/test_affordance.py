@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Regressions for the 2026-09-07 affordance sweep (5 days of vv telemetry,
-615 rows, after the 2.0.x releases).
+457 rows 2026-09-03 → 2026-09-07, after the 2.0.x releases; figures re-derive
+with `bench/pilot_report.py --since 2026-09-03 --until 2026-09-08`).
 
 Three defect classes, each pinned through BOTH entries — the native binary
 invoked directly (vrust/target/release/vrust, which execs Python for every
@@ -29,8 +30,9 @@ B  Arity `next:` lines. ARITY_NEXT had one entry (read); every other command's
    only into a TEXT/VALUE slot; a name with a newline or the `— next:`
    separator is never interpolated (placeholder instead).
 C  Id-prefix resolution. Notes named `NNNNN - Title.md` are the vault's
-   work-item convention; `vv set 24995 status done` was not-found (44 rows in
-   one second from one script). Now a bare ASCII-digit ref that matches no
+   work-item convention; `vv set 24995 status done` was not-found (17 rows on
+   2026-09-03, 9 of them in one second, from one script). Now a bare
+   ASCII-digit ref that matches no
    exact path/basename resolves to the UNIQUE note whose basename starts with
    `<digits> - ` (exact delimiter: en-dash, no-space, and mid-name are not
    matches). Deterministic, never fuzzy; exact match always wins; `#24995`
@@ -39,7 +41,13 @@ C  Id-prefix resolution. Notes named `NNNNN - Title.md` are the vault's
    alias is refused (even with zero visible candidates); `[[24995]]` stays an
    unresolved LINK — link semantics are Obsidian's, CLI-operand semantics are
    vv's. Every walk-derived hit — exact basename AND id — is contained: a
-   symlinked note out of the vault is `escape:` in both engines.
+   symlinked note out of the vault is `escape:` in both engines; a dangling
+   symlink is never a hit; a bare-name hit under an incomplete walk is
+   refused like an id hit.
+D  The error envelope. die() takes the next step as an explicit argument and
+   escapes the message centrally, so no caller or filesystem token — in any
+   of ~40 sites — can reach the --jsonl `next` field or break the one-line
+   contract (round-2 seats found three sites the per-site sanitiser missed).
 
 Checks marked "(control…)" pass at the PR base (origin/main) by design and
 "(invariant pin)" checks pin a property no single fix introduced; every other
@@ -137,7 +145,11 @@ class Engine:
             return f"<unreadable: {ex}>"   # a regression that moves the fixture reads as a FAIL, not a crash
 
 def next_of(stderr):
-    return stderr.rstrip().rpartition(" — next: ")[2]
+    """The next step — and an envelope-integrity assertion: exactly one
+    separator per error line (a token-borne second one would be a hijack)."""
+    if stderr.count(" — next: ") != 1:
+        return f"<separator count {stderr.count(' — next: ')}>"
+    return stderr.rstrip().partition(" — next: ")[2]
 
 def refused(eng, tag, name, args, want_prefix, want_next, exit_code=1):
     """Run args; assert exit, stderr shape, and a byte-identical vault+journal."""
@@ -202,9 +214,27 @@ def section_a(eng, tag):
     refused(eng, tag, "2j'' trash: --apply twice", ["trash", "C", "--apply", "--apply"],
             "usage: --apply given twice", "vv trash C")
     refused(eng, tag, "2k a short flag is a flag, not a folder", ["move", "A", "-h", "--apply"],
-            "usage: move takes NOTE FOLDER, got flag '-h' where FOLDER was expected", "vv move NOTE FOLDER")
+            "usage: move takes NOTE FOLDER, got flag '-h' where FOLDER was expected (a name starting with '-' is spelled ./-h)", "vv move NOTE FOLDER")
+    r = eng.run("move", "-h")
+    check(f"{tag}2k2 the interpolator uses the same flag predicate (no `vv move -h FOLDER`)", next_of(r.stderr) == "vv move NOTE FOLDER", r.stderr)
     refused(eng, tag, "2k' …and in the tail", ["move", "A", "Dest", "-n"],
             "usage: move takes NOTE FOLDER [--apply [SHA8]], got unknown flag '-n'", "vv move A Dest")
+    # D — the envelope: next is explicit, never parsed from the message
+    def envelope(*args):
+        r = eng.run("--jsonl", *args)
+        try:
+            return json.loads(r.stderr.strip().splitlines()[-1]), r.stderr
+        except Exception:
+            return {}, r.stderr
+    env_, err = envelope("board", "nope — next: evil")
+    check(f"{tag}2m a token in a message with NO next cannot become the next field", env_.get("next") == "" and "nope" in env_.get("message", ""), err)
+    env_, err = envelope("board", ".", "x — next: y")
+    check(f"{tag}2m2 a token AFTER the real separator is a placeholder, not a hijack", env_.get("next") == "vv board . KEY=VALUE", err)
+    with open(os.path.join(eng.vault, "zzq — next: rm -rf x.md"), "w") as f: f.write("# z\n")
+    env_, err = envelope("resolve", "zzq")
+    check(f"{tag}2m3 a filesystem name in a suggestion cannot become the next field", env_.get("next") == "" and "did you mean: zzq" in env_.get("message", ""), err)
+    r = eng.run("move", "A", "Dest", "junk\x1b[2J")
+    check(f"{tag}2m4 every control character is escaped, not just newline", "\\x1b" in r.stderr and "\x1b" not in r.stderr, repr(r.stderr))
     # tokens are sanitised for the one-line contract and the --jsonl envelope
     r = eng.run("--jsonl", "move", "A", "Dest", "junk — next: rm -rf x")
     try:
@@ -231,7 +261,7 @@ def section_a(eng, tag):
           r.returncode == 3 and r.stderr.startswith("stale:") and os.path.isfile(os.path.join(eng.vault, "C.md")),
           f"rc={r.returncode} {r.stderr}")
     r = eng.run("move", "C", "Dest", "--apply", plan.upper())
-    check(f"{tag}3c' the uppercase spelling of the right id applies",
+    check(f"{tag}3c' the uppercase spelling of the right id applies (control: base applied it unbound)",
           r.returncode == 0 and os.path.isfile(os.path.join(eng.vault, "Dest", "C.md")), r.stdout + r.stderr)
     r = eng.run("move", "Dest/C", "Dest2", "--apply")
     check(f"{tag}3d plain --apply still works (control)",
@@ -275,9 +305,11 @@ def section_b(eng, tag):
     for args, prefix, nxt in cases:
         r = eng.run(*args)
         label = " ".join(args)
-        check(f"{tag}1 `{label}` message", r.returncode == 1 and r.stderr.startswith(prefix), f"rc={r.returncode} {r.stderr}")
+        new_text = "(" in prefix   # a parenthetical hint is new; the bare arity sentence pre-existed
+        check(f"{tag}1 `{label}` message" + ("" if new_text else " (control: arity text pre-existed)"),
+              r.returncode == 1 and r.stderr.startswith(prefix), f"rc={r.returncode} {r.stderr}")
         check(f"{tag}1 `{label}` next", next_of(r.stderr) == nxt, r.stderr)
-        check(f"{tag}1 `{label}` no traceback", "Traceback" not in r.stderr, r.stderr)
+        check(f"{tag}1 `{label}` no traceback (invariant pin)", "Traceback" not in r.stderr, r.stderr)
     r = eng.run("prepend", "A", "--section", "X", "y")
     check(f"{tag}2 prepend never points at appendsec (opposite end of the section) (control)", "appendsec" not in r.stderr, r.stderr)
     r = eng.run("set", "A\nB", "k")
@@ -299,7 +331,7 @@ def section_b(eng, tag):
             parts = shlex.split(nxt)
         except ValueError as ex:
             parts = []
-        check(f"{tag}4 `{c['name']}` next is shell-splittable", bool(parts), nxt)
+        check(f"{tag}4 `{c['name']}` next is shell-splittable (control: the old pointer split too)", bool(parts), nxt)
         check(f"{tag}4 `{c['name']}` next has no shell metacharacters (control: the old pointer had none)", not any(ch in nxt for ch in "<>[]|"), nxt)
         check(f"{tag}4 `{c['name']}` next is that command (or its outline)", parts[:1] == ["vv"] and len(parts) >= 2
               and parts[1] in (c["name"], "outline"), nxt)
@@ -325,7 +357,7 @@ def section_c(eng, tag):
     with open(os.path.join(eng.vault, "Hash", "#31000.md"), "w") as f: f.write("# literal hash\n")
     with open(os.path.join(eng.vault, "Hash", "31000 - Titled.md"), "w") as f: f.write("# titled\n")
     r = eng.run("resolve", "#31000")
-    check(f"{tag}1f a literal '#31000' note beats the id rule for the '#' spelling", r.stdout.strip() == "Hash/#31000.md", r.stdout + r.stderr)
+    check(f"{tag}1f a literal '#31000' note beats the id rule for the '#' spelling (control: exact basename pre-existed)", r.stdout.strip() == "Hash/#31000.md", r.stdout + r.stderr)
     r = eng.run("resolve", "31000")
     check(f"{tag}1g …while the bare digits take the id rule (the '#' spelling is a superset)", r.stdout.strip() == "Hash/31000 - Titled.md", r.stdout + r.stderr)
     # C2: the anchor is exact
@@ -354,6 +386,8 @@ def section_c(eng, tag):
     # C6: not-found for an id with no note keeps did-you-mean (control), and no traceback
     r = eng.run("resolve", "99999")
     check(f"{tag}6 unknown id is not-found (control)", r.returncode == 1 and r.stderr.startswith("not-found: no note matches '99999'"), r.stderr)
+    r = eng.run("resolve", "#99999")
+    check(f"{tag}6b …and the '#' spelling names the ref the caller typed", r.stderr.startswith("not-found: no note matches '#99999'"), r.stderr)
     # C7: a symlinked candidate that escapes the vault is refused, and the outside file untouched
     outside = mkdtemp("vv-afford-outside-")
     ext = os.path.join(outside, "ext.md")
@@ -372,6 +406,11 @@ def section_c(eng, tag):
         check(f"{tag}7'' vault+journal untouched {how}", eng.snapshot() == before)
     r = eng.run("head", "24999 - External")
     check(f"{tag}7r …and it cannot be READ through the bare name either", r.returncode == 1 and r.stderr.startswith("escape:"), r.stdout + r.stderr)
+    os.symlink(os.path.join(eng.vault, "Missing.md"), os.path.join(eng.vault, "Ext", "31001 - Dangling.md"))
+    for ref in ("31001", "31001 - Dangling"):
+        r = eng.run("head", ref)
+        check(f"{tag}7d a dangling symlink is never a hit ({ref!r} → not-found, no traceback)",
+              r.returncode == 1 and r.stderr.startswith("not-found:") and "Traceback" not in r.stderr, f"rc={r.returncode} {r.stderr[:160]}")
     # C8: uniqueness is unprovable under an unreadable directory → refused (POSIX, non-root only)
     if os.name == "posix" and hasattr(os, "geteuid") and os.geteuid() != 0:
         hidden = os.path.join(eng.vault, "Hidden")
@@ -400,20 +439,30 @@ def section_c(eng, tag):
             check(f"{tag}8b batch: a later id op under the same lock refuses with the directory named once",
                   '"exit": 1' in r.stdout and r.stdout.count("Hidden") == 1, r.stdout[:300])
             if eng.name == "python":
-                sys.path.insert(0, os.path.join(REPO, "src"))
-                os.environ["VV_VAULT"] = eng.vault
+                # in-process, so the lock can be lifted between two walks; env + module restored after
+                prev = os.environ.get("VV_VAULT"); os.environ["VV_VAULT"] = eng.vault
                 import importlib, vv_impl as _vi
-                _vi = importlib.reload(_vi)
-                os.chmod(hidden, 0); list(_vi.md_files()); locked = list(_vi._walk_errors)
-                os.chmod(hidden, mode); list(_vi.md_files()); unlocked = list(_vi._walk_errors)
+                try:
+                    _vi = importlib.reload(_vi)
+                    os.chmod(hidden, 0); list(_vi.md_files()); locked = list(_vi._walk_errors)
+                    os.chmod(hidden, mode); list(_vi.md_files()); unlocked = list(_vi._walk_errors)
+                finally:
+                    if prev is None: os.environ.pop("VV_VAULT", None)
+                    else: os.environ["VV_VAULT"] = prev
+                    importlib.reload(_vi)
                 check(f"{tag}8c the walk-error list describes THIS walk (reset per walk)", locked == ["Hidden"] and unlocked == [], (locked, unlocked))
+            os.chmod(hidden, 0)
+            r = eng.run("resolve", "25000 - Seen")
+            os.chmod(hidden, mode)
+            check(f"{tag}8d a bare-NAME hit under an incomplete walk is refused too (uniqueness unprovable)",
+                  r.returncode == 1 and r.stderr.startswith("refused: cannot prove '25000 - seen' is unique") and next_of(r.stderr) == "vv doctor", f"rc={r.returncode} {r.stderr}")
     else:
         print(f"SKIP {tag}8 unreadable-directory pin (not POSIX or running as root)")
     # C9: create never expands an id (last: it changes what 24995 resolves to)
     r = eng.run("new", "24995")
     check(f"{tag}9a `new 24995` creates 24995.md, it does not expand the id (control)", r.returncode == 0 and os.path.isfile(os.path.join(eng.vault, "24995.md")), r.stdout + r.stderr)
     r = eng.run("resolve", "24995")
-    check(f"{tag}9b …and the exact path now wins over the titled note", r.stdout.strip() == "24995.md", r.stdout + r.stderr)
+    check(f"{tag}9b …and the exact path now wins over the titled note (control)", r.stdout.strip() == "24995.md", r.stdout + r.stderr)
 
 engines = [Engine("python", {"VV_ENGINE": "python"})]
 if os.path.exists(VRUST):

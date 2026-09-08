@@ -8,60 +8,10 @@ changes an exit code, is a major change.
 
 ## [Unreleased]
 
-Affordance sweep of the five days after 2.0.1 (615 telemetry rows, 2026-09-03
-→ 2026-09-07). Three fixes; each is pinned through both entries by
-`tests/test_affordance.py`, and a seven-seat review round added a fourth.
-
-### Changed
-Exit-code transitions — CLI surface under this file's header. Whether the
-next release is a MAJOR or treats these as bug fixes is the release PR's
-call (a four-seat design review split 2–2 on exactly that). Measured by an
-A/B of every listed input against 2.0.1:
-- **0 → 1** — `move`/`rename`/`trash` with an extra positional (`vv move A B
-  C Dest --apply`), a non-hex token after `--apply` (`--apply abc`), an
-  unknown flag (`--force`, `-n`, `--apply=…`), `--apply` twice, or a flag in
-  the FOLDER/NEWNAME slot (`vv move A --apply`). Two of these used to WRITE:
-  the extra-positional form with `--apply` used note B as the destination
-  folder (2026-09-07, four stray folders at the vault root), and the non-hex
-  form dropped the plan id and applied UNBOUND. The rest exited 0 as a
-  dry-run without writing.
-- **3 → 1** — junk after a valid plan id (`--apply deadbeef C`): a stale-plan
-  refusal is now a usage refusal (the tail is validated before the plan).
-- **0 → 3** — an UPPERCASE 8-hex id that does not match the plan
-  (`--apply DEADBEEF`): the id was lowercase-only, so uppercase was ignored
-  and the apply went ahead unbound; it is now bound and `stale:`.
-- **1 → 0** — a bare digit ref that names a unique `NNNNN - Title` note
-  (`vv set 24995 status done`), and the `#NNNNN` spelling wherever `NNNNN`
-  would have resolved (`'#24998'` → a literal `24998.md`). A script whose
-  fallback branch fired on not-found now writes instead.
-- **0 → 1** — a bare name or id whose unique hit is a symlink to a file
-  OUTSIDE the vault is now `escape:` in both engines (Python refuses, the
-  native resolver hands the case to Python). Typed paths were always
-  contained; the walk-derived alias was not, and `set`/`append`/`patch`
-  through it wrote outside the vault. Found in review (two seats).
-
-### Fixed
-- The relocate tail is a grammar (`--apply` optionally followed by ONE 8-hex
-  plan id, nothing else), validated before the note resolves or a plan is
-  printed, so a syntax error never reports as `not-found:` and a dry-run never
-  previews the wrong move. Short flags (`-h`) count as flags. A caller token
-  in the message is escaped (newlines, the `— next:` separator) so the error
-  stays one line and the `--jsonl` envelope's `next` field cannot be
-  hijacked; `die()` now splits the envelope from the right.
-- Arity misses name a runnable next step derived from the command table —
-  the caller's own operands, shell-quoted, in the slots they filled
-  (`vv set A status VALUE`); surplus arguments with no flag among them are
-  joined into a TEXT/VALUE last slot as one quoted argument (`vv append A
-  'hello world'`) and otherwise dropped (`vv props status`, never `vv props
-  'status Work Items'`); an optional-only command falls back to its bare
-  form (`vv orphans`); `append … --section` points at `appendsec`; `patch`,
-  like `read`, points at the note's outline. The generic "run vv with no
-  args for the command list" pointer is gone. Generated synopsis text
-  carries no bracket, redirect, or placeholder-in-brackets (a quoted operand
-  may: `vv read '[x]'` is correct quoting). A name with a newline is never
-  interpolated. `move NOTE` no longer advertises "2+" positionals.
-- The table entry for `trash` says `[--apply [SHA8]]` — a bare `--apply` was
-  always accepted; the synopsis overstated (pinned).
+Affordance sweep of the five days after 2.0.1 (457 telemetry rows,
+2026-09-03 → 2026-09-07; re-derive with `bench/pilot_report.py --since
+2026-09-03 --until 2026-09-08`). Three fixes, pinned through both entries by
+`tests/test_affordance.py`; two seven-seat review rounds added the rest.
 
 ### Added
 - Id-prefix resolution: a `NOTE` operand of ASCII digits (`24995`, or the
@@ -72,9 +22,75 @@ A/B of every listed input against 2.0.1:
   spelling; a literal `24995.md` wins both); two candidates refuse
   `ambiguous:` with a runnable `next:`; an unreadable directory makes
   uniqueness — and absence — unprovable and the lookup is `refused:`,
-  naming the directory. This is a filename convention, not link semantics —
+  naming the directory. A filename convention, not link semantics:
   `[[24995]]` stays an unresolved link, and `new 24995` still creates
-  `24995.md`.
+  `24995.md`. Motivation: 17 not-found rows on 2026-09-03, 9 of them in one
+  second, from a `vv set <id> …` loop.
+
+### Changed
+Exit-code transitions — CLI surface under this file's header. Whether the
+next release is a MAJOR or treats these as bug fixes is the release PR's
+call (a four-seat design review split 2–2 on exactly that). Measured by an
+A/B of every listed input against 2.0.1, both engines:
+- **0 → 1** — `move`/`rename`/`trash` with an extra positional (`vv move A B
+  C Dest --apply`), a non-hex token after `--apply` (`--apply abc`), an
+  unknown flag (`--force`, `-n`, `--apply=…`), `--apply` twice, or a flag in
+  the FOLDER/NEWNAME slot (`vv move A --apply`). Three of these used to
+  WRITE: the extra-positional form with `--apply` used note B as the
+  destination folder (2026-09-07, four stray folders at the vault root); the
+  non-hex form dropped the plan id and applied UNBOUND; `--apply --apply`
+  applied unbound too. The rest exited 0 as a dry-run without writing.
+- **3 → 1** — junk after a valid plan id (`--apply deadbeef C`): a stale-plan
+  refusal is now a usage refusal (the tail is validated before the plan).
+- **0 → 3** — an UPPERCASE 8-hex id that does not match the plan
+  (`--apply DEADBEEF`): the id was lowercase-only, so uppercase was ignored
+  and the apply went ahead unbound; it is now bound and `stale:`.
+- **1 → 0** — a bare digit ref that names a unique `NNNNN - Title` note
+  (`vv set 24995 status done`), and the `#NNNNN` spelling wherever `NNNNN`
+  would have resolved (`'#24998'` → a literal `24998.md`). A script whose
+  fallback branch fired on not-found now writes instead.
+- **0 → 1** — a bare name or id whose unique hit is a symlink to a file
+  OUTSIDE the vault is `escape:` in both engines, for reads (`head`, `show`,
+  `read`) as well as writes. Typed paths were always contained; the
+  walk-derived alias was not, and `set`/`append`/`patch` through it wrote
+  outside the vault. Found in review.
+- **0 → 1** — a bare-name hit under an incomplete walk (an unreadable
+  directory somewhere in the vault) is `refused:` like an id hit, in both
+  engines — the directory may hold a second note, so "unique" is unprovable.
+- A dangling symlink whose name matches is no longer a hit: `not-found:`
+  (exit 1, as before the change) instead of a resolved path followed by a
+  traceback on the read.
+
+### Fixed
+- The relocate tail is a grammar (`--apply` optionally followed by ONE 8-hex
+  plan id, nothing else), validated before the note resolves or a plan is
+  printed, so a syntax error never reports as `not-found:` and a dry-run never
+  previews the wrong move. Short flags (`-h`) count as flags; a name that
+  starts with `-` is spelled `./-name`, and the refusal says so.
+- The error envelope: `die()` takes the next step as an explicit argument
+  and never parses it back out of the message, so no caller or filesystem
+  token — in any of the ~40 sites that interpolate one — can become the
+  `--jsonl` `next` field (three pre-existing sites could: `board`, `orphans`,
+  `props`' folder scope, and every `did you mean:` suggestion). The message
+  is escaped centrally: every control character (and U+2028/2029) rendered
+  as `\n`/`\x1b`-style escapes, a literal ` — next: ` inside a token
+  neutralised, so an error is always one line. A token that would carry a
+  control character or the separator into a runnable next step is replaced
+  by its placeholder.
+- Arity misses name a runnable next step derived from the command table —
+  the caller's own operands, shell-quoted, in the slots they filled
+  (`vv set A status VALUE`); surplus arguments with no flag among them are
+  joined into a TEXT/VALUE last slot as one quoted argument (`vv append A
+  'hello world'`) and otherwise dropped (`vv props status`, never `vv props
+  'status Work Items'`); an optional-only command falls back to its bare
+  form (`vv orphans`); `append … --section` points at `appendsec`; `patch`,
+  like `read`, points at the note's outline. The generic "run vv with no
+  args for the command list" pointer is gone from arity errors. Generated
+  synopsis text carries no bracket, redirect, or placeholder-in-brackets (a
+  quoted operand may: `vv read '[x]'` is correct quoting). `move NOTE` no
+  longer advertises "2+" positionals.
+- The table entry for `trash` says `[--apply [SHA8]]` — a bare `--apply` was
+  always accepted; the synopsis overstated (pinned).
 
 ## [2.0.1] — 2026-09-06
 
