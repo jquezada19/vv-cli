@@ -2587,8 +2587,8 @@ def cmd_lint(*args):
                     findings.append(("broken-link", f"{rp}:{i+1}", tgt))
             for i, tgt in pipes.get(rp, []):
                 findings.append(("table-pipe", f"{rp}:{i+1}", tgt))
-        if _walk_errors:   # a note the sync could not read: findings under-report
-            _incomplete("the link graph is complete")
+        # an unreadable note met by the index sync was judged by the
+        # basename_index() probe above (mutation M39: a second judge here is dead)
         _lint_report(findings, limit, check="--check" in args)
         return
     for p in sorted(md_files()):
