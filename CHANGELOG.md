@@ -87,9 +87,9 @@ A/B of every listed input against 2.0.1, both engines:
   escaped like an error). A note that cannot be read is `refused:` in the
   error grammar instead of a traceback (pre-existing); an unreadable note
   met by a corpus scan (the link graph, `board`/`props`/`tags`, `deadends`,
-  `lint`) is recorded like an unreadable directory — the scan warns on a
-  read and refuses on a write instead of skipping it silently, in both
-  engines (a rename over one used to rewrite the readable half of the
+  `lint` — whose findings otherwise under-report without a word) is
+  recorded like an unreadable directory — the scan warns on a read and
+  refuses on a write instead of skipping it silently, in both engines (a rename over one used to rewrite the readable half of the
   backlinks and verify "clean"). A note that is not valid UTF-8 is NOT
   unreadable evidence: the link grammar is ASCII-delimited, so every corpus
   scan in both engines (and the native cache rows) decodes it lossily and
