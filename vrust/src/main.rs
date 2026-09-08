@@ -76,30 +76,86 @@ pub const SKIP_DIRS: [&str; 5] = [".git", ".obsidian", ".claude", ".trash", "gra
 /// `exclude_sandbox` is a SEARCH-relevance choice, never a graph-correctness one:
 /// link/graph scans must see every note the Python side sees.
 pub fn walk_ex(dir: &Path, out: &mut Vec<PathBuf>, exclude_sandbox: bool) {
-    if let Ok(rd) = fs::read_dir(dir) {
-        for e in rd.flatten() {
-            let p = e.path();
-            let name = e.file_name().to_string_lossy().to_string();
-            // file_type() does NOT follow symlinks — parity with os.walk(followlinks=False):
-            // a symlinked directory is never descended (Codex parity audit 2026-08-27)
-            let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
-            if is_dir {
-                if name.starts_with('.')
-                    || SKIP_DIRS.contains(&name.as_str())
-                    || (exclude_sandbox && name == "Sandbox")
-                {
-                    continue;
+    walk_checked(dir, out, exclude_sandbox, false);
+}
+
+/// Like `walk_ex`, but reports whether EVERY directory could be listed. A
+/// resolver that claims a bare name or id is unique needs a complete walk —
+/// an unreadable directory may hold a second note — so `readpath::resolve`
+/// hands an incomplete walk to Python, which refuses (parity with
+/// `_walk_errors` in vv_impl.py).
+/// A corpus scan's read: non-UTF-8 decoded lossily (the link grammar is
+/// ASCII, python's `_read_lossy` does the same), `None` only on an I/O error.
+pub fn read_lossy(fp: &Path) -> Option<String> {
+    fs::read(fp)
+        .ok()
+        .map(|b| String::from_utf8_lossy(&b).into_owned())
+}
+
+/// `check_read`: also treat a note we cannot open as incomplete evidence.
+/// Only the graph reads ask for it — they read every note anyway; a resolver
+/// needs names, not contents, and must not pay an open per note (an 18×
+/// regression on `resolve` was measured when the check sat in the walker).
+pub fn walk_checked(
+    dir: &Path,
+    out: &mut Vec<PathBuf>,
+    exclude_sandbox: bool,
+    check_read: bool,
+) -> bool {
+    let mut complete = true;
+    match fs::read_dir(dir) {
+        Ok(rd) => {
+            for e in rd {
+                // an entry we could not evaluate marks the walk incomplete: a
+                // failed iterator step is skipped, a failed file_type() is
+                // kept by name (it may be a note). readpath/graph discard an
+                // incomplete walk; the other walk_ex callers never needed
+                // completeness and keep the partial list
+                let e = match e {
+                    Ok(e) => e,
+                    Err(_) => {
+                        complete = false;
+                        continue;
+                    }
+                };
+                let p = e.path();
+                let name = e.file_name().to_string_lossy().to_string();
+                // file_type() does NOT follow symlinks — parity with os.walk(followlinks=False):
+                // a symlinked directory is never descended (parity with python)
+                let is_dir = match e.file_type() {
+                    Ok(t) => t.is_dir(),
+                    Err(_) => {
+                        complete = false;
+                        false
+                    }
+                };
+                if is_dir {
+                    if name.starts_with('.')
+                        || SKIP_DIRS.contains(&name.as_str())
+                        || (exclude_sandbox && name == "Sandbox")
+                    {
+                        continue;
+                    }
+                    if !walk_checked(&p, out, exclude_sandbox, check_read) {
+                        complete = false;
+                    }
+                } else if name.ends_with(".md") {
+                    // a note we cannot open is incomplete evidence too: the
+                    // Python fallback records it and warns or refuses
+                    if check_read && fs::File::open(&p).is_err() {
+                        complete = false;
+                    }
+                    out.push(p);
                 }
-                walk_ex(&p, out, exclude_sandbox);
-            } else if name.ends_with(".md") {
-                out.push(p);
             }
         }
+        Err(_) => complete = false,
     }
+    complete
 }
 
 fn score_one(
-    fp: &std::path::PathBuf,
+    fp: &Path,
     root: &std::path::PathBuf,
     path_terms: &[&String],
     body_terms: &[&String],
@@ -114,7 +170,7 @@ fn score_one(
     if !path_terms.iter().all(|t| rl.contains(t.as_str())) {
         return None;
     }
-    let text = fs::read_to_string(fp).ok()?;
+    let text = read_lossy(fp)?; // python parity: search reads lossily
     let low = text.to_lowercase();
     let base = rl
         .rsplit('/')
@@ -303,9 +359,18 @@ fn cmd_linkscan(args: &[String]) {
     files.sort();
     let mut buf = String::with_capacity(1 << 20);
     for fp in &files {
-        let text = match fs::read_to_string(fp) {
-            Ok(t) => t,
-            Err(_) => continue,
+        // non-UTF-8 is decoded lossily and scanned (the link grammar is ASCII;
+        // python refuses to REWRITE such a note at plan time); only an I/O
+        // failure is a `u` row — incomplete evidence, never a vanished note
+        let text = match read_lossy(fp) {
+            Some(t) => t,
+            None => {
+                println!(
+                    "{}\t0\tu\t",
+                    fp.strip_prefix(&root).unwrap_or(fp).to_string_lossy()
+                );
+                continue;
+            }
         };
         let rel = fp
             .strip_prefix(&root)

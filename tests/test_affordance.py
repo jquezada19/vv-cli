@@ -1,0 +1,714 @@
+#!/usr/bin/env python3
+"""Regressions for the affordance sweep (5 days of vv telemetry, 457 rows,
+after the 2.0.x releases; `bench/pilot_report.py` over that window re-derives
+the figures).
+
+Three defect classes, each pinned through BOTH entries — the native binary
+invoked directly (vrust/target/release/vrust, which execs Python for every
+case here and falls back on 0/2+ name hits) and `VV_ENGINE=python src/vv.py`
+— in separate throwaway vaults, so one engine's mutation can never stand in
+as the other's control. (`VV_ENGINE=rust` on src/vv.py only routes `search`
+to the binary — it is not a native entry.)
+
+A  Relocate tails. `cmd_move(ref, dest_folder, *args)` accepted extra
+   positionals silently: once `vv move A B C D Dest --apply` used
+   note B as the destination folder — four stray folders at the vault root,
+   exit 0. A second silent path: `_plan_token` returned None for a non-hex
+   token after --apply, so `--apply abc` (a typo'd plan id) degraded to an
+   UNBOUND apply. Now: the tail is a grammar (`--apply` optionally followed by
+   one 8-hex id, nothing else), validated BEFORE the note resolves or a plan is
+   printed; a flag in an operand slot is refused; a valid-but-stale id is still
+   exit 3 (the boundary between usage and stale is pinned).
+B  Arity `next:` lines. ARITY_NEXT had one entry (read); every other command's
+   arity miss ended with "run vv with no args for the command list" — one
+   agent hit `append` four times in two minutes (5, 4, 1, 0 args) hunting for
+   a --section flag. Now the next step is derived from COMMAND_TABLE: the
+   caller's own operands interpolated, shell-quoted, no placeholders-in-
+   brackets, no `<stdin` redirect hazard: generated SYNOPSIS text carries no
+   shell metacharacters (a quoted operand may — `vv read '[x]'` is correct);
+   B4 sweeps the whole table's zero-arg form. Surplus arguments are joined
+   only into a TEXT/VALUE slot; a name with a newline or the `— next:`
+   separator is never interpolated (placeholder instead).
+C  Id-prefix resolution. Notes named `NNNNN - Title.md` are the vault's
+   work-item convention; `vv set 24995 status done` was not-found (17 rows in
+   one day, 9 of them in one second, from one script). Now a bare
+   ASCII-digit ref that matches no
+   exact path/basename resolves to the UNIQUE note whose basename starts with
+   `<digits> - ` (exact delimiter: en-dash, no-space, and mid-name are not
+   matches). Deterministic, never fuzzy; exact match always wins; `#24995`
+   is the same ref; the candidate is vault-contained (a symlink out is
+   `escape:`); an unreadable directory makes uniqueness unprovable — a write
+   through the alias is refused (even with zero visible candidates) and a read
+   answers with a warning; `[[24995]]` stays an
+   unresolved LINK — link semantics are Obsidian's, CLI-operand semantics are
+   vv's. Every walk-derived hit — exact basename AND id — is contained: a
+   symlinked note out of the vault is `escape:` in both engines; a dangling
+   symlink is never a hit; a bare-name hit under an incomplete walk warns or
+   refuses like an id hit, and every link-graph consumer (relocations, the
+   graph reads) inherits the same probe through basename_index().
+D  The error envelope. die() takes the next step as an explicit argument and
+   escapes the message centrally, so no caller or filesystem token — in any
+   of ~40 sites — can reach the --jsonl `next` field or break the one-line
+   contract (three sites had escaped the per-site sanitiser).
+
+Checks marked "(control…)" pass at the PR base (origin/main) by design and
+"(invariant pin)" checks pin a property no single fix introduced; every other
+check fails at the base or with its fix reverted (mutation pass, per-arm
+counts recorded in the PR).
+"""
+import os, sys, json, shlex, shutil, stat, subprocess, tempfile, atexit
+
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+VV = os.path.join(REPO, "src", "vv.py")
+VRUST = os.path.join(REPO, "vrust", "target", "release", "vrust")
+sys.path.insert(0, os.path.join(REPO, "src"))
+
+_TMP = []
+def mkdtemp(prefix):
+    d = tempfile.mkdtemp(prefix=prefix); _TMP.append(d); return d
+_RESTORE = []   # (path, mode) to chmod back before rmtree
+def _cleanup():
+    for p, m in _RESTORE:
+        try: os.chmod(p, m)
+        except OSError: pass
+    for d in _TMP:
+        shutil.rmtree(d, True)
+atexit.register(_cleanup)
+
+fails = []
+def check(name, cond, detail=""):
+    print(("PASS " if cond else "FAIL ") + name + (f"  [{str(detail)[:200]}]" if detail and not cond else ""))
+    if not cond: fails.append(name)
+
+NOTES = {
+    "A.md": "---\nstatus: open\n---\n# A\n\n[[B]]\n",
+    "B.md": "# B\n",
+    "C.md": "# C\n",
+    "Work Items/24995 - Some title.md": "---\nstatus: open\n---\n# T\n",
+    "Work Items/24996 - Other.md": "# T2\n",
+    "Dup/24997 - X.md": "# X\n",
+    "Dup2/24997 - Y.md": "# Y\n",
+    "Lit/24998.md": "# stub\n",
+    "Lit/24998 - Foo.md": "# titled\n",
+    "Foo - Bar.md": "# FB\n",
+    "Link.md": "# L\n\n[[24995]]\n",
+    "Short/249 - Old.md": "# old\n",
+    "Dash/25001 – EnDash.md": "# en\n",
+    "Dash/25002-NoSpace.md": "# ns\n",
+    "Dash/x 25003 - Mid.md": "# mid\n",
+    "Dup.md": "# D\n\n## Same\n\na\n\n## Same\n\nb\n",
+}
+
+class Engine:
+    def __init__(self, name, env):
+        self.name, self.env = name, env
+        self.vault = mkdtemp(f"vv-afford-{name}-vault-")
+        self.journals = mkdtemp(f"vv-afford-{name}-journals-")
+        self.index = mkdtemp(f"vv-afford-{name}-index-")
+        for relp, body in NOTES.items():
+            p = os.path.join(self.vault, relp)
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            with open(p, "w") as f:
+                f.write(body)
+        for d in ("Dest", "Dest2"):
+            os.makedirs(os.path.join(self.vault, d))
+
+    def run(self, *args, stdin=None, env=None):
+        e = dict(os.environ, VV_VAULT=self.vault, VV_NO_METRICS="1", VV_INDEX_ROOT=self.index,
+                 VV_JOURNAL_ROOT=self.journals, **self.env, **(env or {}))
+        if not (env or {}).get("VV_NO_INDEX"):
+            e.pop("VV_NO_INDEX", None)
+        entry = [VRUST] if self.name == "rust" else [sys.executable, VV]
+        # stdin is ALWAYS a closed pipe: `batch`/`patch` read it, and an inherited
+        # open stdin (a background runner's) blocks the suite forever.
+        return subprocess.run([*entry, *args], capture_output=True, text=True, env=e,
+                              input=stdin if stdin is not None else "", timeout=60)
+
+    def snapshot(self):
+        """Every file's bytes + every directory, vault and journal root. A
+        refusal must leave BOTH byte-identical — not merely 'no folder created'."""
+        snap = {}
+        for root in (self.vault, self.journals):
+            for dp, dns, fns in os.walk(root):
+                for dn in dns:
+                    snap[os.path.join(dp, dn) + "/"] = None
+                for fn in fns:
+                    p = os.path.join(dp, fn)
+                    try:
+                        with open(p, "rb") as f:
+                            snap[p] = f.read()
+                    except OSError:
+                        snap[p] = "<unreadable>"
+        return snap
+
+    def read(self, relp):
+        try:
+            with open(os.path.join(self.vault, relp)) as f:
+                return f.read()
+        except OSError as ex:
+            return f"<unreadable: {ex}>"   # a regression that moves the fixture reads as a FAIL, not a crash
+
+def next_of(stderr):
+    """The next step — and an envelope-integrity assertion: exactly one
+    separator per error line (a token-borne second one would be a hijack)."""
+    if stderr.count(" — next: ") != 1:
+        return f"<separator count {stderr.count(' — next: ')}>"
+    return stderr.rstrip().partition(" — next: ")[2]
+
+def refused(eng, tag, name, args, want_prefix, want_next, exit_code=1):
+    """Run args; assert exit, stderr shape, and a byte-identical vault+journal."""
+    before = eng.snapshot()
+    r = eng.run(*args)
+    check(f"{tag}{name} exit {exit_code}", r.returncode == exit_code, f"rc={r.returncode} {r.stderr[:160]}")
+    check(f"{tag}{name} message", r.stderr.startswith(want_prefix), r.stderr)
+    if want_next is not None:
+        check(f"{tag}{name} next", next_of(r.stderr) == want_next, r.stderr)
+    check(f"{tag}{name} no plan printed", "plan " not in r.stdout, r.stdout)
+    check(f"{tag}{name} vault+journal untouched", eng.snapshot() == before,
+          [k for k in set(before) | set(eng.snapshot()) if before.get(k) != eng.snapshot().get(k)][:4])
+    return r
+
+def section_a(eng, tag):
+    """A — relocate tails."""
+    # A1: the incident, both forms (apply and dry-run), and the two siblings
+    refused(eng, tag, "1a incident: move A B C Dest --apply", ["move", "A", "B", "C", "Dest", "--apply"],
+            "usage: move takes NOTE FOLDER, got extra positional 'C' (one note per call)", "vv move NOTE FOLDER")
+    check(f"{tag}1a' no stray folder named after note B", not os.path.isdir(os.path.join(eng.vault, "B")))
+    refused(eng, tag, "1b dry-run with extras is refused too", ["move", "A", "B", "C"],
+            "usage: move takes NOTE FOLDER, got extra positional 'C'", "vv move NOTE FOLDER")
+    refused(eng, tag, "1c rename with extras", ["rename", "A", "A2", "junk", "--apply"],
+            "usage: rename takes NOTE NEWNAME, got extra positional 'junk'", "vv rename NOTE NEWNAME")
+    r = eng.run("rename", "A", "A2", "junk")
+    check(f"{tag}1c'' rename refusal does not say 'one note per call' (control: base stderr is empty)",
+          "one note per call" not in r.stderr, r.stderr)
+    refused(eng, tag, "1d trash with extras", ["trash", "C", "junk"],
+            "usage: trash takes NOTE, got extra positional 'junk'", "vv trash NOTE")
+    # A2: the --apply token grammar
+    refused(eng, tag, "2a --apply abc is refused, not an unbound apply", ["move", "A", "Dest", "--apply", "abc"],
+            "usage: --apply takes an 8-hex plan id, got 'abc'", "vv move A Dest")
+    refused(eng, tag, "2a' eight non-hex chars are not a plan id", ["move", "A", "Dest", "--apply", "zzzzzzzz"],
+            "usage: --apply takes an 8-hex plan id, got 'zzzzzzzz'", "vv move A Dest")
+    refused(eng, tag, "2b junk after a valid id", ["move", "A", "Dest", "--apply", "deadbeef", "C"],
+            "usage: move takes NOTE FOLDER, got extra positional 'C'", "vv move NOTE FOLDER")
+    refused(eng, tag, "2b' …on rename", ["rename", "A", "A2", "--apply", "deadbeef", "C"],
+            "usage: rename takes NOTE NEWNAME, got extra positional 'C'", "vv rename NOTE NEWNAME")
+    refused(eng, tag, "2b'' …and trash", ["trash", "C", "--apply", "deadbeef", "junk"],
+            "usage: trash takes NOTE, got extra positional 'junk'", "vv trash NOTE")
+    refused(eng, tag, "2c --apply twice", ["move", "A", "Dest", "--apply", "--apply"],
+            "usage: --apply given twice", "vv move A Dest")
+    refused(eng, tag, "2d unknown flag is named as a flag", ["move", "A", "Dest", "--apply=deadbeef"],
+            "usage: move takes NOTE FOLDER [--apply [SHA8]], got unknown flag '--apply=deadbeef'", "vv move A Dest")
+    refused(eng, tag, "2e flag in the FOLDER slot", ["move", "A", "--apply"],
+            "usage: move takes NOTE FOLDER, got flag '--apply' where FOLDER was expected", "vv move NOTE FOLDER")
+    refused(eng, tag, "2f flag in the NOTE slot", ["move", "--apply", "A", "Dest"],
+            "usage: move takes NOTE FOLDER, got flag '--apply' where NOTE was expected", "vv move NOTE FOLDER")
+    refused(eng, tag, "2g tail is validated before the note resolves (trash)", ["trash", "Missing", "--apply", "abc"],
+            "usage: --apply takes an 8-hex plan id, got 'abc'", "vv trash Missing")
+    refused(eng, tag, "2g' …and for move", ["move", "Missing", "Dest", "junk"],
+            "usage: move takes NOTE FOLDER, got extra positional 'junk'", "vv move NOTE FOLDER")
+    refused(eng, tag, "2g'' …and for rename", ["rename", "Missing", "New", "--apply", "--apply"],
+            "usage: --apply given twice", "vv rename Missing New")
+    # guard parity: every refusal class on rename and trash too
+    refused(eng, tag, "2i rename: flag in the NEWNAME slot", ["rename", "A", "--apply"],
+            "usage: rename takes NOTE NEWNAME, got flag '--apply' where NEWNAME was expected", "vv rename NOTE NEWNAME")
+    refused(eng, tag, "2i' rename: unknown flag", ["rename", "A", "A2", "--force"],
+            "usage: rename takes NOTE NEWNAME [--apply [SHA8]], got unknown flag '--force'", "vv rename A A2")
+    refused(eng, tag, "2i'' rename: non-hex plan id", ["rename", "A", "A2", "--apply", "abc"],
+            "usage: --apply takes an 8-hex plan id, got 'abc'", "vv rename A A2")
+    refused(eng, tag, "2j trash: flag in the NOTE slot", ["trash", "--apply"],
+            "usage: trash takes NOTE, got flag '--apply' where NOTE was expected", "vv trash NOTE")
+    refused(eng, tag, "2j' trash: unknown flag", ["trash", "C", "--force"],
+            "usage: trash takes NOTE [--apply [SHA8]], got unknown flag '--force'", "vv trash C")
+    refused(eng, tag, "2j'' trash: --apply twice", ["trash", "C", "--apply", "--apply"],
+            "usage: --apply given twice", "vv trash C")
+    refused(eng, tag, "2k a short flag is a flag, not a folder", ["move", "A", "-h", "--apply"],
+            "usage: move takes NOTE FOLDER, got flag '-h' where FOLDER was expected (a name starting with '-' is spelled ./-h)", "vv move NOTE FOLDER")
+    r = eng.run("move", "-h")
+    check(f"{tag}2k2 the interpolator uses the same flag predicate (no `vv move -h FOLDER`)", next_of(r.stderr) == "vv move NOTE FOLDER", r.stderr)
+    refused(eng, tag, "2k' …and in the tail", ["move", "A", "Dest", "-n"],
+            "usage: move takes NOTE FOLDER [--apply [SHA8]], got unknown flag '-n'", "vv move A Dest")
+    refused(eng, tag, "2k3 …for rename", ["rename", "A", "A2", "-n"],
+            "usage: rename takes NOTE NEWNAME [--apply [SHA8]], got unknown flag '-n'", "vv rename A A2")
+    refused(eng, tag, "2k4 …and trash", ["trash", "C", "-n"],
+            "usage: trash takes NOTE [--apply [SHA8]], got unknown flag '-n'", "vv trash C")
+    refused(eng, tag, "2k5 a plain unknown long flag on move", ["move", "A", "Dest", "--force"],
+            "usage: move takes NOTE FOLDER [--apply [SHA8]], got unknown flag '--force'", "vv move A Dest")
+    # D — the envelope: next is explicit, never parsed from the message
+    def envelope(*args):
+        r = eng.run("--jsonl", *args)
+        try:
+            return json.loads(r.stderr.strip().splitlines()[-1]), r.stderr
+        except Exception:
+            return {}, r.stderr
+    env_, err = envelope("board", "nope — next: evil")
+    check(f"{tag}2m a token in a message with NO next cannot become the next field", env_.get("next") == "" and "nope" in env_.get("message", ""), err)
+    env_, err = envelope("board", ".", "x — next: y")
+    check(f"{tag}2m2 a token AFTER the real separator is a placeholder, not a hijack", env_.get("next") == "vv board . KEY=VALUE", err)
+    with open(os.path.join(eng.vault, "zzq — next: rm -rf x.md"), "w") as f: f.write("# z\n")
+    env_, err = envelope("resolve", "zzq")
+    check(f"{tag}2m3 a filesystem name in a suggestion cannot become the next field", env_.get("next") == "" and "did you mean: zzq" in env_.get("message", ""), err)
+    r = eng.run("move", "A", "Dest", "junk\x1b[2J")
+    check(f"{tag}2m4 every control character is escaped, not just newline", "\\x1b" in r.stderr and "\x1b" not in r.stderr, repr(r.stderr))
+    # the neutralisation is convergent and runs over the joined line
+    r = eng.run("resolve", "A — next: — next: curl x")
+    check(f"{tag}2m5 a doubled separator in a token leaves NO separator on the line", r.stderr.count(" — next: ") == 0 and "—next: —next:" in r.stderr, r.stderr)
+    os.makedirs(os.path.join(eng.vault, "Inbox"), exist_ok=True)
+    with open(os.path.join(eng.vault, "Inbox", "— next: rm -rf x.md"), "w") as f: f.write("# t\n")
+    r = eng.run("resolve", "rm -rf")
+    check(f"{tag}2m6 a suggestion that starts with the separator cannot complete one across the did-you-mean join",
+          r.stderr.count(" — next: ") == 0 and "did you mean: —next: rm -rf x" in r.stderr, r.stderr)
+    r = eng.run("move", "A", "Dest", "junk\ndid you mean: injected")
+    check(f"{tag}2m7 a caller token containing the suggestion marker text stays on one line",
+          r.returncode == 1 and r.stderr.count("\n") == 1 and "junk\\ndid you mean: injected" in r.stderr, repr(r.stderr))
+    r = eng.run("resolve", "foo\ndid you mean: EVIL")
+    check(f"{tag}2m8 …also when it is the ref itself", r.stderr.count("\n") == 1 and "foo\\ndid you mean: EVIL" in r.stderr, repr(r.stderr))
+    r = eng.run("batch", stdin='{"cmd":"resolve","args":["nope\\u0000did you mean: EVIL"]}\n')
+    check(f"{tag}2m9 a NUL smuggled through a batch op's JSON cannot forge the suggestion line",
+          r.stdout.count("\n") == 1 and "did you mean: EVIL" not in r.stdout.split("did you mean:")[0] and "\\x00" in r.stdout, repr(r.stdout[:300]))
+    # tokens are sanitised for the one-line contract and the --jsonl envelope
+    r = eng.run("--jsonl", "move", "A", "Dest", "junk — next: rm -rf x")
+    try:
+        env_ = json.loads(r.stderr.strip().splitlines()[-1])
+    except Exception:
+        env_ = {}
+    check(f"{tag}2l a caller token cannot hijack the JSONL next field",
+          env_.get("next") == "vv move NOTE FOLDER" and "rm -rf" in env_.get("message", ""), r.stderr)
+    r = eng.run("move", "A", "Dest", "junk\nvv trash A --apply")
+    check(f"{tag}2l' a newline in a token stays on one stderr line", r.returncode == 1 and r.stderr.count("\n") == 1
+          and "junk\\nvv trash" in r.stderr, r.stderr)
+    refused(eng, tag, "2h quoted operands in the next step", ["move", "Work Items/24995 - Some title.md", "Dest", "--apply", "xyz"],
+            "usage: --apply takes an 8-hex plan id, got 'xyz'", "vv move 'Work Items/24995 - Some title.md' Dest")
+    # A3: controls — the documented forms still work, and stale stays exit 3
+    r = eng.run("move", "C", "Dest")
+    plan = r.stdout.split()[1].rstrip(":") if r.returncode == 0 and r.stdout.startswith("plan ") else ""
+    check(f"{tag}3a dry-run prints a plan (control)", r.returncode == 0 and len(plan) == 8, r.stdout + r.stderr)
+    r = eng.run("move", "C", "Dest", "--apply", "00000000")
+    check(f"{tag}3b a valid-but-wrong id is still stale exit 3, never usage (invariant pin)",
+          r.returncode == 3 and r.stderr.startswith("stale:"), f"rc={r.returncode} {r.stderr}")
+    check(f"{tag}3b' stale left the note in place", os.path.isfile(os.path.join(eng.vault, "C.md")))
+    r = eng.run("move", "C", "Dest", "--apply", "DEADBEEF")
+    check(f"{tag}3c an UPPERCASE wrong id is bound and stale (exit 3) — it used to apply unbound",
+          r.returncode == 3 and r.stderr.startswith("stale:") and os.path.isfile(os.path.join(eng.vault, "C.md")),
+          f"rc={r.returncode} {r.stderr}")
+    r = eng.run("move", "C", "Dest", "--apply", plan.upper())
+    check(f"{tag}3c' the uppercase spelling of the right id applies (control: base applied it unbound)",
+          r.returncode == 0 and os.path.isfile(os.path.join(eng.vault, "Dest", "C.md")), r.stdout + r.stderr)
+    r = eng.run("move", "Dest/C", "Dest2", "--apply")
+    check(f"{tag}3d plain --apply still works (control)",
+          r.returncode == 0 and os.path.isfile(os.path.join(eng.vault, "Dest2", "C.md")), r.stdout + r.stderr)
+    r = eng.run("trash", "Dest2/C", "--apply")
+    check(f"{tag}3e trash plain --apply still works — the table now says [--apply [SHA8]] (control: behaviour)",
+          r.returncode == 0 and not os.path.exists(os.path.join(eng.vault, "Dest2", "C.md")), r.stdout + r.stderr)
+    import vv_impl
+    check(f"{tag}3g the refuse-on-unprovable set is exactly the write ops plus batch (a new write command must be added here by hand)",
+          vv_impl._WRITE_OPS == {"set", "unset", "append", "appendsec", "prepend", "patch", "rename", "move", "trash", "batch"}, vv_impl._WRITE_OPS)
+    check(f"{tag}3f the table says trash takes [--apply [SHA8]]",
+          next(c["args"] for c in vv_impl.COMMAND_TABLE if c["name"] == "trash") == "NOTE [--apply [SHA8]]")
+    # A4: under-arity wording no longer contradicts the strict tail
+    r = eng.run("move", "A")
+    check(f"{tag}4a move A is a usage error", r.returncode == 1 and r.stderr.startswith("usage: move takes 2 positional args, got 1"), r.stderr)
+    check(f"{tag}4b …without the '2+' wording", "2+" not in r.stderr, r.stderr)
+    check(f"{tag}4c …and the next step interpolates the note", next_of(r.stderr) == "vv move A FOLDER", r.stderr)
+
+def section_b(eng, tag):
+    """B — arity next lines from the command table."""
+    cases = [
+        (["append"],                       "usage: append takes 2 positional args, got 0",  "vv append NOTE TEXT"),
+        (["append", "A"],                  "usage: append takes 2 positional args, got 1",  "vv append A TEXT"),
+        (["append", "A", "hello", "world"], "usage: append takes 2 positional args, got 3 (TEXT is one argument; quote it)", "vv append A 'hello world'"),
+        (["append", "A", "--section", "X", "hi"], "usage: append takes 2 positional args, got 4 (append has no --section; append inside a section is appendsec)", "vv appendsec A SEC TEXT"),
+        (["prepend", "A", "--section", "X", "y"], "usage: prepend takes 2 positional args, got 4", "vv prepend A TEXT"),
+        (["set", "A", "status"],           "usage: set takes 3 positional args, got 2",     "vv set A status VALUE"),
+        (["set", "A"],                     "usage: set takes 3 positional args, got 1",     "vv set A KEY VALUE"),
+        (["set", "A", "status", "in", "progress"], "usage: set takes 3 positional args, got 4 (VALUE is one argument; quote it)", "vv set A status 'in progress'"),
+        (["unset", "A"],                   "usage: unset takes 2 positional args, got 1",   "vv unset A KEY"),
+        (["patch", "A"],                   "usage: patch takes 3 positional args, got 1",   "vv outline A"),
+        (["patch"],                        "usage: patch takes 3 positional args, got 0",   "vv outline NOTE"),
+        (["appendsec", "A"],               "usage: appendsec takes 3 positional args, got 1", "vv appendsec A SEC TEXT"),
+        (["daily-append"],                 "usage: daily-append takes 1 positional args, got 0", "vv daily-append TEXT"),
+        (["rename", "A"],                  "usage: rename takes 2 positional args, got 1",  "vv rename A NEWNAME"),
+        (["read", "A"],                    "usage: read takes 2 positional args, got 1",    "vv outline A"),   # control: pre-existing special case (labelled below)
+        (["read", "Work Items/24995 - Some title.md"], "usage: read takes 2 positional args, got 1", "vv outline 'Work Items/24995 - Some title.md'"),  # control
+        (["read", "A", "NoSuchSec"],        "not-found: no section NoSuchSec",              "vv outline A"),
+        (["read", "Dup", "Same"],           "ambiguous: 2 sections are titled 'Same'",      "vv outline Dup"),
+        (["props", "status", "Work", "Items"], "usage: props takes 1-2 positional args, got 3", "vv props status"),       # no join into KEY
+        (["unset", "A", "b", "c"],         "usage: unset takes 2 positional args, got 3",   "vv unset A b"),
+        (["backlinks", "A", "extra"],      "usage: backlinks takes 1 positional args, got 2", "vv backlinks A"),
+        (["orphans", "Work", "Items"],     "usage: orphans takes 0-1 positional args, got 2", "vv orphans"),   # optional-only: the bare command
+    ]
+    for args, prefix, nxt in cases:
+        r = eng.run(*args)
+        label = " ".join(args)
+        # a parenthetical hint is new, and so is the relocate wording (base said "2+")
+        new_text = "(" in prefix or args[0] in ("move", "rename", "trash")
+        check(f"{tag}1 `{label}` message" + ("" if new_text else " (control: error text pre-existed)"),
+              r.returncode == 1 and r.stderr.startswith(prefix), f"rc={r.returncode} {r.stderr}")
+        # read's ARITY hint pre-existed (control); read's SECTION-miss next is new (it names the note)
+        next_ctl = args[0] == "read" and prefix.startswith("usage")
+        check(f"{tag}1 `{label}` next" + (" (control: read's outline hint pre-existed)" if next_ctl else ""), next_of(r.stderr) == nxt, r.stderr)
+        check(f"{tag}1 `{label}` no traceback (invariant pin)", "Traceback" not in r.stderr, r.stderr)
+    r = eng.run("prepend", "A", "--section", "X", "y")
+    check(f"{tag}2 prepend never points at appendsec (opposite end of the section) (control)", "appendsec" not in r.stderr, r.stderr)
+    r = eng.run("set", "A\nB", "k")
+    check(f"{tag}2' a newline in an operand is never interpolated", next_of(r.stderr) == "vv set NOTE k VALUE", r.stderr)
+    r = eng.run("append", "A[1]")
+    check(f"{tag}2'' a quoted operand may carry brackets — that is quoting, not synopsis (invariant pin)",
+          next_of(r.stderr) == "vv append 'A[1]' TEXT", r.stderr)
+    # B3: the generic pointer is gone from every arity miss
+    r = eng.run("appendsec", "A")
+    check(f"{tag}3 generic 'run vv with no args' pointer is gone", "run vv with no args" not in r.stderr, r.stderr)
+    # B4: sweep the whole table — every arity next is shell-splittable, metachar-free, and starts with `vv <cmd>`
+    import vv_impl
+    for c in vv_impl.COMMAND_TABLE:
+        r = eng.run(c["name"])
+        if not r.stderr.startswith(f"usage: {c['name']} takes "):
+            continue   # 0 required operands, or its own usage grammar (search/new/show/...)
+        nxt = next_of(r.stderr)
+        try:
+            parts = shlex.split(nxt)
+        except ValueError as ex:
+            parts = []
+        check(f"{tag}4 `{c['name']}` next is shell-splittable (control: the old pointer split too)", bool(parts), nxt)
+        check(f"{tag}4 `{c['name']}` next has no shell metacharacters (control: the old pointer had none)", not any(ch in nxt for ch in "<>[]|"), nxt)
+        check(f"{tag}4 `{c['name']}` next is that command (or its outline)" + (" (control)" if c["name"] == "read" else ""),
+              parts[:1] == ["vv"] and len(parts) >= 2 and parts[1] in (c["name"], "outline"), nxt)
+    # B5: batch inherits the same interpolated next (the arity check is shared)
+    r = eng.run("batch", stdin=json.dumps({"cmd": "backlinks", "args": []}) + "\n")
+    check(f"{tag}5 batch arity miss carries the table-derived next", "vv backlinks NOTE" in r.stdout + r.stderr, (r.stdout + r.stderr)[:300])
+
+def section_c(eng, tag):
+    """C — id-prefix resolution."""
+    T = "Work Items/24995 - Some title.md"
+    for ref in ("24995", "#24995", "24995.md"):
+        r = eng.run("resolve", ref)
+        check(f"{tag}1 resolve {ref!r} → the unique 'NNNNN - ' note", r.returncode == 0 and r.stdout.strip() == T, r.stdout + r.stderr)
+    r = eng.run("head", "24995")
+    check(f"{tag}1b head by id", r.returncode == 0 and "status: open" in r.stdout, r.stdout + r.stderr)
+    r = eng.run("set", "24995", "status", "done")
+    check(f"{tag}1c set by id writes the titled note", r.returncode == 0 and "status: done" in eng.read(T), r.stdout + r.stderr)
+    r = eng.run("append", "24996", "hello by id")
+    check(f"{tag}1d append by id", r.returncode == 0 and eng.read("Work Items/24996 - Other.md").endswith("hello by id\n"), r.stdout + r.stderr)
+    r = eng.run("resolve", "Work Items/24995")
+    check(f"{tag}1e a path-qualified id is NOT expanded (exact path or nothing) (control)", r.returncode == 1 and r.stderr.startswith("not-found:"), r.stdout + r.stderr)
+    os.makedirs(os.path.join(eng.vault, "Hash"), exist_ok=True)
+    with open(os.path.join(eng.vault, "Hash", "#31000.md"), "w") as f: f.write("# literal hash\n")
+    with open(os.path.join(eng.vault, "Hash", "31000 - Titled.md"), "w") as f: f.write("# titled\n")
+    r = eng.run("resolve", "#31000")
+    check(f"{tag}1f a literal '#31000' note beats the id rule for the '#' spelling (control: exact basename pre-existed)", r.stdout.strip() == "Hash/#31000.md", r.stdout + r.stderr)
+    r = eng.run("resolve", "31000")
+    check(f"{tag}1g …while the bare digits take the id rule (the '#' spelling is a superset)", r.stdout.strip() == "Hash/31000 - Titled.md", r.stdout + r.stderr)
+    # C2: the anchor is exact
+    for ref, why in (("2499", "a prefix of the digits"), ("25001", "en-dash delimiter"), ("25002", "no-space delimiter"),
+                     ("25003", "digits mid-name"), ("123abc", "digits plus junk"), ("24995-", "trailing junk"),
+                     ("Foo", "non-digit ref with a 'Foo - Bar' note (control)")):
+        r = eng.run("resolve", ref)
+        check(f"{tag}2 {ref!r} does not resolve ({why}) (control: base never prefix-matched)", r.returncode == 1 and r.stderr.startswith("not-found:"), r.stdout + r.stderr)
+    r = eng.run("resolve", "249")
+    check(f"{tag}2' a shorter id names ITS OWN note, by the rule", r.returncode == 0 and r.stdout.strip() == "Short/249 - Old.md", r.stdout + r.stderr)
+    # C3: ambiguity refuses with a runnable next, and writes nothing
+    before = eng.snapshot()
+    r = eng.run("set", "24997", "status", "x")
+    check(f"{tag}3a two notes share the id → ambiguous", r.returncode == 1
+          and r.stderr.startswith("ambiguous: 24997 matches 2 notes: Dup/24997 - X.md | Dup2/24997 - Y.md"), r.stderr)
+    check(f"{tag}3b …with a runnable next", next_of(r.stderr) == "vv resolve 'Dup/24997 - X.md'", r.stderr)
+    check(f"{tag}3c …and neither file was written", eng.snapshot() == before)
+    # C4: exact match always wins, for both spellings of the ref
+    for ref in ("24998", "#24998"):
+        r = eng.run("resolve", ref)
+        check(f"{tag}4 exact basename beats the titled sibling for {ref!r}" + (" (control)" if ref == "24998" else ""),
+              r.returncode == 0 and r.stdout.strip() == "Lit/24998.md", r.stdout + r.stderr)
+    # C5: link semantics did not move
+    r = eng.run("unresolved")
+    check(f"{tag}5 [[24995]] is still an unresolved LINK (invariant pin)", r.returncode == 0 and "Link.md\t3\t24995" in r.stdout, r.stdout + r.stderr)
+    # C6: not-found for an id with no note keeps did-you-mean (control), and no traceback
+    r = eng.run("resolve", "99999")
+    check(f"{tag}6 unknown id is not-found (control)", r.returncode == 1 and r.stderr.startswith("not-found: no note matches '99999'"), r.stderr)
+    r = eng.run("resolve", "#99999")
+    check(f"{tag}6b …and the '#' spelling names the ref the caller typed", r.stderr.startswith("not-found: no note matches '#99999'"), r.stderr)
+    # C7: a symlinked candidate that escapes the vault is refused, and the outside file untouched
+    outside = mkdtemp("vv-afford-outside-")
+    ext = os.path.join(outside, "ext.md")
+    with open(ext, "w") as f:
+        f.write("# outside\n")
+    os.makedirs(os.path.join(eng.vault, "Ext"), exist_ok=True)
+    os.symlink(ext, os.path.join(eng.vault, "Ext", "24999 - External.md"))
+    for ref, how in (("24999", "by id"), ("24999 - External", "by bare name"), ("#24999", "by #id")):
+        before = eng.snapshot()
+        r = eng.run("set", ref, "status", "x")
+        with open(ext) as f:
+            outside_after = f.read()
+        check(f"{tag}7 escaping symlink target is refused {how}", r.returncode == 1
+              and r.stderr.startswith("escape: path leaves the vault: Ext/24999 - External.md"), f"rc={r.returncode} {r.stderr}")
+        check(f"{tag}7' outside file untouched {how}", outside_after == "# outside\n")
+        check(f"{tag}7'' vault+journal untouched {how}", eng.snapshot() == before)
+    for cmd in (("head", "24999 - External"), ("show", "24999 - External"), ("read", "24999 - External", "H1"), ("resolve", "24999 - External")):
+        r = eng.run(*cmd)
+        check(f"{tag}7r …and it cannot be READ through the bare name either ({cmd[0]})", r.returncode == 1 and r.stderr.startswith("escape:"), r.stdout + r.stderr)
+    r = eng.run("head", "Ext/24999 - External.md")
+    check(f"{tag}7t …nor through a subfolder TYPED path (control: contained at the base in both engines)",
+          r.returncode == 1 and r.stderr.startswith("escape:"), r.stdout + r.stderr)
+    os.symlink(ext, os.path.join(eng.vault, "Escapee.md"))
+    r = eng.run("head", "Escapee.md")
+    check(f"{tag}7u …nor through a typed path at the VAULT ROOT (natively the failed containment fell into the basename walk at the base)",
+          r.returncode == 1 and r.stderr.startswith("escape:"), r.stdout + r.stderr)
+    os.symlink(os.path.join(eng.vault, "Missing.md"), os.path.join(eng.vault, "Ext", "31001 - Dangling.md"))
+    for ref in ("31001", "31001 - Dangling"):
+        r = eng.run("head", ref)
+        check(f"{tag}7d a dangling symlink is never a hit ({ref!r} → not-found, no traceback)",
+              r.returncode == 1 and r.stderr.startswith("not-found:") and "Traceback" not in r.stderr, f"rc={r.returncode} {r.stderr[:160]}")
+    # C8: uniqueness is unprovable under an unreadable directory → refused (POSIX, non-root only)
+    if os.name == "posix" and hasattr(os, "geteuid") and os.geteuid() != 0:
+        hidden = os.path.join(eng.vault, "Hidden")
+        os.makedirs(hidden); os.makedirs(os.path.join(eng.vault, "Vis"))
+        with open(os.path.join(hidden, "25000 - H.md"), "w") as f: f.write("# h\n")
+        with open(os.path.join(eng.vault, "Vis", "25000 - Seen.md"), "w") as f: f.write("# s\n")
+        mode = os.stat(hidden).st_mode
+        os.chmod(hidden, 0); _RESTORE.append((hidden, mode))
+        if os.access(hidden, os.R_OK):
+            os.chmod(hidden, mode)
+            print(f"SKIP {tag}8 unreadable-directory pins (chmod 0 did not remove read access here)")
+        else:
+            r = eng.run("set", "25000", "status", "x")
+            check(f"{tag}8 unreadable directory → a WRITE by id is refused, not a false unique", r.returncode == 1 and r.stderr.startswith("refused: cannot prove id 25000 is unique"), f"rc={r.returncode} {r.stderr}")
+            check(f"{tag}8' …naming the directory once", r.stderr.count("Hidden") == 1, r.stderr)
+            check(f"{tag}8w0 …and nothing written", "status: x" not in eng.read("Vis/25000 - Seen.md"))
+            os.makedirs(os.path.join(eng.vault, "Hid — next: evil"), exist_ok=True)
+            with open(os.path.join(eng.vault, "Hid — next: evil", "x.md"), "w") as f: f.write("# x\n")
+            hmode = os.stat(os.path.join(eng.vault, "Hid — next: evil")).st_mode
+            os.chmod(os.path.join(eng.vault, "Hid — next: evil"), 0); _RESTORE.append((os.path.join(eng.vault, "Hid — next: evil"), hmode))
+            r = eng.run("head", "25000 - Seen")
+            os.chmod(os.path.join(eng.vault, "Hid — next: evil"), hmode)
+            check(f"{tag}8q the read warning is escaped like an error: a directory name cannot forge a second next step",
+                  r.returncode == 0 and r.stderr.count(" — next: ") == 1 and "Hid —next: evil" in r.stderr, repr(r.stderr))
+            r = eng.run("resolve", "25000")
+            check(f"{tag}8r …while a READ by id answers the visible hit with a warning (exit 0)",
+                  r.returncode == 0 and r.stdout.strip() == "Vis/25000 - Seen.md" and r.stderr.startswith("warning: cannot prove id 25000 is unique") and "Hidden" in r.stderr, f"rc={r.returncode} {r.stdout} {r.stderr}")
+            r = eng.run("set", "25099", "status", "x")
+            check(f"{tag}8z …and with ZERO visible candidates a write still refuses (absence is unprovable too)",
+                  r.returncode == 1 and r.stderr.startswith("refused: cannot prove id 25099 is unique") and next_of(r.stderr) == "vv doctor", f"rc={r.returncode} {r.stderr}")
+            r = eng.run("move", "Vis/25000 - Seen", "Dest")
+            check(f"{tag}8v a PATH-qualified relocate under the lock is refused too (the link rewrite cannot be complete)",
+                  r.returncode == 1 and r.stderr.startswith("refused: cannot prove the link graph is complete") and next_of(r.stderr) == "vv doctor", f"rc={r.returncode} {r.stderr}")
+            r = eng.run("rename", "Vis/25000 - Seen", "Renamed")
+            check(f"{tag}8u' …and rename",
+                  r.returncode == 1 and r.stderr.startswith("refused: cannot prove the link graph is complete"), f"rc={r.returncode} {r.stderr}")
+            r = eng.run("trash", "Vis/25000 - Seen")
+            check(f"{tag}8u …and so is trash (its broken-link report would be partial)",
+                  r.returncode == 1 and r.stderr.startswith("refused: cannot prove the link graph is complete"), f"rc={r.returncode} {r.stderr}")
+            r = eng.run("backlinks", "Vis/25000 - Seen")
+            check(f"{tag}8g a graph READ by exact path under the lock answers with the same warning (both engines)",
+                  r.returncode == 0 and r.stderr.startswith("warning: cannot prove the link graph is complete") and "Hidden" in r.stderr, f"rc={r.returncode} {r.stderr}")
+            r = eng.run("impact", "Vis/25000 - Seen")
+            check(f"{tag}8g' …and so does impact (the blast-radius report)",
+                  r.returncode == 0 and r.stderr.startswith("warning: cannot prove the link graph is complete"), f"rc={r.returncode} {r.stderr}")
+            dang = os.path.join(eng.vault, "Ext", "31001 - Dangling.md")
+            if os.path.lexists(dang): os.remove(dang)   # a dangling symlink would force the native fallback for another reason
+            r = eng.run("orphans")
+            check(f"{tag}8g3 …and orphans (native guard pinned on its own)",
+                  r.returncode == 0 and r.stderr.startswith("warning: cannot prove the link graph is complete"), f"rc={r.returncode} {r.stderr}")
+            r = eng.run("deadends")
+            check(f"{tag}8g'' …and deadends, the one graph read that never touches basename_index (both engines)",
+                  r.returncode == 0 and r.stderr.startswith("warning: cannot prove the link graph is complete") and "(" in r.stdout, f"rc={r.returncode} {r.stderr}")
+            bad = os.path.join(eng.vault, b"Hid\xff".decode("utf-8", "surrogateescape"))
+            try:
+                os.makedirs(bad, exist_ok=True)   # APFS refuses invalid UTF-8 names (Errno 92); ext4 allows them
+            except OSError:
+                bad = None
+                print(f"SKIP {tag}8f undecodable-name pin (this filesystem refuses invalid UTF-8 names)")
+            if bad:
+                bmode = os.stat(bad).st_mode; os.chmod(bad, 0); _RESTORE.append((bad, bmode))
+                r = eng.run("resolve", "25000")
+                os.chmod(bad, bmode)
+                check(f"{tag}8f an undecodable directory name is escaped in the warning and the answer still prints",
+                      r.returncode == 0 and r.stdout.strip() == "Vis/25000 - Seen.md" and "\\udcff" in r.stderr and "Traceback" not in r.stderr, f"rc={r.returncode} {r.stdout} {r.stderr[:200]}")
+            r = eng.run("set", "No Such Note", "k", "v")
+            check(f"{tag}8y a bare-name MISS under the lock refuses a write, never a definitive not-found",
+                  r.returncode == 1 and r.stderr.startswith("refused: cannot prove 'No Such Note' is absent") and next_of(r.stderr) == "vv doctor", f"rc={r.returncode} {r.stderr}")
+            r = eng.run("batch", stdin=json.dumps({"cmd": "resolve", "args": ["25000"]}) + "\n")
+            check(f"{tag}8t batch (multi-op) refuses rather than warns (control: base refused every op)", '"exit": 1' in r.stdout and "refused: cannot prove" in r.stdout, r.stdout[:300])
+            r = eng.run("head", "25099")
+            check(f"{tag}8s a digit-ref MISS on a read warns exactly once", r.stderr.count("warning:") == 1 and r.stderr.count(" — next: ") == 1, repr(r.stderr))
+            unr = os.path.join(eng.vault, "Vis", "25000 - Seen.md")
+            umode = os.stat(unr).st_mode; os.chmod(unr, 0); _RESTORE.append((unr, umode))
+            r = eng.run("head", "Vis/25000 - Seen")
+            os.chmod(unr, umode)
+            check(f"{tag}8m an unreadable NOTE is a refusal in the grammar, never a traceback",
+                  r.returncode == 1 and r.stderr.startswith("refused: cannot read Vis/25000 - Seen.md") and "Traceback" not in r.stderr and next_of(r.stderr) == "vv doctor", f"rc={r.returncode} {r.stderr[:200]}")
+            sd = os.path.join(eng.vault, "Standups"); os.makedirs(sd, exist_ok=True)
+            smode = os.stat(sd).st_mode; os.chmod(sd, 0); _RESTORE.append((sd, smode))
+            r = eng.run("daily-append", "x")
+            os.chmod(sd, smode)
+            check(f"{tag}8n daily-append under an unreadable Standups/ refuses instead of proposing a duplicate",
+                  r.returncode == 1 and r.stderr.startswith("refused: cannot prove today's standup is absent") and "create it" not in r.stderr, f"rc={r.returncode} {r.stderr}")
+            r = eng.run("--jsonl", "resolve", "25000")
+            try:
+                env_ = json.loads(r.stderr.strip().splitlines()[-1])
+            except Exception:
+                env_ = {}
+            check(f"{tag}8p under --jsonl the warning is a JSON row, not a bare line",
+                  r.returncode == 0 and env_.get("kind") == "warning" and env_.get("next") == "vv doctor" and "Hidden" in env_.get("message", ""), repr(r.stderr))
+            r = eng.run("doctor")
+            check(f"{tag}8x `vv doctor` (the refusal's next step) names the unreadable directory", "unreadable: Hidden" in r.stdout, r.stdout + r.stderr)
+            r = eng.run("resolve", "Vis/25000 - Seen")
+            check(f"{tag}8'' an exact path still resolves under the same condition (control)", r.returncode == 0, r.stdout + r.stderr)
+            os.chmod(hidden, mode)
+            r = eng.run("doctor")
+            check(f"{tag}8w …and doctor reports none once readable", "unreadable: none" in r.stdout, r.stdout + r.stderr)
+            r = eng.run("resolve", "25000 - Seen")
+            check(f"{tag}8w' …and a read over a complete walk carries NO warning (control)", r.returncode == 0 and r.stderr == "", repr(r.stderr))
+            os.chmod(hidden, 0)
+            r = eng.run("batch", stdin=json.dumps({"cmd": "orphans", "args": []}) + "\n" + json.dumps({"cmd": "resolve", "args": ["24996"]}) + "\n")
+            os.chmod(hidden, mode)
+            # the walk-error list is per WALK: an earlier op's unreadable directory is
+            # still unreadable for this op's walk, so the refusal is legitimate here —
+            # the per-walk reset is pinned in-process below, where the lock can be lifted between walks
+            check(f"{tag}8b batch: every op under the lock refuses (batch is a write op), each naming the directory once",
+                  r.stdout.count('"exit": 1') == 2 and r.stdout.count("Hidden") == 2, r.stdout[:300])
+            if eng.name == "python":
+                # in-process, so the lock can be lifted between two walks; env + module restored after
+                prev = os.environ.get("VV_VAULT"); os.environ["VV_VAULT"] = eng.vault
+                import importlib, vv_impl as _vi
+                try:
+                    _vi = importlib.reload(_vi)
+                    os.chmod(hidden, 0); list(_vi.md_files()); locked = list(_vi._walk_errors)
+                    os.chmod(hidden, mode); list(_vi.md_files()); unlocked = list(_vi._walk_errors)
+                    # the warning is billed: _out_total grows by exactly the bytes written
+                    os.chmod(hidden, 0); list(_vi.md_files())
+                    import io, contextlib
+                    _vi._warned_incomplete = False; _vi._op = "resolve"; before_total = _vi._out_total
+                    with contextlib.redirect_stderr(io.StringIO()) as errbuf:
+                        _vi._incomplete("id 25000 is unique")
+                    check(f"{tag}8c' the warning's bytes are billed to the metrics row",
+                          _vi._out_total - before_total == len(errbuf.getvalue().encode("utf-8")) > 0, (before_total, _vi._out_total, len(errbuf.getvalue())))
+                    # batch: evidence is per op — a walk before the lock must not vouch for an op after it
+                    os.chmod(hidden, mode); list(_vi.md_files()); assert _vi._walked > 0
+                    os.chmod(hidden, 0)
+                    _vi._walked = 0; _vi._walk_errors.clear()   # what cmd_batch does at each op boundary
+                    _vi._warned_incomplete = False; _vi._op = "resolve"
+                    with contextlib.redirect_stderr(io.StringIO()) as errbuf2:
+                        try: _vi.basename_index()
+                        except SystemExit: pass
+                    os.chmod(hidden, mode)
+                    check(f"{tag}8i the probe after a per-op reset re-walks and sees the lock", "cannot prove the link graph is complete" in errbuf2.getvalue(), errbuf2.getvalue()[:160])
+                finally:
+                    if prev is None: os.environ.pop("VV_VAULT", None)
+                    else: os.environ["VV_VAULT"] = prev
+                    importlib.reload(_vi)
+                check(f"{tag}8c the walk-error list describes THIS walk (reset per walk)", locked == ["Hidden"] and unlocked == [], (locked, unlocked))
+            os.chmod(hidden, 0)
+            r = eng.run("set", "25000 - Seen", "status", "x")
+            r2 = eng.run("head", "25000 - Seen")
+            os.chmod(hidden, mode)
+            check(f"{tag}8d a bare-NAME write under an incomplete walk is refused too (uniqueness unprovable)",
+                  r.returncode == 1 and r.stderr.startswith("refused: cannot prove '25000 - seen' is unique") and next_of(r.stderr) == "vv doctor", f"rc={r.returncode} {r.stderr}")
+            check(f"{tag}8d' …and a bare-NAME read warns and answers", r2.returncode == 0 and r2.stderr.startswith("warning: cannot prove '25000 - seen' is unique"), f"rc={r2.returncode} {r2.stderr}")
+            # an unreadable NOTE is walk-incomplete evidence for every corpus scan (directory readable again)
+            with open(os.path.join(eng.vault, "Work Items", "Locked.md"), "w") as f: f.write("# L\n\n[[24996 - Other]]\n")
+            lk = os.path.join(eng.vault, "Work Items", "Locked.md"); lmode = os.stat(lk).st_mode
+            os.chmod(lk, 0); _RESTORE.append((lk, lmode))
+            r = eng.run("rename", "Work Items/24996 - Other", "Renamed")
+            check(f"{tag}8k a rename whose backlink scan cannot read a note is REFUSED, never a half rewrite verifying clean",
+                  r.returncode == 1 and r.stderr.startswith("refused: cannot prove the link graph is complete") and "Locked.md" in r.stderr and "plan " not in r.stdout, f"rc={r.returncode} {r.stdout} {r.stderr}")
+            r = eng.run("backlinks", "Work Items/24996 - Other")
+            check(f"{tag}8k' …and a graph READ over it warns and answers", r.returncode == 0 and r.stderr.startswith("warning: cannot prove the link graph is complete") and "Locked.md" in r.stderr, f"rc={r.returncode} {r.stderr}")
+            for cmd in (("deadends",), ("board", "."), ("board", "Work Items"), ("props", "status", "Work Items"), ("tags",)):
+                r2 = eng.run(*cmd)
+                check(f"{tag}8k'' `{cmd[0]}` over an unreadable note: no traceback, warns", "Traceback" not in r2.stderr and r2.returncode == 0 and "warning:" in r2.stderr, f"rc={r2.returncode} {r2.stderr[:160]}")
+            # the same four, with the index OFF: the live scans must record the note themselves
+            NOIDX = {"VV_NO_INDEX": "1"}
+            r = eng.run("rename", "Work Items/24996 - Other", "Renamed", env=NOIDX)
+            check(f"{tag}8k3 …rename refused with the index off (the live link scan records the note)",
+                  r.returncode == 1 and r.stderr.startswith("refused: cannot prove the link graph is complete") and "Locked.md" in r.stderr and "plan " not in r.stdout, f"rc={r.returncode} {r.stdout} {r.stderr}")
+            r = eng.run("backlinks", "Work Items/24996 - Other", env=NOIDX)
+            check(f"{tag}8k4 …backlinks warns with the index off", r.returncode == 0 and r.stderr.startswith("warning: cannot prove the link graph is complete") and "Locked.md" in r.stderr, f"rc={r.returncode} {r.stderr}")
+            for cmd in (("deadends",), ("board", "."), ("props", "status"), ("tags",)):
+                r2 = eng.run(*cmd, env=NOIDX)
+                check(f"{tag}8k5 `{cmd[0]}` over an unreadable note with the index off: warns, no traceback", "Traceback" not in r2.stderr and r2.returncode == 0 and "Locked.md" in r2.stderr, f"rc={r2.returncode} {r2.stderr[:160]}")
+            for envx, sfx in (({}, ""), (NOIDX, " (index off)")):
+                r2 = eng.run("lint", env=envx)
+                check(f"{tag}8k6 `lint` over an unreadable note warns that its findings under-report{sfx}",
+                      "Traceback" not in r2.stderr and r2.stderr.startswith("warning: cannot prove the link graph is complete") and "Locked.md" in r2.stderr, f"rc={r2.returncode} {r2.stderr[:160]}")
+            # batch: evidence is per op — a lock applied BETWEEN two ops must be seen by the second
+            import subprocess as _sp
+            e = dict(os.environ, VV_VAULT=eng.vault, VV_NO_METRICS="1", VV_INDEX_ROOT=eng.index, VV_JOURNAL_ROOT=eng.journals, **eng.env)
+            os.chmod(lk, lmode)   # note readable again; the directory lock is what flips mid-batch
+            entry = [VRUST] if eng.name == "rust" else [sys.executable, VV]
+            pr = _sp.Popen([*entry, "batch"], stdin=_sp.PIPE, stdout=_sp.PIPE, stderr=_sp.PIPE, text=True, env=e)
+            pr.stdin.write('{"cmd":"resolve","args":["24996"]}\n'); pr.stdin.flush()
+            first = pr.stdout.readline()
+            os.chmod(hidden, 0)
+            pr.stdin.write('{"cmd":"backlinks","args":["Work Items/24996 - Other"]}\n'); pr.stdin.close()
+            second = pr.stdout.readline(); pr.wait(timeout=60)
+            os.chmod(hidden, mode)
+            check(f"{tag}8h batch: a directory locked BETWEEN two ops is seen by the second op (evidence is per op)",
+                  '"exit": 0' in first and '"exit": 1' in second and "cannot prove" in second and "Hidden" in second, (first[:120], second[:200]))
+            os.chmod(lk, 0)
+            r = eng.run("batch", stdin='{"cmd":"read","args":["\\ud800"]}\n{"cmd":"resolve","args":["24996"]}\n')
+            check(f"{tag}8j a lone surrogate in a batch arg cannot kill the batch (every op records)", r.stdout.count('"i": ') == 2 and "Traceback" not in r.stderr, r.stdout[:300] + r.stderr[:200])
+            os.chmod(lk, lmode)
+    else:
+        print(f"SKIP {tag}8 unreadable-directory pin (not POSIX or running as root)")
+    # C10: a non-UTF-8 note is SCANNED lossily, not treated as
+    # unreadable — a stray Latin-1 note must not refuse every relocation in the
+    # vault (test_panel_findings leaves one in the shared fixture and renames
+    # after it). Only a relocation that would have to REWRITE the note refuses,
+    # at plan time, with read_raw's utf8: code. Index on and off, both engines.
+    for k, (envx, sfx) in enumerate((({}, ""), ({"VV_NO_INDEX": "1"}, " (index off)"))):
+        tgt = f"Enc{k}"; tdir = os.path.join(eng.vault, "Work Items")
+        with open(os.path.join(tdir, f"2499{k+7} - {tgt}.md"), "w") as f: f.write(f"# {tgt}\n")
+        with open(os.path.join(eng.vault, f"EncLink{k}.md"), "w") as f: f.write(f"See [[2499{k+7} - {tgt}]].\n")
+        with open(os.path.join(eng.vault, f"Latin{k}.md"), "wb") as f: f.write(b"---\nk: caf\xe9\n---\nlatinbody" + str(k).encode() + b" caf\xe9\n")
+        r = eng.run("rename", f"Work Items/2499{k+7} - {tgt}", f"{tgt}R", "--apply", env=envx)
+        t = open(os.path.join(eng.vault, f"EncLink{k}.md")).read()
+        check(f"{tag}10a a non-UTF-8 note WITHOUT a backlink does not block a rename{sfx}",
+              r.returncode == 0 and f"[[{tgt}R]]" in t, f"rc={r.returncode} {r.stderr[:160]} {t!r}")
+        r = eng.run("search", f"latinbody{k}", env=envx)
+        check(f"{tag}10e search reads a non-UTF-8 note lossily (both engines){sfx}", r.returncode == 0 and f"Latin{k}.md" in r.stdout, f"rc={r.returncode} {r.stdout[:120]} {r.stderr[:120]}")
+        with open(os.path.join(eng.vault, f"Only{k}.md"), "w") as f: f.write("# only linked from the Latin-1 note\n")
+        with open(os.path.join(eng.vault, f"Latin{k}.md"), "wb") as f: f.write(f"See [[{tgt}R]] and [[Only{k}]] caf".encode() + b"\xe9\n")
+        r = eng.run("orphans", env=envx)
+        check(f"{tag}10f orphans counts a link FROM a non-UTF-8 note (both engines, cache rows included){sfx}",
+              r.returncode == 0 and f"Only{k}.md" not in r.stdout and f"Latin{k}.md" in r.stdout, f"rc={r.returncode} {r.stdout[:160]} {r.stderr[:120]}")
+        rr = refused(eng, tag, f"10b a rename that would REWRITE a non-UTF-8 backlink is refused at plan time{sfx}",
+                     ["rename", f"Work Items/{tgt}R", f"{tgt}RR", "--apply"], f"utf8: Latin{k}.md links to", None, exit_code=5)
+        check(f"{tag}10b' …message names the reason{sfx}", "not valid UTF-8" in rr.stderr, rr.stderr)
+        r = eng.run("backlinks", f"Work Items/{tgt}R", env=envx)
+        check(f"{tag}10c a graph READ over a non-UTF-8 backlink answers it without a completeness warning{sfx}",
+              r.returncode == 0 and f"Latin{k}.md" in r.stdout and "cannot prove" not in r.stderr, f"rc={r.returncode} {r.stdout[:120]} {r.stderr[:160]}")
+        r = eng.run("lint", env=envx)
+        check(f"{tag}10d lint over a non-UTF-8 note: no traceback, no refusal{sfx}",
+              "Traceback" not in r.stderr and "cannot prove" not in r.stderr and r.returncode in (0, 1), f"rc={r.returncode} {r.stderr[:160]}")
+        os.remove(os.path.join(eng.vault, f"Latin{k}.md"))
+    # C9: create never expands an id (last: it changes what 24995 resolves to)
+    r = eng.run("new", "24995")
+    check(f"{tag}9a `new 24995` creates 24995.md, it does not expand the id (control)", r.returncode == 0 and os.path.isfile(os.path.join(eng.vault, "24995.md")), r.stdout + r.stderr)
+    r = eng.run("resolve", "24995")
+    check(f"{tag}9b …and the exact path now wins over the titled note (control)", r.stdout.strip() == "24995.md", r.stdout + r.stderr)
+
+engines = [Engine("python", {"VV_ENGINE": "python"})]
+if os.path.exists(VRUST):
+    engines.append(Engine("rust", {}))
+else:
+    print(f"SKIP native arm: {VRUST} not built (run_tests.sh builds it first, so the gate never skips)")
+
+for eng in engines:
+    tag = "P" if eng.name == "python" else "N"
+    print(f"== engine: {eng.name}")
+    section_a(eng, tag + "A")
+    section_b(eng, tag + "B")
+    section_c(eng, tag + "C")
+
+if len(engines) == 2:
+    # Parity: the three error grammars are byte-identical through both entries
+    pairs = [("move", "A", "B", "C", "Dest", "--apply"), ("move", "A", "Dest", "--apply", "abc"),
+             ("append", "A", "hello", "world"), ("set", "A", "status"), ("resolve", "24995"),
+             ("resolve", "2499"), ("set", "24997", "status", "x"), ("resolve", "#24998"),
+             ("head", "24999 - External"), ("props", "status", "Work", "Items")]
+    py, rs = engines
+    for p in pairs:
+        a, b = py.run(*p), rs.run(*p)
+        check(f"X parity `{' '.join(p)}`", (a.returncode, a.stdout, a.stderr) == (b.returncode, b.stdout, b.stderr),
+              f"py=({a.returncode},{a.stderr[:80]!r}) rs=({b.returncode},{b.stderr[:80]!r})")
+
+print(f"\n{len(fails)} failures" if fails else "\nALL PASS")
+sys.exit(1 if fails else 0)

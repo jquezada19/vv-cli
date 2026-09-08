@@ -80,7 +80,10 @@ Set `VV_VAULT` once (`export VV_VAULT=~/path/to/YourVault`) and drop the flag.
 ## Commands
 
 `NOTE` is a vault-relative path or a bare name (wikilink-style resolution — a
-failed lookup prints `did you mean:` suggestions).
+failed lookup prints `did you mean:` suggestions), or a bare id: `24995` (quote
+the `#` form: `'#24995'`) names the unique note titled `24995 - …`. The id rule
+is a filename convention, exact and unique or refused — it never fuzzy-matches,
+and it does not change link resolution (`[[24995]]` stays unresolved).
 
 ### Read
 
@@ -110,6 +113,7 @@ failed lookup prints `did you mean:` suggestions).
 | `move NOTE FOLDER` | same, for folder moves; bare-name links are left alone |
 | `... --apply` | execute the plan |
 | `... --apply <digest>` | execute **exactly** the previewed plan — exit 3 if anything drifted since review |
+| (tail rule) | one note per call: after the operands only `--apply [SHA8]` is accepted — an extra positional, an unknown flag, a non-hex plan id, or a flag in an operand slot is a usage error before anything resolves or prints. A bare name or id whose note is a symlink out of the vault is `escape:` |
 
 ### Graph & query
 
@@ -141,7 +145,7 @@ failed lookup prints `did you mean:` suggestions).
 | `VV_ENGINE=rust\|python` | force an engine — the test gate runs both |
 | `VV_NO_INDEX=1` / `VV_INDEX_ROOT` | disable the index · relocate it (tests) |
 | exit `0 · 1 · 3 · 4 · 5` | ok · usage/not-found · stale hash or plan · dirty journal · not UTF-8 |
-| errors | grep-stable: `kind: message — next: <command>` |
+| errors | grep-stable: `kind: message — next: <command>` on one line (plus a `did you mean:` line after a name miss, and a `warning:` line when a directory in the vault is unreadable); control characters in a token are escaped, and the `next` step never comes from a token |
 
 ## Why not just read the files?
 

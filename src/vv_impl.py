@@ -5,16 +5,18 @@ Read:    outline NOTE · read NOTE SEC · head NOTE · show NOTE [--max-bytes N]
          resolve NAME · search TERMS [--k N] [--w CHARS] [--files]
 Write:   patch NOTE SEC SHA8 <stdin · appendsec NOTE SEC TEXT · append NOTE TEXT · prepend NOTE TEXT
          set NOTE KEY VALUE · unset NOTE KEY · new PATH [--template T] [--k v ...]
-Relocate rename NOTE NEWNAME [--apply [SHA8]] · move NOTE DESTFOLDER [--apply [SHA8]] · trash NOTE [--apply SHA8]
+Relocate rename NOTE NEWNAME [--apply [SHA8]] · move NOTE DESTFOLDER [--apply [SHA8]] · trash NOTE [--apply [SHA8]]
          link-aware + journaled. Dry-run prints a plan SHA8; --apply SHA8 executes
          exactly that reviewed plan (exit 3 if the plan drifted). Never bare `mv`.
+         One note per call; anything after the operands except --apply [SHA8] is refused.
 Graph:   backlinks NOTE · links NOTE · impact NOTE · orphans [FOLDER] · deadends · unresolved\nMisc:    templates
 Query:   board FOLDER [k=v ...] · tags [--counts] · props KEY [FOLDER]
 Agent:   changed --since <epoch|ISO> · batch  (JSONL read-ops on stdin, one process)
 Daily:   daily-append TEXT   (today's standup note; creates from convention if missing)
 Health:  doctor [--rollback | --discard] · lint [--quick [--limit N]] · index [--rebuild]
 
-NOTE = vault-relative path OR bare name (wikilink-style resolution).
+NOTE = vault-relative path OR bare name (wikilink-style resolution) OR a bare id:
+       digits ('24995', quote '#24995') name the unique note titled '24995 - …'.
 SEC  = an outline id (H3) or the heading title exactly as `outline` prints it.
 search: unquoted args are AND-ed terms; a QUOTED arg is ONE phrase.
         `vv search a b` != `vv search "a b"`.
@@ -88,19 +90,50 @@ def out(s=""):
     _out_total += len(s.encode("utf-8")) + 1
     print(s)
 
-def die(msg, code=1):
+_CTL = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029\ud800-\udfff]")   # incl. every lone surrogate (undecodable bytes, JSON \ud800)
+# The suggestion line is the one newline the error grammar allows. Its marker
+# is a NUL sentinel: neither argv nor a filename can carry NUL, so only code
+# can introduce a second line — a token containing the literal text
+# "\ndid you mean: " is escaped like any other newline.
+_DYM = "\x00did you mean: "
+
+def _esc(s):
+    """Every control character (and the two Unicode line separators) escaped."""
+    def esc(m):
+        c = m.group()
+        return {"\n": "\\n", "\r": "\\r", "\t": "\\t"}.get(c, f"\\x{ord(c):02x}" if ord(c) < 256 else f"\\u{ord(c):04x}")
+    return _CTL.sub(esc, s)
+
+def _neutralise(s):
+    """A literal ` — next: ` inside message text is rewritten until none is
+    left, so the separator die() appends is the only one on the line. To
+    convergence, over the JOINED text: `str.replace` is non-overlapping and
+    the separator overlaps itself (` — next: — next: `), and the suggestion
+    line's own space can complete one across the join."""
+    while " — next: " in s:
+        s = s.replace(" — next: ", " —next: ")
+    return s
+
+def die(msg, code=1, nxt=None):
+    """Errors are `kind: message — next: <command>`. The next step is an
+    explicit argument — never parsed back out of the message — so no token
+    that lands in the message can become the --jsonl envelope's `next` field.
+    The message is escaped centrally: a caller or filesystem token reaches
+    it through any of ~40 sites, and per-site sanitising missed three
+    before the escaping was centralised."""
+    msg = _neutralise("\ndid you mean: ".join(_esc(part) for part in msg.split(_DYM, 1)))
+    nxt = _neutralise(_esc(nxt)) if nxt is not None else None
     if _JSONL:
-        # kind: everything before the first ":"; next: the trailing "— next: ..."
-        head, _, rest = msg.partition(": ")
-        body, _, nxt = rest.partition(" — next: ")
-        sys.stderr.write(json.dumps(
-            {"kind": head.split("\n")[0], "message": body or rest,
-             "next": nxt, "exit": code}, ensure_ascii=False) + "\n")
+        head, _, body = msg.partition(": ")
+        wire = json.dumps({"kind": head.split("\n")[0], "message": body or msg,
+                           "next": nxt or "", "exit": code}, ensure_ascii=False) + "\n"
     else:
-        sys.stderr.write(msg + "\n")
+        wire = msg + (f" — next: {nxt}" if nxt is not None else "") + "\n"
+    sys.stderr.write(wire)
     first = msg.split("\n", 1)[0].split(" ", 1)[0]
-    # Error text enters the caller's context too — bill it, don't log a zero.
-    _log(_out_total + len(msg.encode("utf-8")) + 1, code,
+    # Error text enters the caller's context too — bill the bytes actually
+    # written (the JSONL envelope is longer than the plain line), never a zero.
+    _log(_out_total + len(wire.encode("utf-8")), code,
          first[:-1] if first.endswith(":") else None)
     sys.exit(code)
 
@@ -111,15 +144,35 @@ def use_rust():
     matrix, adapted); unset = rust when built. Unknown values refuse loudly."""
     eng = os.environ.get("VV_ENGINE", "")
     if eng not in ("", "rust", "python"):
-        die(f"engine: unknown VV_ENGINE '{eng}' — next: use rust|python or unset")
+        die(f"engine: unknown VV_ENGINE '{eng}'", nxt="use rust|python or unset")
     if eng == "python":
         return False
     if eng == "rust" and not os.path.exists(VRUST):
-        die("engine: VV_ENGINE=rust but the engine is not built — next: cd vrust && cargo build --release")
+        die("engine: VV_ENGINE=rust but the engine is not built", nxt="cd vrust && cargo build --release")
     return os.path.exists(VRUST)
 
+_walk_errors = []   # directories os.walk could not read this invocation (rel paths)
+
+def _walk_onerror(err):
+    # os.walk skips an unreadable directory SILENTLY; a uniqueness claim over
+    # the corpus (id-prefix resolution) is unprovable when that happens, so
+    # the miss is recorded and the alias branch refuses.
+    try:
+        d = os.path.relpath(err.filename, VAULT)
+    except (TypeError, ValueError):
+        d = str(err.filename)
+    if d not in _walk_errors:
+        _walk_errors.append(d)
+
+_walked = 0   # walks this process — a completeness probe reuses the last one
+
 def md_files():
-    for dirpath, dirs, names in os.walk(VAULT):
+    global _walked
+    # the list describes THIS walk: `batch` runs many ops in one process, and a
+    # stale entry from an earlier op refused later resolutions
+    _walk_errors.clear()
+    _walked += 1
+    for dirpath, dirs, names in os.walk(VAULT, onerror=_walk_onerror):
         dirs[:] = [d for d in dirs if not d.startswith(".") and d not in SKIP_DIRS]
         for n in names:
             if n.endswith(".md"):
@@ -168,22 +221,132 @@ def resolve(ref):
     if os.path.isfile(fp_md):
         return _cf(fp_md)
     want = (ref[:-3] if ref.endswith(".md") else ref).lower()
-    all_notes = list(md_files())
-    hits = [p for p in all_notes if os.path.basename(p)[:-3].lower() == want]
+    # a dangling symlink is walk-visible but not a note: never a hit (the read
+    # after it would raise, breaking the error contract)
+    all_notes = [p for p in md_files() if os.path.isfile(p)]
+    hits = _name_hits(want, all_notes)
+    if not hits and want.startswith("#") and _ID_REF.fullmatch(want):
+        # `#NNNNN` resolves exactly as `NNNNN` would once a literal `#NNNNN`
+        # note has missed: exact path, exact basename, then the id rule — all
+        # against THIS walk (a second walk could see a different tree)
+        bare = ref[1:]
+        for cand in (bare, bare + ".md"):
+            fp_b = contain(cand)
+            if os.path.isfile(fp_b):
+                return _cf(fp_b)
+        want = want[1:]
+        hits = _name_hits(want, all_notes)
     if len(hits) == 1:
-        return _cf(hits[0])
+        return _cf(_contained(hits[0]))
     if not hits:
+        idhit = _resolve_id_prefix(want, all_notes)
+        if idhit:
+            return _cf(idhit)
+        if _walk_errors:
+            _incomplete(f"'{ref}' is absent")
         sugg = suggest_names(want, all_notes)
-        extra = ("\ndid you mean: " + " | ".join(sugg)) if sugg else ""
+        extra = (_DYM + " | ".join(sugg)) if sugg else ""
         die(f"not-found: no note matches '{ref}'{extra}")
-    die("ambiguous: " + " | ".join(os.path.relpath(h, VAULT) for h in sorted(hits)[:5]))
+    die("ambiguous: " + " | ".join(os.path.relpath(h, VAULT) for h in sorted(hits)[:5]), nxt=f"vv resolve {_q(os.path.relpath(sorted(hits)[0], VAULT))}")
+
+_WRITE_OPS = {"set", "unset", "append", "appendsec", "prepend", "patch", "rename", "move", "trash", "batch"}
+_warned_incomplete = False
+
+def _incomplete(claim):
+    """An incomplete walk cannot prove a bare name or id unique (or absent):
+    the unreadable directory may hold a second note. A WRITE through such a
+    hit is refused; a READ answers the visible hit with a warning — the
+    wrong note in a read is loud and recoverable, one unreadable directory
+    turning every bare-name read into an outage is not. `batch` refuses because it captures each op's stderr and
+    surfaces it only on a non-zero exit — a warning there would be swallowed."""
+    global _out_total, _warned_incomplete
+    where = ", ".join(_walk_errors[:3])
+    if _op in _WRITE_OPS:
+        die(f"refused: cannot prove {claim} — unreadable: {where}", nxt="vv doctor")
+    if _warned_incomplete:
+        return   # one warning per invocation: the id branch and the miss branch may both reach here
+    _warned_incomplete = True
+    # not routed through die() (the command still answers), so it is escaped,
+    # enveloped under --jsonl, and billed the same way
+    body = _neutralise(_esc(f"cannot prove {claim} — unreadable: {where}"))
+    if _JSONL:
+        wire = json.dumps({"kind": "warning", "message": body, "next": "vv doctor", "exit": 0}, ensure_ascii=False) + "\n"
+    else:
+        wire = f"warning: {body} — next: vv doctor\n"
+    sys.stderr.write(wire)
+    _out_total += len(wire.encode("utf-8"))
+
+def _name_hits(want, all_notes):
+    """Exact-basename matches from a completed walk (see _incomplete)."""
+    hits = [p for p in all_notes if os.path.basename(p)[:-3].lower() == want]
+    if hits and _walk_errors:
+        _incomplete(f"'{want}' is unique")
+    return hits
+
+def _contained(p):
+    """A note chosen from a directory WALK (not typed by the caller) gets the
+    same containment as a typed path: a symlinked note whose target is
+    outside the vault must never become a read or write target through a
+    bare name or an id (the bare-name half was pre-existing). Mirrored in vrust readpath::resolve."""
+    real = os.path.realpath(p)
+    if real != _VAULT_REAL and not real.startswith(_VAULT_REAL + os.sep):
+        die(f"escape: path leaves the vault: {rel(p)}")
+    return p
+
+# A bare ASCII-digit ref (optionally `#`-prefixed) names the UNIQUE note whose
+# basename starts with `<digits> - ` — the `NNNNN - Title` work-item filename
+# convention. Deterministic, never fuzzy: exact path and exact basename have
+# already missed by the time this runs, the delimiter is literal (an en-dash,
+# a missing space, or digits mid-name are not matches), and 2+ candidates
+# refuse. It is a filename convention, not verified ticket identity: `[[24995]]`
+# stays an unresolved LINK (link resolution never reads this). Motivated by
+# one day's telemetry sink: 17 not-found rows, 9 of them in one second,
+# from a `vv set <id> …` loop (`bench/pilot_report.py` re-derives it).
+_ID_REF = re.compile(r"#?([0-9]+)")
+
+def _resolve_id_prefix(want, all_notes):
+    m = _ID_REF.fullmatch(want)
+    if not m:
+        return None
+    digits = m.group(1)
+    prefix = digits + " - "
+    cands = sorted(p for p in all_notes if os.path.basename(p).startswith(prefix))
+    if _walk_errors:
+        # zero visible candidates is not "none": the unreadable directory may
+        # hold the note (or a second one)
+        _incomplete(f"id {digits} is unique")
+    if not cands:
+        return None
+    if len(cands) > 1:
+        die(f"ambiguous: {digits} matches {len(cands)} notes: "
+            + " | ".join(rel(c) for c in cands[:5]), nxt=f"vv resolve {_q(rel(cands[0]))}")
+    return _contained(cands[0])
+
+def _q(s, placeholder="NOTE"):
+    """A token interpolated into a RUNNABLE next step: shell-quoted, unless it
+    carries a control character or the ` — next: ` separator — then the
+    placeholder, because a next step that spans lines or re-splits is not a
+    command an agent can copy. shlex is imported
+    here, not at module level: ~0.4–0.9 ms on every invocation for an
+    error-path-only helper (measured)."""
+    if _CTL.search(s) or " — next: " in s:
+        return placeholder
+    import shlex
+    return shlex.quote(s)
+
+def _is_flag(tok):
+    """`-h` is a flag spelling too: one predicate for the relocate tail, the
+    operand slots, and the next-step interpolator, so they cannot disagree.
+    A note whose name starts with `-` is spelled `./-name`."""
+    return tok.startswith("-") and len(tok) > 1
 
 def suggest_names(want, paths, n=3):
     """Suggestions for a failed name lookup, tiered like rustdoc search:
     substring match outranks edit-distance similarity. A path-qualified miss
     (Folder/Notte) is compared by its basename. Ties break lexicographically so
     filesystem iteration order never changes the output. Suggestion only —
-    resolve never auto-picks a fuzzy match, because resolve feeds the write path."""
+    resolve never auto-picks a fuzzy match, because resolve feeds the write path
+    (the id-prefix rule in _resolve_id_prefix is exact and unique, not fuzzy)."""
     import difflib
     want = want.rsplit("/", 1)[-1]
     by_name = {}
@@ -261,7 +424,7 @@ def sec_text(lines, s):
 def sha8(t):
     return hashlib.sha256(t.encode()).hexdigest()[:8]
 
-def find_sec(lines, secs, sid):
+def find_sec(lines, secs, sid, ref):
     """Resolve a section by id, and forgive the four ways agents actually ask.
 
     A replay of 50 real sessions (2026-08-26) found section addressing was
@@ -290,9 +453,9 @@ def find_sec(lines, secs, sid):
         return matches[0]
     if len(matches) > 1:
         ids = ", ".join(m["id"] for m in matches)
-        die(f"ambiguous: {len(matches)} sections are titled {want!r} ({ids}) — "
-            f"next: pass the id from vv outline NOTE")
-    die(f"not-found: no section {sid} — next: vv outline NOTE")
+        die(f"ambiguous: {len(matches)} sections are titled {want!r} ({ids})",
+            nxt=f"vv outline {_q(ref)}")
+    die(f"not-found: no section {sid}", nxt=f"vv outline {_q(ref)}")
 
 def split_fm(text):
     fm, body, _tail, _bom = split_fm_full(text)
@@ -338,12 +501,34 @@ def file_sig(fp):
         return None
 
 
+def _read_strict(fp):
+    """UTF-8 text or an exception (UnicodeDecodeError / PermissionError) —
+    the corpus scans catch and record; single-note commands die through read_raw."""
+    with open(fp, newline="", encoding="utf-8") as f:
+        return f.read()
+
 def read_raw(fp):
     try:
-        with open(fp, newline="", encoding="utf-8") as f:
-            return f.read()
+        return _read_strict(fp)
     except UnicodeDecodeError as e:
         die(f"utf8: {rel(fp)} is not valid UTF-8 ({e.reason} at byte {e.start}) — vv only edits UTF-8 notes", 5)
+    except PermissionError as e:
+        # a note we cannot read is a refusal in the error grammar, never a traceback
+        die(f"refused: cannot read {rel(fp)} ({e.strerror})", nxt="vv doctor")
+
+def _read_lossy(fp):
+    """A corpus scan's read: decoding errors replaced, an unreadable note
+    recorded as an unreadable path (the scan then warns or refuses through
+    _incomplete like an unreadable directory) and skipped — never a
+    traceback, never a silent omission."""
+    try:
+        with open(fp, errors="replace") as f:
+            return f.read()
+    except PermissionError:
+        r = rel(fp)
+        if r not in _walk_errors:
+            _walk_errors.append(r)
+        return None
 
 def eol_of(text):
     return "\r\n" if "\r\n" in text else "\n"
@@ -423,7 +608,7 @@ def cmd_outline(ref):
 
 def cmd_read(ref, sid):
     lines, secs = parse(read_raw(resolve(ref)))
-    s = find_sec(lines, secs, sid)
+    s = find_sec(lines, secs, sid, ref)
     out(sec_text(lines, s))
     out(f"--sha8:{sha8(sec_text(lines, s))}")
 
@@ -438,9 +623,9 @@ def cmd_patch(ref, sid, expect):
     _dirty_gate()
     fp = resolve(ref)
     lines, secs = parse(read_raw(fp))
-    s = find_sec(lines, secs, sid)
+    s = find_sec(lines, secs, sid, ref)
     if sid == "H0" and s["end"] > 0 and lines and lines[0].rstrip("\r") == "---":
-        die("refused: H0 contains frontmatter — next: vv set/unset (patch would rewrite YAML as body)")
+        die("refused: H0 contains frontmatter", nxt="vv set/unset (patch would rewrite YAML as body)")
     cur = sec_text(lines, s)
     if sha8(cur) != expect:
         sys.stderr.write(f"stale: {sid} is {sha8(cur)}, expected {expect} — re-outline\n")
@@ -457,7 +642,7 @@ def cmd_appendsec(ref, sid, text):
     fp = resolve(ref)
     _sig = file_sig(fp)
     lines, secs = parse(read_raw(fp))
-    s = find_sec(lines, secs, sid)
+    s = find_sec(lines, secs, sid, ref)
     ins = s["end"]
     while ins > s["start"] and lines[ins - 1].strip() == "":
         ins -= 1
@@ -567,7 +752,7 @@ def cmd_set(ref, key, value):
     else:
         fm_lines = fm.replace("\r\n", "\n").split("\n")
         if block_scalar_key(fm_lines, key):
-            die(f"refused: '{key}' has a multi-line/block value — next: edit the note directly (set would orphan continuation lines)")
+            die(f"refused: '{key}' has a multi-line/block value", nxt="edit the note directly (set would orphan continuation lines)")
         pat = re.compile(rf"^{re.escape(key)}:")
         hit = [i for i, l in enumerate(fm_lines) if pat.match(l)]
         if hit:
@@ -588,7 +773,7 @@ def cmd_unset(ref, key):
     eol = eol_of(text)
     fm_lines = fm.replace("\r\n", "\n").split("\n")
     if block_scalar_key(fm_lines, key):
-        die(f"refused: '{key}' has a multi-line/block value — next: edit the note directly (unset would orphan continuation lines)")
+        die(f"refused: '{key}' has a multi-line/block value", nxt="edit the note directly (unset would orphan continuation lines)")
     kept = [l for l in fm_lines if not re.match(rf"^{re.escape(key)}:", l)]
     if kept == fm_lines:
         die(f"not-found: no key {key} in {rel(fp)}")
@@ -610,7 +795,7 @@ def cmd_new(*args):
         die("usage: new PATH [--template NAME] [--key value ...]")
     fp = contain(path if path.endswith(".md") else path + ".md")
     if os.path.exists(fp):
-        die(f"exists: {rel(fp)} — next: pick another name or edit it")
+        die(f"exists: {rel(fp)}", nxt="pick another name or edit it")
     d = os.path.dirname(fp)
     if d:
         os.makedirs(d, exist_ok=True)
@@ -627,11 +812,11 @@ def cmd_new(*args):
             # the same stem exists in more than one Templates/ subfolder — the
             # exact-match rule must not become a silent lexicographic pick
             names = " | ".join(os.path.relpath(h, os.path.join(VAULT, "Templates"))[:-3] for h in exact[:5])
-            die(f"ambiguous: template '{template}' exists as {names} — next: vv templates")
+            die(f"ambiguous: template '{template}' exists as {names}", nxt="vv templates")
         elif len(hits) > 1:
             # never silently take the first lexicographic hit (it did, until 2026-08-27)
             names = " | ".join(os.path.basename(h)[:-3] for h in hits[:5])
-            die(f"ambiguous: template '{template}' matches {names} — next: vv templates")
+            die(f"ambiguous: template '{template}' matches {names}", nxt="vv templates")
         content = read_raw(hits[0])
     missing = []
     for k, v in kv.items():
@@ -727,8 +912,7 @@ def _scope(folder):
     root = contain(folder)
     if not os.path.isdir(root):
         if os.path.exists(root):
-            import shlex
-            die(f"not-found: {folder} is a file, not a folder — next: vv outline {shlex.quote(folder)}")
+            die(f"not-found: {folder} is a file, not a folder", nxt=f"vv outline {_q(folder)}")
         die(f"not-found: no such folder: {folder}")
     rel_ = os.path.relpath(os.path.realpath(root), _VAULT_REAL)
     return "" if rel_ == "." else _ondisk(rel_, folder)
@@ -796,8 +980,7 @@ def cmd_orphans(folder=""):
         # The check runs on the RESOLVED, on-disk-spelled scope (a `..`, a
         # symlink or a case variant cannot dodge it).
         # board/props DO answer for an explicitly named skip dir.
-        import shlex
-        die(f"refused: {folder} is outside the link graph (a skip dir) — next: vv board {shlex.quote(folder)}")
+        die(f"refused: {folder} is outside the link graph (a skip dir)", nxt=f"vv board {_q(folder, 'FOLDER')}")
     root = os.path.join(VAULT, rroot) if rroot else VAULT
     files = list(md_files())
     idx = basename_index()
@@ -843,9 +1026,8 @@ def cmd_board(folder, *filters):
     # vv's — capture exit codes unpiped.)
     bad = [f for f in filters if "=" not in f]
     if bad:
-        import shlex
-        die(f"usage: board filters are KEY=VALUE, got {shlex.quote(bad[0])} — "
-            f"next: vv board {shlex.quote(folder)} {shlex.quote(bad[0] + '=VALUE')}")
+        die(f"usage: board filters are KEY=VALUE, got {_q(bad[0], 'KEY')}",
+            nxt=f"vv board {_q(folder, 'FOLDER')} {_q(bad[0] + '=VALUE', 'KEY=VALUE')}")
     want = dict(f.split("=", 1) for f in filters)
     # `board .` / `board ""` returned ZERO rows on the indexed path while the
     # walk and the native engine returned every note — see _scope for the
@@ -864,13 +1046,18 @@ def cmd_board(folder, *filters):
     else:
         for p_ in _walk_scope(rroot):      # same prune rules as the index and the native walk
             n = os.path.basename(p_)
-            fm, _ = split_fm(open(p_, errors="replace").read())
+            _t = _read_lossy(p_)
+            if _t is None:
+                continue
+            fm, _ = split_fm(_t)
             props = fm_props(fm)
             if all(props.get(k) == v for k, v in want.items()):
                 rows.append((n[:-3], props.get("status", "-"), props.get("type", "-")))
         rows.sort()   # deterministic + identical to the indexed path on nested
         # folders (they disagreed in walk order until 2026-08-27 — caught by the
         # native-port fixture suite, a latent inconsistency from the index change)
+    if _walk_errors:
+        _incomplete("the corpus is complete")
     _list_out([{"name": n_, "status": s_, "type": ty} for n_, s_, ty in rows],
               len(rows), "notes", cmd="board",
               fmt=lambda r: f"{r['status']}\t{r['type']}\t{r['name']}")
@@ -880,7 +1067,7 @@ def cmd_tags(*args):
     c = Counter()
     h = index_handle()
     rows = h.props() if h is not None else (
-        (rel(p), fm_props(split_fm(open(p, errors="replace").read())[0]))
+        (rel(p), fm_props(split_fm((_read_lossy(p) or ""))[0]))
         for p in sorted(md_files()))
     for _rp, props in rows:
         t = props.get("tags", "")
@@ -889,6 +1076,8 @@ def cmd_tags(*args):
     counted = "--counts" in args
     entries = [{"tag": tag, "count": n}
                for tag, n in c.most_common(40 if counted else 9999)]
+    if _walk_errors:
+        _incomplete("the corpus is complete")
     _list_out(entries, len(c), "tags", cmd="tags",
               fmt=(lambda r: f"{r['count']}\t{r['tag']}") if counted else (lambda r: r["tag"]))
 
@@ -911,7 +1100,7 @@ def cmd_props(key, folder=""):
     c = Counter()
     h = index_handle(scope=rroot or None)
     rows = h.props() if h is not None else (
-        (rel(p), fm_props(split_fm(open(p, errors="replace").read())[0]))
+        (rel(p), fm_props(split_fm((_read_lossy(p) or ""))[0]))
         for p in sorted(_walk_scope(rroot)))
     for rp, props in rows:
         if rroot and not (rp == rroot or rp.startswith(rroot + os.sep)):
@@ -920,6 +1109,8 @@ def cmd_props(key, folder=""):
         if v:
             c[v] += 1
     entries = [{"value": v, "count": n} for v, n in c.most_common()]
+    if _walk_errors:
+        _incomplete("the corpus is complete")
     _list_out(entries, sum(c.values()), f"notes with {key}", cmd="props",
               fmt=lambda r: f"{r['count']}\t{r['value']}")
 
@@ -957,7 +1148,9 @@ def _search_hits(terms, w):
         if not all(t in rl for t in path_terms):
             continue
         try:
-            text = open(p, errors="replace").read()
+            text = _read_lossy(p)
+            if text is None:
+                continue
         except OSError:
             continue
         low = text.lower()
@@ -1032,7 +1225,7 @@ def cmd_search(*args):
         # python owns the schema: never shell to the engine here (the child
         # would treat the query as plain text search and return TSV).
         if not terms:
-            die("usage: search needs a query — next: vv search <terms> [--k N] [--w CHARS]")
+            die("usage: search needs a query", nxt="vv search <terms> [--k N] [--w CHARS]")
         hits = _search_hits(terms, w)
         rows = [{"path": r_, "score": s_} if files_only
                 else {"path": r_, "score": s_, "snippet": sn}
@@ -1058,7 +1251,7 @@ def cmd_search(*args):
             if h: out(h)
         _log(_out_total, r.returncode); sys.exit(r.returncode)
     if not terms:
-        die("usage: search needs a query — next: vv search <terms> [--k N] [--w CHARS]")
+        die("usage: search needs a query", nxt="vv search <terms> [--k N] [--w CHARS]")
     hits = _search_hits(terms, w)
     if files_only:
         # --files: matching paths only, same ranking, same trailer — the
@@ -1078,9 +1271,14 @@ def cmd_daily_append(text):
     _dirty_gate()
     import datetime, glob
     today = datetime.date.today().isoformat()
-    hits = glob.glob(os.path.join(VAULT, "Standups", f"*{today}*.md"))
+    sd = os.path.join(VAULT, "Standups")
+    if os.path.isdir(sd) and not os.access(sd, os.R_OK):
+        # glob swallows EACCES and would report a false absence — and the
+        # next step would create a duplicate of a note that exists
+        die("refused: cannot prove today's standup is absent — unreadable: Standups", nxt="vv doctor")
+    hits = glob.glob(os.path.join(sd, f"*{today}*.md"))
     if not hits:
-        die(f"not-found: no standup note for {today} under Standups/ — next: create it, then re-run")
+        die(f"not-found: no standup note for {today} under Standups/", nxt="create it, then re-run")
     # Three defects lived in this one line (Codex review 2026-08-26), and this is
     # the most-used writer in the tool:
     #   1. no CAS -- the "every writer is guarded" claim skipped daily-append;
@@ -1185,18 +1383,41 @@ def scan_links(needle=None):
                 if not line:
                     continue
                 rel_, ln, kind, tgt = line.split("\t", 3)
+                if kind == "u":
+                    # the native scan could not read this note: incomplete evidence
+                    if rel_ not in _walk_errors:
+                        _walk_errors.append(rel_)
+                    continue
                 yield os.path.join(VAULT, rel_), int(ln) - 1, ("wiki" if kind == "w" else "md"), tgt
+            if _walk_errors:
+                _incomplete("the link graph is complete")
             return
     n = needle.lower() if needle else None
     for p in md_files():
         try:
-            text = read_raw(p)
-        except SystemExit:
+            text = _read_strict(p)
+        except UnicodeDecodeError:
+            # non-UTF-8: the link grammar is ASCII-delimited, so a lossy decode
+            # still finds every link (a target carrying the bad bytes can never
+            # equal a UTF-8 note name). The note is scanned, not skipped and
+            # not treated as unreadable — one Latin-1 stray must not refuse
+            # every relocation in the vault. A relocation
+            # that would have to REWRITE it is refused at plan time (utf8:, 5).
+            text = _read_lossy(p)
+        except PermissionError:
+            # unreadable: the walk is incomplete for the link graph — a rename
+            # over it would rewrite half the backlinks and verify "clean"
+            # Recorded silently; judged after the scan.
+            r = rel(p)
+            if r not in _walk_errors:
+                _walk_errors.append(r)
             continue
         for i, kind, tgt in link_targets_in(text):
             if n and kind == "wiki" and n not in tgt.lower():
                 continue
             yield p, i, kind, tgt
+    if _walk_errors:
+        _incomplete("the link graph is complete")
 
 def code_spans(line):
     """(start, end) of inline code spans, CommonMark-style: a run of N backticks is
@@ -1324,9 +1545,16 @@ def _index_stat_walk(scope=None):
     """rel_path -> (mtime_ns, size, inode); no file reads. scope = vault-relative
     folder to confine the walk (freshness is only needed for files a scoped
     command will actually read)."""
+    global _walked
     m = {}
     root = os.path.join(VAULT, scope) if scope else VAULT
-    for dirpath, dirs, names in os.walk(root):
+    if not scope:
+        # a full-vault sync walk is the freshest completeness evidence the
+        # invocation has: record its errors and count it (an index
+        # sync after resolve()'s walk could prune a newly unreadable note
+        # while the probe reused the older, clean walk)
+        _walk_errors.clear(); _walked += 1
+    for dirpath, dirs, names in os.walk(root, onerror=_walk_onerror if not scope else None):
         dirs[:] = [d for d in dirs if not d.startswith(".") and d not in SKIP_DIRS]
         for n in names:
             if n.endswith(".md"):
@@ -1335,6 +1563,12 @@ def _index_stat_walk(scope=None):
                     st = os.stat(fp)
                 except OSError:
                     continue
+                if not os.access(fp, os.R_OK):
+                    # the index-backed link scan never opens notes: an unreadable
+                    # note must still count as incomplete evidence
+                    r_ = os.path.relpath(fp, VAULT)
+                    if r_ not in _walk_errors:
+                        _walk_errors.append(r_)
                 m[os.path.relpath(fp, VAULT)] = (st.st_mtime_ns, st.st_size, st.st_ino)
     return m
 
@@ -1523,10 +1757,22 @@ def cmd_index(*args):
 
 
 def basename_index():
-    """lowercased basename -> [paths]"""
+    """lowercased basename -> [paths]. The link graph's completeness is probed
+    here — the one entry every link-scan consumer (backlinks, impact, orphans,
+    unresolved, lint, and the rename/move/trash rewrite) goes through — so an
+    unreadable directory warns a read and refuses a write (see _incomplete)
+    instead of under-reporting silently over an index that prunes what the
+    walk could not see."""
     idx = {}
     h = index_handle()
-    paths = (os.path.join(VAULT, r) for r in h.rel_paths()) if h is not None else md_files()
+    if h is not None:
+        if not _walked:
+            list(md_files())         # the index does not walk; a probe walk does (once per invocation)
+        paths = (os.path.join(VAULT, r) for r in h.rel_paths())
+    else:
+        paths = list(md_files())
+    if _walk_errors:
+        _incomplete("the link graph is complete")
     for p in paths:
         idx.setdefault(os.path.basename(p)[:-3].lower(), []).append(p)
     return idx
@@ -1612,19 +1858,26 @@ def cmd_show(ref, *args):
         out(t)
         used += tb + 1
     if not started:
-        die(f"not-found: no section {start} — next: vv outline NOTE")
+        die(f"not-found: no section {start}", nxt=f"vv outline {_q(ref)}")
 
 def cmd_deadends():
     entries = []
     h = index_handle()
     if h is not None:
+        if not _walked:
+            list(md_files())         # completeness probe: this read never touches basename_index()
         linked = {r[0] for r in h.con.execute(
             "SELECT DISTINCT f.path FROM links l JOIN files f ON f.id = l.file_id")}
         entries = [{"path": rp} for rp in h.rel_paths() if rp not in linked]
     else:
         for p in sorted(rel(p) for p in md_files()):
-            if not any(True for _ in link_targets_in(open(os.path.join(VAULT, p), errors="replace").read())):
+            _t = _read_lossy(os.path.join(VAULT, p))
+            if _t is None:
+                continue
+            if not any(True for _ in link_targets_in(_t)):
                 entries.append({"path": p})
+    if _walk_errors:
+        _incomplete("the link graph is complete")
     _list_out(entries, len(entries), "deadends", cmd="deadends")
 
 def cmd_changed(*args):
@@ -1642,9 +1895,9 @@ def cmd_changed(*args):
             try:
                 since = datetime.datetime.fromisoformat(raw).timestamp()
             except ValueError:
-                die(f"usage: --since {raw} is neither epoch seconds nor ISO — next: vv changed --since 2026-08-27")
+                die(f"usage: --since {raw} is neither epoch seconds nor ISO", nxt="vv changed --since 2026-08-27")
     if since is None:
-        die("usage: changed requires --since <epoch|ISO> — next: vv changed --since 2026-08-27")
+        die("usage: changed requires --since <epoch|ISO>", nxt="vv changed --since 2026-08-27")
     hits = []
     for p_ in md_files():
         try:
@@ -1668,11 +1921,12 @@ def cmd_trash(ref, *args):
     same reason move refuses it: removing one silently repoints the survivors'
     bare links. Recovery: the same journal endpoints as rename/move — a crash
     between the move and the commit is reversed by doctor --rollback."""
+    apply_, expect = _relocate_tail("trash", (ref,), args)   # before resolve: syntax outranks lookup
     fp = resolve(ref)
     src_rel = rel(fp)
     hits, ambiguous = occurrences(fp, include_bare=True)
     if ambiguous:
-        die("refused: source basename is ambiguous in vault — next: resolve duplicate notes first")
+        die("refused: source basename is ambiguous in vault", nxt="resolve duplicate notes first")
     base = os.path.basename(src_rel)
     dest_rel = os.path.join(".trash", base)
     n = 2
@@ -1688,12 +1942,11 @@ def cmd_trash(ref, *args):
     out(f"files with links that will BREAK: {len(hits)} ({sum(hits.values())} occurrences)")
     for p_, n_ in sorted(hits.items()):
         out(f"  {n_}\t{rel(p_)}")
-    if "--apply" not in args:
+    if not apply_:
         out(f"(dry-run — apply with: --apply {plan_id} to bind to THIS plan)")
         return
-    expect = _plan_token(args)
     if expect and expect != plan_id:
-        die(f"stale: plan is now {plan_id}, you reviewed {expect} — next: re-run the dry-run", 3)
+        die(f"stale: plan is now {plan_id}, you reviewed {expect}", 3, nxt="re-run the dry-run")
     _dirty_gate()
     jdir = _journal_start("trash", [fp], src=src_rel, dest=dest_rel)
     try:
@@ -1785,14 +2038,17 @@ def cmd_batch():
     import io, contextlib
     if sys.stdin.isatty():
         # No piped ops: refuse instead of blocking silently at the terminal.
-        die('usage: batch reads JSONL ops from stdin — next: printf \'{"cmd":"tags","args":[]}\\n\' | vv batch')
+        die('usage: batch reads JSONL ops from stdin', nxt='printf \'{"cmd":"tags","args":[]}\\n\' | vv batch')
     for i, line in enumerate(sys.stdin):
         line = line.strip()
         if not line:
             continue
         try:
             op = json.loads(line)
-            cmd, cargs = op["cmd"], [str(x) for x in op.get("args", [])]
+            # JSON strings may carry \u0000 — the one byte argv and filenames
+            # cannot — and NUL is die()'s suggestion-line sentinel; escape it
+            # here so a batch op can never forge a second stderr line
+            cmd, cargs = op["cmd"], [str(x).replace("\x00", "\\x00") for x in op.get("args", [])]
             if cmd not in _BATCH_READS:
                 raise ValueError(f"'{cmd}' is not a batch-able read command")
             fn = CMDS[cmd]
@@ -1815,7 +2071,7 @@ def cmd_batch():
             rec["out"] = o.getvalue().rstrip("\n")
         else:
             rec["error"] = (e_.getvalue() or o.getvalue()).rstrip("\n")
-        print(json.dumps(rec, ensure_ascii=False))
+        print(json.dumps(rec, ensure_ascii=False).encode("utf-8", "backslashreplace").decode("utf-8"), flush=True)
 
 def _git(args_):
     import subprocess
@@ -1947,7 +2203,7 @@ def _journal_rollback(jdir, written=None):
         # is nothing to restore and nothing was written yet; refuse loudly rather
         # than raising a traceback out of doctor.
         die(f"conflict: journal {os.path.basename(jdir)} has no manifest (killed during "
-            f"preparation) — next: vv doctor --discard", 1)
+            f"preparation)", 1, nxt="vv doctor --discard")
     man = json.load(open(mpath))
     import shutil as _sh
     left = []
@@ -2069,16 +2325,53 @@ def _rewrite_links(text, source_fp, new_rel_noext, rename_base, linking_fp=None)
         lines[i] = l
     return "\n".join(lines), changed
 
-def _plan_token(args):
-    """The 8-hex token following --apply, if any: `--apply <sha8>` binds the apply
-    to the exact previewed plan (sqlx checksums an applied migration for the same
-    reason). Plain --apply keeps the one-shot behavior."""
-    a = list(args)
-    if "--apply" in a:
-        i = a.index("--apply")
-        if i + 1 < len(a) and re.fullmatch(r"[0-9a-f]{8}", a[i + 1]):
-            return a[i + 1]
-    return None
+_RELOCATE = {"move", "rename", "trash"}   # commands whose *args tail is flags-only
+
+def _relocate_tail(cmd, operands, tail):
+    """The trailing-argument GRAMMAR of rename/move/trash: after the fixed
+    operands, the only accepted tokens are `--apply`, optionally followed by
+    ONE 8-hex plan id (case-insensitive, normalised to lowercase). Anything
+    else is a usage error, raised BEFORE the note resolves or a plan prints.
+
+    Why a grammar and not `"--apply" in args`: `*args` swallowed extra
+    positionals silently, so `vv move A B C D Dest --apply` used note B as the
+    destination (four stray folders at the vault root once, exit 0), and
+    a non-hex token after --apply degraded to an UNBOUND apply — the typo'd
+    plan id was ignored and the write went ahead. A flag in an operand slot
+    (`vv move A --apply`, `vv move --apply A Dest`) is refused for the same
+    reason: it would resolve `--apply` as a note or plan a move into a folder
+    named `--apply`. Returns (apply, plan_id_or_None)."""
+    names = _table_operands(cmd)
+    synopsis = f"{cmd} takes {' '.join(names)}"
+    template = _next_from_table(cmd, [])            # placeholders: the operands are suspect
+    for nm, val in zip(names, operands):
+        if _is_flag(val):
+            die(f"usage: {synopsis}, got flag '{val}' where {nm} was expected (a name starting with '-' is spelled ./{val})",
+                nxt=template)
+    dry = _next_from_table(cmd, list(operands))     # the caller's dry-run, quoted
+    apply_, token = False, None
+    it = iter(tail)
+    for tok in it:
+        if tok == "--apply":
+            if apply_:
+                die(f"usage: --apply given twice", nxt=dry)
+            apply_ = True
+            tok2 = next(it, None)
+            if tok2 is None:
+                break
+            if _is_flag(tok2):
+                if tok2 == "--apply":
+                    die(f"usage: --apply given twice", nxt=dry)
+                die(f"usage: {synopsis} [--apply [SHA8]], got unknown flag '{tok2}'", nxt=dry)
+            if not re.fullmatch(r"[0-9a-fA-F]{8}", tok2):
+                die(f"usage: --apply takes an 8-hex plan id, got '{tok2}'", nxt=dry)
+            token = tok2.lower()
+        elif _is_flag(tok):
+            die(f"usage: {synopsis} [--apply [SHA8]], got unknown flag '{tok}'", nxt=dry)
+        else:
+            hint = " (one note per call)" if cmd == "move" else ""
+            die(f"usage: {synopsis}, got extra positional '{tok}'{hint}", nxt=template)
+    return apply_, token
 
 def _do_relocate(ref, dest_rel_noext, apply_, opname, expect_plan=None):
     fp = resolve(ref)
@@ -2099,7 +2392,15 @@ def _do_relocate(ref, dest_rel_noext, apply_, opname, expect_plan=None):
         # rename: bare links can't be rewritten safely. move: bare links aren't
         # rewritten at all, but relocating one duplicate CHANGES which note the
         # same-folder/shortest-path tiers resolve them to — silent repointing.
-        die(f"refused: source basename is ambiguous in vault — next: resolve duplicate notes first")
+        die(f"refused: source basename is ambiguous in vault", nxt="resolve duplicate notes first")
+    for p in sorted(hits, key=rel):
+        # a backlink in a non-UTF-8 note was found by a lossy scan; rewriting
+        # it would write replacement characters over the original bytes —
+        # refused before any plan or journal exists, same code as read_raw
+        try:
+            _read_strict(p)
+        except UnicodeDecodeError as e:
+            die(f"utf8: {rel(p)} links to {src_rel} but is not valid UTF-8 ({e.reason} at byte {e.start}) — vv only edits UTF-8 notes", 5)
     # plan digest: operation + destination + every affected file's byte hash.
     # `--apply <digest>` then executes exactly the previewed blast radius or
     # exits stale — an edit or new link between preview and apply changes it.
@@ -2116,7 +2417,7 @@ def _do_relocate(ref, dest_rel_noext, apply_, opname, expect_plan=None):
         out(f"(dry-run — apply with: --apply, or --apply {plan_id} to bind to THIS plan)")
         return
     if expect_plan and expect_plan != plan_id:
-        die(f"stale: plan is now {plan_id}, you reviewed {expect_plan} — next: re-run the dry-run", 3)
+        die(f"stale: plan is now {plan_id}, you reviewed {expect_plan}", 3, nxt="re-run the dry-run")
     # journal every file that will be written, plus the moved file itself (once)
     _dirty_gate()
     journal_targets = list(hits.keys()) + ([fp] if fp not in hits else [])
@@ -2199,14 +2500,16 @@ def _do_relocate(ref, dest_rel_noext, apply_, opname, expect_plan=None):
         die(f"rolled-back: ({e}); originals restored")
 
 def cmd_rename(ref, new_name, *args):
+    apply_, token = _relocate_tail("rename", (ref, new_name), args)   # before resolve: syntax outranks lookup
     fp = resolve(ref)
     dest = os.path.join(os.path.dirname(rel(fp)), new_name[:-3] if new_name.endswith(".md") else new_name)
-    _do_relocate(ref, dest, "--apply" in args, "rename", _plan_token(args))
+    _do_relocate(ref, dest, apply_, "rename", token)
 
 def cmd_move(ref, dest_folder, *args):
+    apply_, token = _relocate_tail("move", (ref, dest_folder), args)
     fp = resolve(ref)
     dest = os.path.join(dest_folder.rstrip("/"), os.path.basename(rel(fp))[:-3])
-    _do_relocate(ref, dest, "--apply" in args, "move", _plan_token(args))
+    _do_relocate(ref, dest, apply_, "move", token)
 
 def _table_pipe_findings(text):
     """[(line_idx0, raw_target)] for unescaped alias pipes inside wikilinks on
@@ -2281,12 +2584,19 @@ def cmd_lint(*args):
                     findings.append(("broken-link", f"{rp}:{i+1}", tgt))
             for i, tgt in pipes.get(rp, []):
                 findings.append(("table-pipe", f"{rp}:{i+1}", tgt))
+        # an unreadable note met by the index sync was judged by the
+        # basename_index() probe above (mutation M39: a second judge here is dead)
         _lint_report(findings, limit, check="--check" in args)
         return
     for p in sorted(md_files()):
         try:
-            text = read_raw(p)
-        except SystemExit:
+            text = _read_strict(p)
+        except UnicodeDecodeError:
+            text = _read_lossy(p)   # linted as decoded; see scan_links
+        except PermissionError:
+            r = rel(p)
+            if r not in _walk_errors:
+                _walk_errors.append(r)
             continue
         for i, kind, tgt in link_targets_in(text):
             if kind != "wiki":
@@ -2301,6 +2611,8 @@ def cmd_lint(*args):
                 findings.append(("broken-link", f"{rel(p)}:{i+1}", tgt))
         for i, tgt in _table_pipe_findings(text):
             findings.append(("table-pipe", f"{rel(p)}:{i+1}", tgt))
+    if _walk_errors:   # recorded by the live loop above (once recorded and never judged)
+        _incomplete("the link graph is complete")
     _lint_report(findings, limit, check="--check" in args)
 
 
@@ -2347,7 +2659,10 @@ def cmd_doctor(*args):
     dirty = _git(["status", "--porcelain"])
     out(f"git: {'clean' if not dirty else f'{len(dirty.splitlines())} dirty paths'}")
     out(f"journals: {'none pending' if not js else 'UNRESOLVED (writes blocked): '
-        + ', '.join(os.path.basename(j) for j in js) + ' — vv doctor --rollback | --discard'}")
+        + _neutralise(_esc(', '.join(os.path.basename(j) for j in js))) + ' — vv doctor --rollback | --discard'}")
+    list(md_files())   # a complete walk is what bare-name and id resolution need
+    out("unreadable: " + (_neutralise(_esc(", ".join(_walk_errors[:10]))) + " (bare-name and id lookups: writes refuse, reads warn, until readable)"
+                          if _walk_errors else "none"))
     try:
         with open(METRICS, "a"):
             pass
@@ -2383,10 +2698,77 @@ CMDS = {
 # outline — with the note the caller already named.
 def _next_read(args):
     if args:
-        import shlex
-        return f"vv outline {shlex.quote(args[0])}"
+        return f"vv outline {_q(args[0])}"
     return "vv outline NOTE"
-ARITY_NEXT = {"read": _next_read}   # runnable, per the `next:` contract
+
+def _table_operands(cmd):
+    """The REQUIRED operand placeholders of a command, from COMMAND_TABLE:
+    tokens up to the first optional group `[…]` or stdin marker `<…`. That
+    keeps brackets and redirects out of a `next:` line — a copied
+    `vv patch NOTE SEC SHA8 <stdin` would redirect from a file named stdin."""
+    for c in COMMAND_TABLE:
+        if c["name"] == cmd:
+            ops = []
+            for tok in c["args"].split():
+                if tok[0] in "[<-":     # optional group, stdin marker, or a flag: no operand slot
+                    break
+                ops.append(tok)
+            return ops
+    return []
+
+def _next_from_table(cmd, args):
+    """A RUNNABLE next step for an arity miss: the caller's own operands,
+    shell-quoted, in the slots they filled; placeholders for the rest. Too
+    many arguments with no flag among them is almost always an unquoted TEXT
+    or VALUE (`vv append A hello world` — 4 of the pilot's append misses), so
+    the surplus is joined into the last slot as one quoted argument."""
+    ops = _table_operands(cmd)
+    if not ops:
+        return f"vv {cmd}"          # optional-only command: the bare form is the runnable one
+    args = list(args)
+    if _surplus_slot(ops, args):
+        # only a free-text last slot may absorb the surplus; `props KEY [FOLDER]`
+        # must not fold a folder into the key
+        head = [_q(a, ops[i]) for i, a in enumerate(args[:len(ops) - 1])]
+        return " ".join(["vv", cmd] + head + [_q(" ".join(args[len(ops) - 1:]), ops[-1])])
+    filled = []
+    for i, ph in enumerate(ops):
+        if i < len(args) and not _is_flag(args[i]):
+            filled.append(_q(args[i], ph))
+        else:
+            filled.append(ph)
+    return " ".join(["vv", cmd] + filled)
+
+def _surplus_slot(ops, args):
+    """True when the surplus positionals should be joined into the last slot:
+    more args than operands, no flag among them, and a free-text last slot
+    (TEXT/VALUE) — `props KEY [FOLDER]` must not fold a folder into the key.
+    One predicate for the next step AND its parenthetical hint, so the two
+    cannot contradict each other."""
+    return bool(ops) and len(args) > len(ops) and not any(_is_flag(a) for a in args) and ops[-1] in ("TEXT", "VALUE")
+
+def _wants_section(args):
+    return any(a == "--section" or a.startswith("--section=") for a in args)
+
+def _next_append(args):
+    # `--section` is not a flag append has; the section variant is appendsec
+    if _wants_section(args):
+        note = _q(args[0]) if args and not _is_flag(args[0]) else "NOTE"
+        return f"vv appendsec {note} SEC TEXT"
+    return _next_from_table("append", args)
+
+# read/patch: the honest next step is the outline — with the note the caller
+# already named — because SEC (and patch's SHA8) come from it.
+ARITY_NEXT = {"read": _next_read, "patch": _next_read, "append": _next_append}   # runnable, per the `next:` contract
+
+def _arity_hint(cmd, args):
+    """Parenthetical BEFORE `— next:` (the next line itself stays a bare command)."""
+    if cmd == "append" and _wants_section(args):
+        return " (append has no --section; append inside a section is appendsec)"
+    ops = _table_operands(cmd)
+    if _surplus_slot(ops, args):
+        return f" ({ops[-1]} is one argument; quote it)"
+    return ""
 
 # Words the pilot week typed that are not commands but name a real one.
 # `journal` (two rows, one double-logged attempt, before 2026-09-02): journals
@@ -2403,11 +2785,16 @@ def _check_arity(cmd, fn, args):
     pos_n = code.co_argcount
     var = bool(code.co_flags & 0x04)          # CO_VARARGS
     req = pos_n - len(fn.__defaults__ or ())
+    # rename/move/trash carry *args for the --apply tail only: their operand
+    # count is exact, and _relocate_tail refuses extra positionals — so the
+    # message must not advertise "2+" (a wording that contradicts the refusal
+    # the next call would get)
     hi = None if var else pos_n
     if len(args) < req or (hi is not None and len(args) > hi):
-        want = f"{req}+" if hi is None else (str(req) if req == hi else f"{req}-{hi}")
-        die(f"usage: {cmd} takes {want} positional args, got {len(args)} — "
-            f"next: {ARITY_NEXT[cmd](args) if cmd in ARITY_NEXT else 'run vv with no args for the command list'}")
+        exact_tail = cmd in _RELOCATE               # the *args tail is flags-only, never operands
+        want = str(req) if exact_tail else (f"{req}+" if hi is None else (str(req) if req == hi else f"{req}-{hi}"))
+        nxt = ARITY_NEXT[cmd](args) if cmd in ARITY_NEXT else _next_from_table(cmd, args)
+        die(f"usage: {cmd} takes {want} positional args, got {len(args)}{_arity_hint(cmd, args)}", nxt=nxt)
 
 VERSION_FALLBACK = "2.0.1"  # used only when VERSION is absent (bare-file deploys)
 
@@ -2477,7 +2864,7 @@ COMMAND_TABLE = [
     {"name": "daily-append", "args": "TEXT",                    "summary": "append to today's daily note"},
     {"name": "rename",       "args": "NOTE NEWNAME [--apply [SHA8]]", "summary": "link-aware journaled rename; dry-run by default"},
     {"name": "move",         "args": "NOTE FOLDER [--apply [SHA8]]",  "summary": "link-aware journaled move; dry-run by default"},
-    {"name": "trash",        "args": "NOTE [--apply SHA8]",     "summary": "journaled removal to .trash/; reports links that will break"},
+    {"name": "trash",        "args": "NOTE [--apply [SHA8]]",   "summary": "journaled removal to .trash/; reports links that will break"},
     {"name": "backlinks",    "args": "NOTE",                    "summary": "notes linking here"},
     {"name": "links",        "args": "NOTE",                    "summary": "outgoing wiki links"},
     {"name": "impact",       "args": "NOTE",                    "summary": "blast radius before a refactor"},
@@ -2530,7 +2917,7 @@ def _generate(kind):
         L = [f"complete -c vv -f -n '__fish_use_subcommand' -a {c['name']} -d '{c['summary'].replace(chr(39), '')}'"
              for c in COMMAND_TABLE]
         print("\n".join(L)); return
-    die(f"usage: unknown --generate kind '{kind}' — next: vv --generate man|complete-bash|complete-zsh|complete-fish")
+    die(f"usage: unknown --generate kind '{kind}'", nxt="vv --generate man|complete-bash|complete-zsh|complete-fish")
 
 def main():
     global VAULT, _VAULT_REAL, _op
@@ -2539,7 +2926,7 @@ def main():
         print(f"vv {_version()}"); sys.exit(0)
     if a and a[0] == "--generate":
         if len(a) < 2:
-            die("usage: --generate needs a kind — next: vv --generate man|complete-bash|complete-zsh|complete-fish")
+            die("usage: --generate needs a kind", nxt="vv --generate man|complete-bash|complete-zsh|complete-fish")
         _generate(a[1]); sys.exit(0)
     if "--jsonl" in a:
         global _JSONL
@@ -2574,7 +2961,7 @@ def main():
         alias = CMD_ALIASES.get(a[0])
         sugg = [alias] if alias else suggest_names(a[0], [c + ".md" for c in CMDS], n=1)  # same tiered ranking notes get
         hint = f" (did you mean: {sugg[0]})" if sugg else ""
-        die(f"usage: unknown command {a[0]}{hint} — next: run vv --help for the command list")
+        die(f"usage: unknown command {a[0]}{hint}", nxt="run vv --help for the command list")
     _check_arity(a[0], fn, a[1:])
     fn(*a[1:])
     _log(_out_total)

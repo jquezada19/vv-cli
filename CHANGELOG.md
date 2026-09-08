@@ -8,6 +8,163 @@ changes an exit code, is a major change.
 
 ## [Unreleased]
 
+Affordance sweep of the five days after 2.0.1 (457 telemetry rows,
+2026-09-03 → 2026-09-07, as counted when the sweep was written on
+2026-09-07; re-derive with `bench/pilot_report.py --since 2026-09-03 --until
+2026-09-08` — the sink kept growing that evening, partly with this change's
+own review probes). Three fixes, pinned through both entries by
+`tests/test_affordance.py`; two seven-seat review rounds added the rest.
+
+### Added
+- Id-prefix resolution: a `NOTE` operand of ASCII digits (`24995`, or the
+  quoted `'#24995'`) that matches no exact path or basename resolves to the
+  unique note whose basename starts with `24995 - `. Exact delimiter (an
+  en-dash, a missing space, or digits mid-name are not matches); exact match
+  always wins, for both spellings (a literal `#24995` note wins the `#`
+  spelling; a literal `24995.md` wins both); two candidates refuse
+  `ambiguous:` with a runnable `next:`; an unreadable directory makes
+  uniqueness — and absence — unprovable: a write through the id is
+  `refused:` and a read answers with a `warning:`, both naming the
+  directory. A filename convention, not link semantics:
+  `[[24995]]` stays an unresolved link, and `new 24995` still creates
+  `24995.md`. Motivation: 17 not-found rows on 2026-09-03, 9 of them in one
+  second, from a `vv set <id> …` loop.
+
+### Changed
+Exit-code transitions — CLI surface under this file's header. Whether the
+next release is a MAJOR or treats these as bug fixes is the release PR's
+call (a four-seat design review split 2–2 on exactly that). Measured by an
+A/B of every listed input against 2.0.1, both engines:
+- **0 → 1** — `move`/`rename`/`trash` with an extra positional (`vv move A B
+  C Dest --apply`), a non-hex token after `--apply` (`--apply abc`), an
+  unknown flag (`--force`, `-n`, `--apply=…`), `--apply` twice, or a flag in
+  the FOLDER/NEWNAME slot (`vv move A --apply`). Three of these used to
+  WRITE: the extra-positional form with `--apply` used note B as the
+  destination folder (2026-09-07, four stray folders at the vault root); the
+  non-hex form dropped the plan id and applied UNBOUND; `--apply --apply`
+  applied unbound too. The rest exited 0 as a dry-run without writing.
+- **3 → 1** — junk after a valid plan id (`--apply deadbeef C`): a stale-plan
+  refusal is now a usage refusal (the tail is validated before the plan).
+- **0 → 3** — an UPPERCASE 8-hex id that does not match the plan
+  (`--apply DEADBEEF`): the id was lowercase-only, so uppercase was ignored
+  and the apply went ahead unbound; it is now bound and `stale:`.
+- **1 → 0** — a bare digit ref that names a unique `NNNNN - Title` note
+  (`vv set 24995 status done`), and the `#NNNNN` spelling wherever `NNNNN`
+  would have resolved (`'#24998'` → a literal `24998.md`). A script whose
+  fallback branch fired on not-found now writes instead.
+- **0 → 1** — a bare name whose unique hit is a symlink to a file OUTSIDE
+  the vault is `escape:` in both engines, for reads (`head`, `show`, `read`,
+  `resolve`) as well as writes. In Python a typed path was always contained
+  and only the walk-derived alias was not (`set`/`append`/`patch` through it
+  wrote outside the vault); natively a typed path AT THE VAULT ROOT
+  escaped too, because the resolver fell through a failed containment into
+  the basename walk (a subfolder path already refused in both engines) — so
+  that spelling is **0 → 1 natively** as well. Found in review. (The id spelling
+  of the same case is `escape:` too, but that is a kind change from
+  `not-found:`, exit 1 either way — ids did not resolve before this
+  release.)
+- **0 → 1 for writes** — a WRITE (`set`/`unset`/`append`/`appendsec`/
+  `prepend`/`patch`) through a bare-name or id hit under an incomplete walk
+  (an unreadable directory somewhere in the vault) is `refused:` in both
+  engines — and so is every op inside `batch`, which is read-only but
+  captures each op's stderr and surfaces it only on a non-zero exit, so a
+  warning there would be swallowed — the directory may hold a second note, so
+  "unique" is unprovable; a bare-name MISS under the same condition is
+  `refused:` too (a kind change, exit 1 either way: absence is as
+  unprovable). A READ (`head`/`read`/`show`/
+  `resolve`/graph commands) answers the visible hit and prints a
+  `warning:` line on stderr naming the directory — exit 0, output
+  unchanged — because one unreadable directory turning every bare-name read
+  into an outage is the larger harm. The warning is escaped and neutralised
+  like an error, once per invocation, billed to the metrics row, and under
+  `--jsonl` it is a `{"kind": "warning", …}` row, never a bare line. A
+  `batch` op's JSON arguments have `\u0000` escaped before dispatch (the
+  one byte argv and filenames cannot carry, and the suggestion sentinel).
+  `daily-append` under an unreadable `Standups/` is `refused:` instead of
+  `not-found:` with "create it" (exit 1 either way). `vv doctor` grows by
+  17 bytes on a clean vault (`unreadable: none`). `vv doctor` — the next step both name —
+  lists the unreadable directories (its journal and directory lists are
+  escaped like an error). A note that cannot be read is `refused:` in the
+  error grammar instead of a traceback (pre-existing); an unreadable note
+  met by a corpus scan (the link graph, `board`/`props`/`tags`, `deadends`,
+  `lint` — whose findings otherwise under-report without a word) is
+  recorded like an unreadable directory — the scan warns on a read and
+  refuses on a write instead of skipping it silently, in both engines (a rename over one used to rewrite the readable half of the
+  backlinks and verify "clean"). A note that is not valid UTF-8 is NOT
+  unreadable evidence: the link grammar is ASCII-delimited, so every corpus
+  scan in both engines (and the native cache rows) decodes it lossily and
+  scans it — one Latin-1 stray must not refuse every relocation in the
+  vault; a `rename`/`move` whose backlink lives in such a note is `utf8:`
+  (exit 5) at plan time — never a lossy rewrite, never a journal.
+  Completeness evidence is refreshed by every walk and by an index sync,
+  never carried across a readability change.
+  The escaper covers every lone surrogate, so a `batch` argument like
+  `\ud800` records its own error instead of killing the batch; `batch`
+  flushes each record as it completes. The native link scan reports a note
+  it could not read as an unreadable row, so the Python side records it
+  whichever engine scanned. The native readability check runs only for the
+  graph reads that consume it (a resolver needs names, not contents — an
+  open per note would cost the hot path an order of magnitude). The native walk treats a
+  directory-iterator error or an unreadable entry type as incomplete, never
+  as "a file". The same probe sits in the link graph itself (the basename
+  index every link scan goes through), in both engines: a `rename`/`move`/
+  `trash` — even by exact path — is `refused:` under the condition
+  (**0 → 1**, the rewrite or broken-link report would be planned over a
+  partial corpus and still verify "clean"), and a graph READ over the corpus
+  (`backlinks`, `impact`, `orphans`, `unresolved`, `deadends`, `lint
+  --quick`) answers with the `warning:` instead of silently under-reporting
+  over an index that prunes what the walk could not see. `links` reads one
+  note and needs no walk; the default `lint` delegates (when the vault ships its own linter) to the vault's own
+  linter before the graph is touched. The probe walks once per invocation
+  — a walk the command already did is the evidence. Not covered: an
+  enumeration that fails mid-listing without a permission error (an I/O
+  fault `glob` swallows) is invisible to `daily-append`'s gate.
+- A dangling symlink whose name matches is no longer a hit: `not-found:`
+  instead of a resolved path followed by a traceback on the read (`head`,
+  `set`: exit 1 as before; **`resolve`: 0 → 1**, it used to print the
+  dangling path since it never opened the file).
+
+### Fixed
+- The relocate tail is a grammar (`--apply` optionally followed by ONE 8-hex
+  plan id, nothing else), validated before the note resolves or a plan is
+  printed, so a syntax error never reports as `not-found:` and a dry-run never
+  previews the wrong move. Short flags (`-h`) count as flags; a name that
+  starts with `-` is spelled `./-name`, and the refusal says so.
+- The error envelope: `die()` takes the next step as an explicit argument
+  (every call that carried an inline ` — next: ` — 26 at 2.0.1 — now passes
+  `nxt=`; 41 do at this commit) and never parses it back out of the message,
+  so no caller or filesystem token can become the `--jsonl` `next` field
+  (three pre-existing sites could: `board`, `orphans`, `props`' folder scope,
+  and every `did you mean:` suggestion). The message
+  is escaped centrally: every control character (and U+2028/2029) rendered
+  as `\n`/`\x1b`-style escapes, a literal ` — next: ` inside a token
+  neutralised to convergence over the joined line (the separator overlaps
+  itself, and the `did you mean:` join could complete one), so an error is
+  always one line and carries exactly one separator. The suggestion line's
+  marker is a NUL sentinel no argv or filename can carry. A token that would
+  carry a control character or the separator into a runnable next step is
+  replaced by its placeholder. "One line" means the error line plus, for a
+  name miss, the `did you mean:` line — the only newline the grammar allows,
+  and only code can introduce it — and, under an incomplete walk, one
+  `warning:` line before the answer or the error. The metrics row bills the bytes actually
+  written (the `--jsonl` envelope, not the plain line — pre-existing).
+- Arity misses name a runnable next step derived from the command table —
+  the caller's own operands, shell-quoted, in the slots they filled
+  (`vv set A status VALUE`); surplus arguments with no flag among them are
+  joined into a TEXT/VALUE last slot as one quoted argument (`vv append A
+  'hello world'`) and otherwise dropped (`vv props status`, never `vv props
+  'status Work Items'`); an optional-only command falls back to its bare
+  form (`vv orphans`); `append … --section` points at `appendsec`; `patch`,
+  like `read`, points at the note's outline. The generic "run vv with no
+  args for the command list" pointer is gone from arity errors. Generated
+  synopsis text carries no bracket, redirect, or placeholder-in-brackets (a
+  quoted operand may: `vv read '[x]'` is correct quoting). `move NOTE` no
+  longer advertises "2+" positionals.
+- The table entry for `trash` says `[--apply [SHA8]]` — a bare `--apply` was
+  always accepted; the synopsis overstated (pinned). `vv --help` grows by
+  188 bytes: the corrected synopsis, the one-note-per-call tail rule, and
+  the bare-id form of `NOTE` — the operand grammar this release changes.
+
 ## [2.0.1] — 2026-09-06
 
 Patch release; also the first tag to exercise the bumped release workflow

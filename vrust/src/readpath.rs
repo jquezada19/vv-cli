@@ -284,7 +284,9 @@ pub fn resolve(vault: &Path, ref_: &str) -> Option<PathBuf> {
     }
     let want = ref_.strip_suffix(".md").unwrap_or(ref_).to_lowercase();
     let mut files = Vec::new();
-    crate::walk_ex(vault, &mut files, false);
+    if !crate::walk_checked(vault, &mut files, false, false) {
+        return None; // incomplete walk: uniqueness is unprovable — python refuses
+    }
     let hits: Vec<&PathBuf> = files
         .iter()
         .filter(|p| {
@@ -295,7 +297,17 @@ pub fn resolve(vault: &Path, ref_: &str) -> Option<PathBuf> {
         })
         .collect();
     if hits.len() == 1 {
-        Some(hits[0].clone())
+        // A walk-derived hit gets the same containment as a typed path: a
+        // symlinked note whose target is outside the vault must never be read
+        // or written through a bare name. Python's _contained() emits the
+        // `escape:` text; here the hit is simply not ours to answer.
+        let real = fs::canonicalize(hits[0]).ok()?;
+        let vreal = fs::canonicalize(vault).ok()?;
+        if real == vreal || real.starts_with(&vreal) {
+            Some(hits[0].clone())
+        } else {
+            None // escaping symlink: python refuses with `escape:`
+        }
     } else {
         None
     } // 0 or 2+: python
