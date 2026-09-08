@@ -423,8 +423,8 @@ fn cmd_backlinks(ref_: &str, vault: &Path, t0: Instant) -> Outcome {
     if let Some(cachemap) = crate::cache::links_map(vault) {
         for (rp, fl) in &cachemap {
             let p = vault.join(rp);
-            if p == fp || !fl.utf8_ok {
-                continue; // python's scanner skips non-UTF-8 files entirely
+            if p == fp {
+                continue; // non-UTF-8 rows are lexed lossily, like python's scan_links
             }
             for (kind, target) in &fl.links {
                 if *kind == 'w' && !target.to_lowercase().contains(tgt_base.as_str()) {
@@ -455,9 +455,11 @@ fn cmd_backlinks(ref_: &str, vault: &Path, t0: Instant) -> Outcome {
             if hits.contains(&rp) {
                 continue;
             }
-            let text = match fs::read_to_string(p) {
-                Ok(t) => t,
-                Err(_) => continue,
+            // non-UTF-8 is scanned lossily (python parity: scan_links);
+            // an I/O failure was already recorded by the checked walk
+            let text = match crate::read_lossy(p) {
+                Some(t) => t,
+                None => continue,
             };
             for (kind, target) in active_links(&text) {
                 if kind == 'w' && !target.to_lowercase().contains(tgt_base.as_str()) {
@@ -579,15 +581,13 @@ fn cmd_orphans(folder: &str, vault: &Path, t0: Instant) -> Outcome {
 
     let mut path_targets: HashSet<String> = HashSet::new();
     let mut bare_by_name: HashMap<String, Vec<PathBuf>> = HashMap::new();
-    // cache-first: same rows the live loop would lex; non-UTF-8 files are
-    // skipped (utf8_ok=0), mirroring the python scanner's skip
+    // cache-first: same rows the live loop would lex; non-UTF-8 files were
+    // lexed lossily, like python's scan_links (utf8_ok stays in the row format)
     let cachemap = crate::cache::links_map(vault);
     let mut cached_rows: Vec<(PathBuf, Vec<(char, String)>)> = Vec::new();
     if let Some(cm) = &cachemap {
         for (rp, fl) in cm {
-            if fl.utf8_ok {
-                cached_rows.push((vault.join(rp), fl.links.clone()));
-            }
+            cached_rows.push((vault.join(rp), fl.links.clone()));
         }
     }
     let live_iter: Vec<(PathBuf, Vec<(char, String)>)> = if cachemap.is_some() {
@@ -595,11 +595,7 @@ fn cmd_orphans(folder: &str, vault: &Path, t0: Instant) -> Outcome {
     } else {
         files
             .iter()
-            .filter_map(|p| {
-                fs::read_to_string(p)
-                    .ok()
-                    .map(|text| (p.clone(), active_links(&text)))
-            })
+            .filter_map(|p| crate::read_lossy(p).map(|text| (p.clone(), active_links(&text))))
             .collect()
     };
     for (p, file_links) in &live_iter {

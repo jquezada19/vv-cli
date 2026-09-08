@@ -1399,10 +1399,18 @@ def scan_links(needle=None):
     for p in md_files():
         try:
             text = _read_strict(p)
-        except (UnicodeDecodeError, PermissionError):
-            # non-UTF-8 or unreadable: the walk is incomplete for the link
-            # graph — a rename over it would rewrite half the backlinks and
-            # verify "clean" (round 6). Recorded silently; judged after the scan.
+        except UnicodeDecodeError:
+            # non-UTF-8: the link grammar is ASCII-delimited, so a lossy decode
+            # still finds every link (a target carrying the bad bytes can never
+            # equal a UTF-8 note name). The note is scanned, not skipped and
+            # not treated as unreadable — one Latin-1 stray must not refuse
+            # every relocation in the vault (gate at round 7). A relocation
+            # that would have to REWRITE it is refused at plan time (utf8:, 5).
+            text = _read_lossy(p)
+        except PermissionError:
+            # unreadable: the walk is incomplete for the link graph — a rename
+            # over it would rewrite half the backlinks and verify "clean"
+            # (round 6). Recorded silently; judged after the scan.
             r = rel(p)
             if r not in _walk_errors:
                 _walk_errors.append(r)
@@ -2052,8 +2060,6 @@ def cmd_batch():
             continue
         o, e_ = io.StringIO(), io.StringIO()
         code = 0
-        global _walked
-        _walked = 0; _walk_errors.clear()   # evidence is per op: readability can change between ops (round 6)
         try:
             with contextlib.redirect_stdout(o), contextlib.redirect_stderr(e_):
                 _check_arity(cmd, fn, cargs)
@@ -2390,6 +2396,14 @@ def _do_relocate(ref, dest_rel_noext, apply_, opname, expect_plan=None):
         # rewritten at all, but relocating one duplicate CHANGES which note the
         # same-folder/shortest-path tiers resolve them to — silent repointing.
         die(f"refused: source basename is ambiguous in vault", nxt="resolve duplicate notes first")
+    for p in sorted(hits, key=rel):
+        # a backlink in a non-UTF-8 note was found by a lossy scan; rewriting
+        # it would write replacement characters over the original bytes —
+        # refused before any plan or journal exists, same code as read_raw
+        try:
+            _read_strict(p)
+        except UnicodeDecodeError as e:
+            die(f"utf8: {rel(p)} links to {src_rel} but is not valid UTF-8 ({e.reason} at byte {e.start}) — vv only edits UTF-8 notes", 5)
     # plan digest: operation + destination + every affected file's byte hash.
     # `--apply <digest>` then executes exactly the previewed blast radius or
     # exits stale — an edit or new link between preview and apply changes it.
@@ -2578,7 +2592,9 @@ def cmd_lint(*args):
     for p in sorted(md_files()):
         try:
             text = _read_strict(p)
-        except (UnicodeDecodeError, PermissionError):
+        except UnicodeDecodeError:
+            text = _read_lossy(p)   # linted as decoded; see scan_links
+        except PermissionError:
             r = rel(p)
             if r not in _walk_errors:
                 _walk_errors.append(r)

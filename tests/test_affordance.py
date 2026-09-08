@@ -644,6 +644,33 @@ def section_c(eng, tag):
             os.chmod(lk, lmode)
     else:
         print(f"SKIP {tag}8 unreadable-directory pin (not POSIX or running as root)")
+    # C10 (gate at round 7): a non-UTF-8 note is SCANNED lossily, not treated as
+    # unreadable — a stray Latin-1 note must not refuse every relocation in the
+    # vault (test_panel_findings leaves one in the shared fixture and renames
+    # after it). Only a relocation that would have to REWRITE the note refuses,
+    # at plan time, with read_raw's utf8: code. Index on and off, both engines.
+    for k, (envx, sfx) in enumerate((({}, ""), ({"VV_NO_INDEX": "1"}, " (index off)"))):
+        tgt = f"Enc{k}"; tdir = os.path.join(eng.vault, "Work Items")
+        with open(os.path.join(tdir, f"2499{k+7} - {tgt}.md"), "w") as f: f.write(f"# {tgt}\n")
+        with open(os.path.join(eng.vault, f"EncLink{k}.md"), "w") as f: f.write(f"See [[2499{k+7} - {tgt}]].\n")
+        with open(os.path.join(eng.vault, f"Latin{k}.md"), "wb") as f: f.write(b"---\nk: caf\xe9\n---\nlatinbody" + str(k).encode() + b" caf\xe9\n")
+        r = eng.run("rename", f"Work Items/2499{k+7} - {tgt}", f"{tgt}R", "--apply", env=envx)
+        t = open(os.path.join(eng.vault, f"EncLink{k}.md")).read()
+        check(f"{tag}10a a non-UTF-8 note WITHOUT a backlink does not block a rename{sfx}",
+              r.returncode == 0 and f"[[{tgt}R]]" in t, f"rc={r.returncode} {r.stderr[:160]} {t!r}")
+        r = eng.run("search", f"latinbody{k}", env=envx)
+        check(f"{tag}10e search reads a non-UTF-8 note lossily (both engines){sfx}", r.returncode == 0 and f"Latin{k}.md" in r.stdout, f"rc={r.returncode} {r.stdout[:120]} {r.stderr[:120]}")
+        with open(os.path.join(eng.vault, f"Latin{k}.md"), "wb") as f: f.write(f"See [[{tgt}R]] caf".encode() + b"\xe9\n")
+        rr = refused(eng, tag, f"10b a rename that would REWRITE a non-UTF-8 backlink is refused at plan time{sfx}",
+                     ["rename", f"Work Items/{tgt}R", f"{tgt}RR", "--apply"], f"utf8: Latin{k}.md links to", None, exit_code=5)
+        check(f"{tag}10b' …message names the reason{sfx}", "not valid UTF-8" in rr.stderr, rr.stderr)
+        r = eng.run("backlinks", f"Work Items/{tgt}R", env=envx)
+        check(f"{tag}10c a graph READ over a non-UTF-8 backlink answers it without a completeness warning{sfx}",
+              r.returncode == 0 and f"Latin{k}.md" in r.stdout and "cannot prove" not in r.stderr, f"rc={r.returncode} {r.stdout[:120]} {r.stderr[:160]}")
+        r = eng.run("lint", env=envx)
+        check(f"{tag}10d lint over a non-UTF-8 note: no traceback, no refusal{sfx}",
+              "Traceback" not in r.stderr and "cannot prove" not in r.stderr and r.returncode in (0, 1), f"rc={r.returncode} {r.stderr[:160]}")
+        os.remove(os.path.join(eng.vault, f"Latin{k}.md"))
     # C9: create never expands an id (last: it changes what 24995 resolves to)
     r = eng.run("new", "24995")
     check(f"{tag}9a `new 24995` creates 24995.md, it does not expand the id (control)", r.returncode == 0 and os.path.isfile(os.path.join(eng.vault, "24995.md")), r.stdout + r.stderr)

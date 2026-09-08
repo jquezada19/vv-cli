@@ -84,6 +84,14 @@ pub fn walk_ex(dir: &Path, out: &mut Vec<PathBuf>, exclude_sandbox: bool) {
 /// an unreadable directory may hold a second note — so `readpath::resolve`
 /// hands an incomplete walk to Python, which refuses (parity with
 /// `_walk_errors` in vv_impl.py, review round 2, 2026-09-07).
+/// A corpus scan's read: non-UTF-8 decoded lossily (the link grammar is
+/// ASCII, python's `_read_lossy` does the same), `None` only on an I/O error.
+pub fn read_lossy(fp: &Path) -> Option<String> {
+    fs::read(fp)
+        .ok()
+        .map(|b| String::from_utf8_lossy(&b).into_owned())
+}
+
 /// `check_read`: also treat a note we cannot open as incomplete evidence.
 /// Only the graph reads ask for it — they read every note anyway; a resolver
 /// needs names, not contents, and must not pay an open per note (an 18×
@@ -147,7 +155,7 @@ pub fn walk_checked(
 }
 
 fn score_one(
-    fp: &std::path::PathBuf,
+    fp: &Path,
     root: &std::path::PathBuf,
     path_terms: &[&String],
     body_terms: &[&String],
@@ -162,7 +170,7 @@ fn score_one(
     if !path_terms.iter().all(|t| rl.contains(t.as_str())) {
         return None;
     }
-    let text = fs::read_to_string(fp).ok()?;
+    let text = read_lossy(fp)?; // python parity: search reads lossily
     let low = text.to_lowercase();
     let base = rl
         .rsplit('/')
@@ -351,11 +359,12 @@ fn cmd_linkscan(args: &[String]) {
     files.sort();
     let mut buf = String::with_capacity(1 << 20);
     for fp in &files {
-        let text = match fs::read_to_string(fp) {
-            Ok(t) => t,
-            Err(_) => {
-                // unreadable or non-UTF-8: an `u` row so python records it as
-                // incomplete evidence instead of the note vanishing (round 7)
+        // non-UTF-8 is decoded lossily and scanned (the link grammar is ASCII;
+        // python refuses to REWRITE such a note at plan time); only an I/O
+        // failure is a `u` row — incomplete evidence, never a vanished note
+        let text = match read_lossy(fp) {
+            Some(t) => t,
+            None => {
                 println!(
                     "{}\t0\tu\t",
                     fp.strip_prefix(&root).unwrap_or(fp).to_string_lossy()
