@@ -123,6 +123,11 @@ pub fn walk_checked(dir: &Path, out: &mut Vec<PathBuf>, exclude_sandbox: bool) -
                         complete = false;
                     }
                 } else if name.ends_with(".md") {
+                    // a note we cannot open is incomplete evidence too: the
+                    // Python fallback records it and warns or refuses (round 6)
+                    if fs::File::open(&p).is_err() {
+                        complete = false;
+                    }
                     out.push(p);
                 }
             }

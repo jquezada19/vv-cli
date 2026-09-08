@@ -85,7 +85,15 @@ A/B of every listed input against 2.0.1, both engines:
   17 bytes on a clean vault (`unreadable: none`). `vv doctor` — the next step both name —
   lists the unreadable directories (its journal and directory lists are
   escaped like an error). A note that cannot be read is `refused:` in the
-  error grammar instead of a traceback (pre-existing). The native walk treats a
+  error grammar instead of a traceback (pre-existing); an unreadable note
+  met by a corpus scan (the link graph, `board`/`props`/`tags`, `deadends`,
+  `lint`) is recorded like an unreadable directory — the scan warns on a
+  read and refuses on a write instead of skipping it silently, in both
+  engines (a rename over one used to rewrite the readable half of the
+  backlinks and verify "clean"). Completeness evidence is per `batch` op and
+  refreshed by an index sync, never carried across a readability change.
+  The escaper covers every lone surrogate, so a `batch` argument like
+  `\ud800` records its own error instead of killing the batch. The native walk treats a
   directory-iterator error or an unreadable entry type as incomplete, never
   as "a file". The same probe sits in the link graph itself (the basename
   index every link scan goes through), in both engines: a `rename`/`move`/

@@ -566,20 +566,29 @@ def section_c(eng, tag):
                     _vi = importlib.reload(_vi)
                     os.chmod(hidden, 0); list(_vi.md_files()); locked = list(_vi._walk_errors)
                     os.chmod(hidden, mode); list(_vi.md_files()); unlocked = list(_vi._walk_errors)
+                    # the warning is billed: _out_total grows by exactly the bytes written
+                    os.chmod(hidden, 0); list(_vi.md_files())
+                    import io, contextlib
+                    _vi._warned_incomplete = False; _vi._op = "resolve"; before_total = _vi._out_total
+                    with contextlib.redirect_stderr(io.StringIO()) as errbuf:
+                        _vi._incomplete("id 25000 is unique")
+                    check(f"{tag}8c' the warning's bytes are billed to the metrics row",
+                          _vi._out_total - before_total == len(errbuf.getvalue().encode("utf-8")) > 0, (before_total, _vi._out_total, len(errbuf.getvalue())))
+                    # batch: evidence is per op — a walk before the lock must not vouch for an op after it
+                    os.chmod(hidden, mode); list(_vi.md_files()); assert _vi._walked > 0
+                    os.chmod(hidden, 0)
+                    _vi._walked = 0; _vi._walk_errors.clear()   # what cmd_batch does at each op boundary
+                    _vi._warned_incomplete = False; _vi._op = "resolve"
+                    with contextlib.redirect_stderr(io.StringIO()) as errbuf2:
+                        try: _vi.basename_index()
+                        except SystemExit: pass
+                    os.chmod(hidden, mode)
+                    check(f"{tag}8i the probe after a per-op reset re-walks and sees the lock", "cannot prove the link graph is complete" in errbuf2.getvalue(), errbuf2.getvalue()[:160])
                 finally:
                     if prev is None: os.environ.pop("VV_VAULT", None)
                     else: os.environ["VV_VAULT"] = prev
                     importlib.reload(_vi)
                 check(f"{tag}8c the walk-error list describes THIS walk (reset per walk)", locked == ["Hidden"] and unlocked == [], (locked, unlocked))
-                # the warning is billed: _out_total grows by exactly the bytes written
-                os.chmod(hidden, 0); list(_vi.md_files())
-                import io, contextlib
-                before_total = _vi._out_total; _vi._warned_incomplete = False; _vi._op = "resolve"
-                with contextlib.redirect_stderr(io.StringIO()) as errbuf:
-                    _vi._incomplete("id 25000 is unique")
-                os.chmod(hidden, mode)
-                check(f"{tag}8c' the warning's bytes are billed to the metrics row",
-                      _vi._out_total - before_total == len(errbuf.getvalue().encode("utf-8")) > 0, (before_total, _vi._out_total, len(errbuf.getvalue())))
             os.chmod(hidden, 0)
             r = eng.run("set", "25000 - Seen", "status", "x")
             r2 = eng.run("head", "25000 - Seen")
@@ -587,6 +596,21 @@ def section_c(eng, tag):
             check(f"{tag}8d a bare-NAME write under an incomplete walk is refused too (uniqueness unprovable)",
                   r.returncode == 1 and r.stderr.startswith("refused: cannot prove '25000 - seen' is unique") and next_of(r.stderr) == "vv doctor", f"rc={r.returncode} {r.stderr}")
             check(f"{tag}8d' …and a bare-NAME read warns and answers", r2.returncode == 0 and r2.stderr.startswith("warning: cannot prove '25000 - seen' is unique"), f"rc={r2.returncode} {r2.stderr}")
+            # round 6: an unreadable NOTE is walk-incomplete evidence for every corpus scan (directory readable again)
+            with open(os.path.join(eng.vault, "Locked.md"), "w") as f: f.write("# L\n\n[[24996 - Other]]\n")
+            lk = os.path.join(eng.vault, "Locked.md"); lmode = os.stat(lk).st_mode
+            os.chmod(lk, 0); _RESTORE.append((lk, lmode))
+            r = eng.run("rename", "Work Items/24996 - Other", "Renamed")
+            check(f"{tag}8k a rename whose backlink scan cannot read a note is REFUSED, never a half rewrite verifying clean",
+                  r.returncode == 1 and r.stderr.startswith("refused: cannot prove the link graph is complete") and "Locked.md" in r.stderr and "plan " not in r.stdout, f"rc={r.returncode} {r.stdout} {r.stderr}")
+            r = eng.run("backlinks", "Work Items/24996 - Other")
+            check(f"{tag}8k' …and a graph READ over it warns and answers", r.returncode == 0 and r.stderr.startswith("warning: cannot prove the link graph is complete") and "Locked.md" in r.stderr, f"rc={r.returncode} {r.stderr}")
+            for cmd in (("deadends",), ("board", "."), ("props", "status"), ("tags",)):
+                r2 = eng.run(*cmd)
+                check(f"{tag}8k'' `{cmd[0]}` over an unreadable note: no traceback, warns", "Traceback" not in r2.stderr and r2.returncode == 0 and "warning:" in r2.stderr, f"rc={r2.returncode} {r2.stderr[:160]}")
+            r = eng.run("batch", stdin='{"cmd":"read","args":["\\ud800"]}\n{"cmd":"resolve","args":["24996"]}\n')
+            check(f"{tag}8j a lone surrogate in a batch arg cannot kill the batch (every op records)", r.stdout.count('"i": ') == 2 and "Traceback" not in r.stderr, r.stdout[:300] + r.stderr[:200])
+            os.chmod(lk, lmode)
     else:
         print(f"SKIP {tag}8 unreadable-directory pin (not POSIX or running as root)")
     # C9: create never expands an id (last: it changes what 24995 resolves to)

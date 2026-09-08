@@ -90,7 +90,7 @@ def out(s=""):
     _out_total += len(s.encode("utf-8")) + 1
     print(s)
 
-_CTL = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029\udc80-\udcff]")   # incl. surrogate-escaped undecodable bytes
+_CTL = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029\ud800-\udfff]")   # incl. every lone surrogate (undecodable bytes, JSON \ud800)
 # The suggestion line is the one newline the error grammar allows. Its marker
 # is a NUL sentinel: neither argv nor a filename can carry NUL, so only code
 # can introduce a second line — a token containing the literal text
@@ -513,6 +513,20 @@ def read_raw(fp):
     except PermissionError as e:
         # a note we cannot read is a refusal in the error grammar, never a traceback
         die(f"refused: cannot read {rel(fp)} ({e.strerror})", nxt="vv doctor")
+
+def _read_lossy(fp):
+    """A corpus scan's read: decoding errors replaced, an unreadable note
+    recorded as an unreadable path (the scan then warns or refuses through
+    _incomplete like an unreadable directory) and skipped — never a
+    traceback, never a silent omission (security seat, round 6)."""
+    try:
+        with open(fp, errors="replace") as f:
+            return f.read()
+    except PermissionError:
+        r = rel(fp)
+        if r not in _walk_errors:
+            _walk_errors.append(r)
+        return None
 
 def eol_of(text):
     return "\r\n" if "\r\n" in text else "\n"
@@ -1030,13 +1044,18 @@ def cmd_board(folder, *filters):
     else:
         for p_ in _walk_scope(rroot):      # same prune rules as the index and the native walk
             n = os.path.basename(p_)
-            fm, _ = split_fm(open(p_, errors="replace").read())
+            _t = _read_lossy(p_)
+            if _t is None:
+                continue
+            fm, _ = split_fm(_t)
             props = fm_props(fm)
             if all(props.get(k) == v for k, v in want.items()):
                 rows.append((n[:-3], props.get("status", "-"), props.get("type", "-")))
         rows.sort()   # deterministic + identical to the indexed path on nested
         # folders (they disagreed in walk order until 2026-08-27 — caught by the
         # native-port fixture suite, a latent inconsistency from the index change)
+    if _walk_errors:
+        _incomplete("the corpus is complete")
     _list_out([{"name": n_, "status": s_, "type": ty} for n_, s_, ty in rows],
               len(rows), "notes", cmd="board",
               fmt=lambda r: f"{r['status']}\t{r['type']}\t{r['name']}")
@@ -1046,7 +1065,7 @@ def cmd_tags(*args):
     c = Counter()
     h = index_handle()
     rows = h.props() if h is not None else (
-        (rel(p), fm_props(split_fm(open(p, errors="replace").read())[0]))
+        (rel(p), fm_props(split_fm((_read_lossy(p) or "")[0:] )[0]))
         for p in sorted(md_files()))
     for _rp, props in rows:
         t = props.get("tags", "")
@@ -1055,6 +1074,8 @@ def cmd_tags(*args):
     counted = "--counts" in args
     entries = [{"tag": tag, "count": n}
                for tag, n in c.most_common(40 if counted else 9999)]
+    if _walk_errors:
+        _incomplete("the corpus is complete")
     _list_out(entries, len(c), "tags", cmd="tags",
               fmt=(lambda r: f"{r['count']}\t{r['tag']}") if counted else (lambda r: r["tag"]))
 
@@ -1077,7 +1098,7 @@ def cmd_props(key, folder=""):
     c = Counter()
     h = index_handle(scope=rroot or None)
     rows = h.props() if h is not None else (
-        (rel(p), fm_props(split_fm(open(p, errors="replace").read())[0]))
+        (rel(p), fm_props(split_fm((_read_lossy(p) or "")[0:] )[0]))
         for p in sorted(_walk_scope(rroot)))
     for rp, props in rows:
         if rroot and not (rp == rroot or rp.startswith(rroot + os.sep)):
@@ -1086,6 +1107,8 @@ def cmd_props(key, folder=""):
         if v:
             c[v] += 1
     entries = [{"value": v, "count": n} for v, n in c.most_common()]
+    if _walk_errors:
+        _incomplete("the corpus is complete")
     _list_out(entries, sum(c.values()), f"notes with {key}", cmd="props",
               fmt=lambda r: f"{r['count']}\t{r['value']}")
 
@@ -1123,7 +1146,9 @@ def _search_hits(terms, w):
         if not all(t in rl for t in path_terms):
             continue
         try:
-            text = open(p, errors="replace").read()
+            text = _read_lossy(p)
+            if text is None:
+                continue
         except OSError:
             continue
         low = text.lower()
@@ -1363,11 +1388,19 @@ def scan_links(needle=None):
         try:
             text = read_raw(p)
         except SystemExit:
+            # non-UTF-8 or unreadable: the walk is incomplete for the link
+            # graph — a rename over it would rewrite half the backlinks and
+            # verify "clean" (round 6). Recorded; judged after the scan.
+            r = rel(p)
+            if r not in _walk_errors:
+                _walk_errors.append(r)
             continue
         for i, kind, tgt in link_targets_in(text):
             if n and kind == "wiki" and n not in tgt.lower():
                 continue
             yield p, i, kind, tgt
+    if _walk_errors:
+        _incomplete("the link graph is complete")
 
 def code_spans(line):
     """(start, end) of inline code spans, CommonMark-style: a run of N backticks is
@@ -1495,9 +1528,16 @@ def _index_stat_walk(scope=None):
     """rel_path -> (mtime_ns, size, inode); no file reads. scope = vault-relative
     folder to confine the walk (freshness is only needed for files a scoped
     command will actually read)."""
+    global _walked
     m = {}
     root = os.path.join(VAULT, scope) if scope else VAULT
-    for dirpath, dirs, names in os.walk(root):
+    if not scope:
+        # a full-vault sync walk is the freshest completeness evidence the
+        # invocation has: record its errors and count it (round 6 — an index
+        # sync after resolve()'s walk could prune a newly unreadable note
+        # while the probe reused the older, clean walk)
+        _walk_errors.clear(); _walked += 1
+    for dirpath, dirs, names in os.walk(root, onerror=_walk_onerror if not scope else None):
         dirs[:] = [d for d in dirs if not d.startswith(".") and d not in SKIP_DIRS]
         for n in names:
             if n.endswith(".md"):
@@ -1506,6 +1546,12 @@ def _index_stat_walk(scope=None):
                     st = os.stat(fp)
                 except OSError:
                     continue
+                if not scope and not os.access(fp, os.R_OK):
+                    # the index-backed link scan never opens notes: an unreadable
+                    # note must still count as incomplete evidence (round 6)
+                    r_ = os.path.relpath(fp, VAULT)
+                    if r_ not in _walk_errors:
+                        _walk_errors.append(r_)
                 m[os.path.relpath(fp, VAULT)] = (st.st_mtime_ns, st.st_size, st.st_ino)
     return m
 
@@ -1808,7 +1854,10 @@ def cmd_deadends():
         entries = [{"path": rp} for rp in h.rel_paths() if rp not in linked]
     else:
         for p in sorted(rel(p) for p in md_files()):
-            if not any(True for _ in link_targets_in(open(os.path.join(VAULT, p), errors="replace").read())):
+            _t = _read_lossy(os.path.join(VAULT, p))
+            if _t is None:
+                continue
+            if not any(True for _ in link_targets_in(_t)):
                 entries.append({"path": p})
     if _walk_errors:
         _incomplete("the link graph is complete")
@@ -1991,6 +2040,8 @@ def cmd_batch():
             continue
         o, e_ = io.StringIO(), io.StringIO()
         code = 0
+        global _walked
+        _walked = 0; _walk_errors.clear()   # evidence is per op: readability can change between ops (round 6)
         try:
             with contextlib.redirect_stdout(o), contextlib.redirect_stderr(e_):
                 _check_arity(cmd, fn, cargs)
@@ -2005,7 +2056,7 @@ def cmd_batch():
             rec["out"] = o.getvalue().rstrip("\n")
         else:
             rec["error"] = (e_.getvalue() or o.getvalue()).rstrip("\n")
-        print(json.dumps(rec, ensure_ascii=False))
+        print(json.dumps(rec, ensure_ascii=False).encode("utf-8", "backslashreplace").decode("utf-8"))
 
 def _git(args_):
     import subprocess
@@ -2516,6 +2567,9 @@ def cmd_lint(*args):
         try:
             text = read_raw(p)
         except SystemExit:
+            r = rel(p)
+            if r not in _walk_errors:
+                _walk_errors.append(r)
             continue
         for i, kind, tgt in link_targets_in(text):
             if kind != "wiki":
