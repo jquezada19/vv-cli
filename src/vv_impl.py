@@ -2587,6 +2587,8 @@ def cmd_lint(*args):
                     findings.append(("broken-link", f"{rp}:{i+1}", tgt))
             for i, tgt in pipes.get(rp, []):
                 findings.append(("table-pipe", f"{rp}:{i+1}", tgt))
+        if _walk_errors:   # a note the sync could not read: findings under-report
+            _incomplete("the link graph is complete")
         _lint_report(findings, limit, check="--check" in args)
         return
     for p in sorted(md_files()):
@@ -2612,6 +2614,8 @@ def cmd_lint(*args):
                 findings.append(("broken-link", f"{rel(p)}:{i+1}", tgt))
         for i, tgt in _table_pipe_findings(text):
             findings.append(("table-pipe", f"{rel(p)}:{i+1}", tgt))
+    if _walk_errors:   # recorded by the live loop above (round 8: it was recorded, never judged)
+        _incomplete("the link graph is complete")
     _lint_report(findings, limit, check="--check" in args)
 
 

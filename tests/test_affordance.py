@@ -624,6 +624,10 @@ def section_c(eng, tag):
             for cmd in (("deadends",), ("board", "."), ("props", "status"), ("tags",)):
                 r2 = eng.run(*cmd, env=NOIDX)
                 check(f"{tag}8k5 `{cmd[0]}` over an unreadable note with the index off: warns, no traceback", "Traceback" not in r2.stderr and r2.returncode == 0 and "Locked.md" in r2.stderr, f"rc={r2.returncode} {r2.stderr[:160]}")
+            for envx, sfx in (({}, ""), (NOIDX, " (index off)")):
+                r2 = eng.run("lint", env=envx)
+                check(f"{tag}8k6 `lint` over an unreadable note warns that its findings under-report{sfx} (round 8: recorded, never judged)",
+                      "Traceback" not in r2.stderr and r2.stderr.startswith("warning: cannot prove the link graph is complete") and "Locked.md" in r2.stderr, f"rc={r2.returncode} {r2.stderr[:160]}")
             # batch: evidence is per op — a lock applied BETWEEN two ops must be seen by the second
             import subprocess as _sp
             e = dict(os.environ, VV_VAULT=eng.vault, VV_NO_METRICS="1", VV_INDEX_ROOT=eng.index, VV_JOURNAL_ROOT=eng.journals, **eng.env)
@@ -660,7 +664,11 @@ def section_c(eng, tag):
               r.returncode == 0 and f"[[{tgt}R]]" in t, f"rc={r.returncode} {r.stderr[:160]} {t!r}")
         r = eng.run("search", f"latinbody{k}", env=envx)
         check(f"{tag}10e search reads a non-UTF-8 note lossily (both engines){sfx}", r.returncode == 0 and f"Latin{k}.md" in r.stdout, f"rc={r.returncode} {r.stdout[:120]} {r.stderr[:120]}")
-        with open(os.path.join(eng.vault, f"Latin{k}.md"), "wb") as f: f.write(f"See [[{tgt}R]] caf".encode() + b"\xe9\n")
+        with open(os.path.join(eng.vault, f"Only{k}.md"), "w") as f: f.write("# only linked from the Latin-1 note\n")
+        with open(os.path.join(eng.vault, f"Latin{k}.md"), "wb") as f: f.write(f"See [[{tgt}R]] and [[Only{k}]] caf".encode() + b"\xe9\n")
+        r = eng.run("orphans", env=envx)
+        check(f"{tag}10f orphans counts a link FROM a non-UTF-8 note (both engines, cache rows included){sfx}",
+              r.returncode == 0 and f"Only{k}.md" not in r.stdout and f"Latin{k}.md" in r.stdout, f"rc={r.returncode} {r.stdout[:160]} {r.stderr[:120]}")
         rr = refused(eng, tag, f"10b a rename that would REWRITE a non-UTF-8 backlink is refused at plan time{sfx}",
                      ["rename", f"Work Items/{tgt}R", f"{tgt}RR", "--apply"], f"utf8: Latin{k}.md links to", None, exit_code=5)
         check(f"{tag}10b' …message names the reason{sfx}", "not valid UTF-8" in rr.stderr, rr.stderr)
