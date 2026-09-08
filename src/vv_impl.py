@@ -24,7 +24,7 @@ Global:  --vault PATH · --limit N (enumerators)        Help: vv --help
 Every op logs {op, ms, out_bytes} to ~/.claude/metrics/vv.jsonl.
 Exit: 0 ok · 1 not-found/usage · 3 stale hash or drifted plan · 4 pending journal (vv doctor)
 """
-import sys, os, re, json, time, hashlib
+import sys, os, re, json, time, hashlib, shlex
 # subprocess, glob, datetime are imported AT USE SITES: together they cost
 # ~10 ms of startup and most commands touch none of them (Codex perf review
 # 2026-08-27, findings 8-9; measured with -X importtime).
@@ -94,7 +94,9 @@ def die(msg, code=1):
     if _JSONL:
         # kind: everything before the first ":"; next: the trailing "— next: ..."
         head, _, rest = msg.partition(": ")
-        body, _, nxt = rest.partition(" — next: ")
+        # the next step is the trailing element by construction; user tokens are
+        # sanitised by _tok/_q, and splitting from the right is the second wall
+        body, _, nxt = rest.rpartition(" — next: ") if " — next: " in rest else (rest, "", "")
         sys.stderr.write(json.dumps(
             {"kind": head.split("\n")[0], "message": body or rest,
              "next": nxt, "exit": code}, ensure_ascii=False) + "\n")
@@ -127,11 +129,16 @@ def _walk_onerror(err):
     # the corpus (id-prefix resolution) is unprovable when that happens, so
     # the miss is recorded and the alias branch refuses (review 2026-09-07).
     try:
-        _walk_errors.append(os.path.relpath(err.filename, VAULT))
+        d = os.path.relpath(err.filename, VAULT)
     except (TypeError, ValueError):
-        _walk_errors.append(str(err.filename))
+        d = str(err.filename)
+    if d not in _walk_errors:
+        _walk_errors.append(d)
 
 def md_files():
+    # the list describes THIS walk: `batch` runs many ops in one process, and a
+    # stale entry from an earlier op refused later resolutions (3 seats, 2026-09-07)
+    _walk_errors.clear()
     for dirpath, dirs, names in os.walk(VAULT, onerror=_walk_onerror):
         dirs[:] = [d for d in dirs if not d.startswith(".") and d not in SKIP_DIRS]
         for n in names:
@@ -181,21 +188,35 @@ def resolve(ref):
     if os.path.isfile(fp_md):
         return _cf(fp_md)
     want = (ref[:-3] if ref.endswith(".md") else ref).lower()
-    # `#24995` is the same ref as `24995` (a ticket id, either spelling): the
-    # exact-basename pass sees both, so a literal `24995.md` wins for both
-    forms = (want, want[1:]) if want.startswith("#") and _ID_REF.fullmatch(want) else (want,)
     all_notes = list(md_files())
-    hits = [p for p in all_notes if os.path.basename(p)[:-3].lower() in forms]
+    hits = [p for p in all_notes if os.path.basename(p)[:-3].lower() == want]
     if len(hits) == 1:
-        return _cf(hits[0])
+        return _cf(_contained(hits[0]))
     if not hits:
+        if want.startswith("#") and _ID_REF.fullmatch(want):
+            # `#24995` resolves exactly as `24995` would (exact path, exact
+            # basename, then the id rule) once a literal `#24995` note has
+            # missed — so a literal `24995.md` wins for both spellings
+            return resolve(ref[1:])
         idhit = _resolve_id_prefix(want, all_notes)
         if idhit:
             return _cf(idhit)
         sugg = suggest_names(want, all_notes)
         extra = ("\ndid you mean: " + " | ".join(sugg)) if sugg else ""
-        die(f"not-found: no note matches '{ref}'{extra}")
-    die("ambiguous: " + " | ".join(os.path.relpath(h, VAULT) for h in sorted(hits)[:5]))
+        die(f"not-found: no note matches '{_tok(ref)}'{extra}")
+    die("ambiguous: " + " | ".join(_tok(os.path.relpath(h, VAULT)) for h in sorted(hits)[:5])
+        + f" — next: vv resolve {_q(os.path.relpath(sorted(hits)[0], VAULT))}")
+
+def _contained(p):
+    """A note chosen from a directory WALK (not typed by the caller) gets the
+    same containment as a typed path: a symlinked note whose target is
+    outside the vault must never become a read or write target through a
+    bare name or an id (security seat + author-opposite seat, 2026-09-07;
+    the bare-name half was pre-existing). Mirrored in vrust readpath::resolve."""
+    real = os.path.realpath(p)
+    if real != _VAULT_REAL and not real.startswith(_VAULT_REAL + os.sep):
+        die(f"escape: path leaves the vault: {_tok(rel(p))}")
+    return p
 
 # A bare ASCII-digit ref (optionally `#`-prefixed) names the UNIQUE note whose
 # basename starts with `<digits> - ` — the `NNNNN - Title` work-item filename
@@ -209,30 +230,40 @@ _ID_REF = re.compile(r"#?([0-9]+)")
 
 def _resolve_id_prefix(want, all_notes):
     m = _ID_REF.fullmatch(want)
-    if not m or "/" in want:
+    if not m:
         return None
     digits = m.group(1)
     prefix = digits + " - "
     cands = sorted(p for p in all_notes if os.path.basename(p).startswith(prefix))
+    if _walk_errors:
+        # zero visible candidates is not "none": the unreadable directory may
+        # hold the note (or a second one) — refuse either way
+        nxt = f"vv resolve {_q(rel(cands[0]))}" if cands else "vv doctor"
+        die(f"refused: cannot prove id {digits} is unique — unreadable: "
+            f"{', '.join(_tok(d) for d in _walk_errors[:3])} — next: {nxt}")
     if not cands:
         return None
-    if _walk_errors:
-        die(f"refused: cannot prove id {digits} is unique — unreadable: "
-            f"{', '.join(_walk_errors[:3])} — next: vv resolve {shlex_quote(rel(cands[0]))}")
     if len(cands) > 1:
         die(f"ambiguous: {digits} matches {len(cands)} notes: "
-            + " | ".join(rel(c) for c in cands[:5])
-            + f" — next: vv resolve {shlex_quote(rel(cands[0]))}")
-    # the candidate came from a directory walk, not from the caller: it gets the
-    # same containment as a typed path (a symlinked note whose target is
-    # outside the vault must never become a write target through an alias)
-    real = os.path.realpath(cands[0])
-    if real != _VAULT_REAL and not real.startswith(_VAULT_REAL + os.sep):
-        die(f"escape: {rel(cands[0])} resolves outside the vault")
-    return cands[0]
+            + " | ".join(_tok(rel(c)) for c in cands[:5])
+            + f" — next: vv resolve {_q(rel(cands[0]))}")
+    return _contained(cands[0])
 
-def shlex_quote(s):
-    import shlex
+_NEXT_SEP = " — next: "
+
+def _tok(s):
+    """A caller- or filesystem-supplied token, made safe for the one-line error
+    contract: control characters escaped, and the `— next:` separator (which
+    die() splits on for --jsonl) neutralised. Message text only."""
+    return s.replace("\\", "\\\\").replace("\r", "\\r").replace("\n", "\\n").replace(_NEXT_SEP, " —next: ")
+
+def _q(s, placeholder="NOTE"):
+    """A token interpolated into a RUNNABLE next step: shell-quoted, unless it
+    carries a newline or the separator — then the placeholder, because a
+    `next:` line that spans lines or re-splits is not a command an agent can
+    copy (two review seats, 2026-09-07)."""
+    if "\n" in s or "\r" in s or _NEXT_SEP in s:
+        return placeholder
     return shlex.quote(s)
 
 def suggest_names(want, paths, n=3):
@@ -785,8 +816,7 @@ def _scope(folder):
     root = contain(folder)
     if not os.path.isdir(root):
         if os.path.exists(root):
-            import shlex
-            die(f"not-found: {folder} is a file, not a folder — next: vv outline {shlex.quote(folder)}")
+                die(f"not-found: {folder} is a file, not a folder — next: vv outline {shlex.quote(folder)}")
         die(f"not-found: no such folder: {folder}")
     rel_ = os.path.relpath(os.path.realpath(root), _VAULT_REAL)
     return "" if rel_ == "." else _ondisk(rel_, folder)
@@ -854,7 +884,6 @@ def cmd_orphans(folder=""):
         # The check runs on the RESOLVED, on-disk-spelled scope (a `..`, a
         # symlink or a case variant cannot dodge it).
         # board/props DO answer for an explicitly named skip dir.
-        import shlex
         die(f"refused: {folder} is outside the link graph (a skip dir) — next: vv board {shlex.quote(folder)}")
     root = os.path.join(VAULT, rroot) if rroot else VAULT
     files = list(md_files())
@@ -901,7 +930,6 @@ def cmd_board(folder, *filters):
     # vv's — capture exit codes unpiped.)
     bad = [f for f in filters if "=" not in f]
     if bad:
-        import shlex
         die(f"usage: board filters are KEY=VALUE, got {shlex.quote(bad[0])} — "
             f"next: vv board {shlex.quote(folder)} {shlex.quote(bad[0] + '=VALUE')}")
     want = dict(f.split("=", 1) for f in filters)
@@ -2127,7 +2155,7 @@ def _rewrite_links(text, source_fp, new_rel_noext, rename_base, linking_fp=None)
         lines[i] = l
     return "\n".join(lines), changed
 
-_RELOCATE_OPERANDS = {"move": ("NOTE", "FOLDER"), "rename": ("NOTE", "NEWNAME"), "trash": ("NOTE",)}
+_RELOCATE = {"move", "rename", "trash"}   # commands whose *args tail is flags-only
 
 def _relocate_tail(cmd, operands, tail):
     """The trailing-argument GRAMMAR of rename/move/trash: after the fixed
@@ -2143,13 +2171,14 @@ def _relocate_tail(cmd, operands, tail):
     (`vv move A --apply`, `vv move --apply A Dest`) is refused for the same
     reason: it would resolve `--apply` as a note or plan a move into a folder
     named `--apply`. Returns (apply, plan_id_or_None)."""
-    names = _RELOCATE_OPERANDS[cmd]
+    names = _table_operands(cmd)
     synopsis = f"{cmd} takes {' '.join(names)}"
-    template = f"vv {cmd} {' '.join(names)}"
+    template = _next_from_table(cmd, [])            # placeholders: the operands are suspect
+    flag = lambda t: t.startswith("-") and len(t) > 1   # `-h` is a flag spelling too, not a folder
     for nm, val in zip(names, operands):
-        if val.startswith("--"):
-            die(f"usage: {synopsis}, got flag '{val}' where {nm} was expected — next: {template}")
-    dry = "vv " + " ".join([cmd] + [shlex_quote(o) for o in operands])
+        if flag(val):
+            die(f"usage: {synopsis}, got flag '{_tok(val)}' where {nm} was expected — next: {template}")
+    dry = _next_from_table(cmd, list(operands))     # the caller's dry-run, quoted
     apply_, token = False, None
     it = iter(tail)
     for tok in it:
@@ -2160,18 +2189,18 @@ def _relocate_tail(cmd, operands, tail):
             nxt = next(it, None)
             if nxt is None:
                 break
-            if nxt.startswith("--"):
+            if flag(nxt):
                 if nxt == "--apply":
                     die(f"usage: --apply given twice — next: {dry}")
-                die(f"usage: {synopsis} [--apply [SHA8]], got unknown flag '{nxt}' — next: {dry}")
+                die(f"usage: {synopsis} [--apply [SHA8]], got unknown flag '{_tok(nxt)}' — next: {dry}")
             if not re.fullmatch(r"[0-9a-fA-F]{8}", nxt):
-                die(f"usage: --apply takes an 8-hex plan id, got '{nxt}' — next: {dry}")
+                die(f"usage: --apply takes an 8-hex plan id, got '{_tok(nxt)}' — next: {dry}")
             token = nxt.lower()
-        elif tok.startswith("--"):
-            die(f"usage: {synopsis} [--apply [SHA8]], got unknown flag '{tok}' — next: {dry}")
+        elif flag(tok):
+            die(f"usage: {synopsis} [--apply [SHA8]], got unknown flag '{_tok(tok)}' — next: {dry}")
         else:
             hint = " (one note per call)" if cmd == "move" else ""
-            die(f"usage: {synopsis}, got extra positional '{tok}'{hint} — next: {template}")
+            die(f"usage: {synopsis}, got extra positional '{_tok(tok)}'{hint} — next: {template}")
     return apply_, token
 
 def _do_relocate(ref, dest_rel_noext, apply_, opname, expect_plan=None):
@@ -2479,7 +2508,7 @@ CMDS = {
 # outline — with the note the caller already named.
 def _next_read(args):
     if args:
-        return f"vv outline {shlex_quote(args[0])}"
+        return f"vv outline {_q(args[0])}"
     return "vv outline NOTE"
 
 def _table_operands(cmd):
@@ -2491,7 +2520,7 @@ def _table_operands(cmd):
         if c["name"] == cmd:
             ops = []
             for tok in c["args"].split():
-                if tok.startswith("[") or tok.startswith("<"):
+                if tok[0] in "[<-":     # optional group, stdin marker, or a flag: no operand slot
                     break
                 ops.append(tok)
             return ops
@@ -2505,16 +2534,18 @@ def _next_from_table(cmd, args):
     the surplus is joined into the last slot as one quoted argument."""
     ops = _table_operands(cmd)
     if not ops:
-        return "vv --help"
+        return f"vv {cmd}"          # optional-only command: the bare form is the runnable one
     args = list(args)
     flags = [a for a in args if a.startswith("--")]
-    if len(args) > len(ops) and not flags:
-        head = [shlex_quote(a) for a in args[:len(ops) - 1]]
-        return " ".join(["vv", cmd] + head + [shlex_quote(" ".join(args[len(ops) - 1:]))])
+    if len(args) > len(ops) and not flags and ops[-1] in ("TEXT", "VALUE"):
+        # only a free-text last slot may absorb the surplus; `props KEY [FOLDER]`
+        # must not fold a folder into the key (code-review seat, 2026-09-07)
+        head = [_q(a, ops[i]) for i, a in enumerate(args[:len(ops) - 1])]
+        return " ".join(["vv", cmd] + head + [_q(" ".join(args[len(ops) - 1:]), ops[-1])])
     filled = []
     for i, ph in enumerate(ops):
         if i < len(args) and not args[i].startswith("--"):
-            filled.append(shlex_quote(args[i]))
+            filled.append(_q(args[i], ph))
         else:
             filled.append(ph)
     return " ".join(["vv", cmd] + filled)
@@ -2522,7 +2553,7 @@ def _next_from_table(cmd, args):
 def _next_append(args):
     # `--section` is not a flag append has; the section variant is appendsec
     if any(a == "--section" or a.startswith("--section=") for a in args):
-        note = shlex_quote(args[0]) if args and not args[0].startswith("--") else "NOTE"
+        note = _q(args[0]) if args and not args[0].startswith("--") else "NOTE"
         return f"vv appendsec {note} SEC TEXT"
     return _next_from_table("append", args)
 
@@ -2560,7 +2591,7 @@ def _check_arity(cmd, fn, args):
     # the next call would get; panel 2026-09-07)
     hi = None if var else pos_n
     if len(args) < req or (hi is not None and len(args) > hi):
-        exact_tail = cmd in _RELOCATE_OPERANDS     # the *args tail is flags-only, never operands
+        exact_tail = cmd in _RELOCATE               # the *args tail is flags-only, never operands
         want = str(req) if exact_tail else (f"{req}+" if hi is None else (str(req) if req == hi else f"{req}-{hi}"))
         nxt = ARITY_NEXT[cmd](args) if cmd in ARITY_NEXT else _next_from_table(cmd, args)
         die(f"usage: {cmd} takes {want} positional args, got {len(args)}{_arity_hint(cmd, args)} — next: {nxt}")

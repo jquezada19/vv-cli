@@ -113,7 +113,7 @@ and it does not change link resolution (`[[24995]]` stays unresolved).
 | `move NOTE FOLDER` | same, for folder moves; bare-name links are left alone |
 | `... --apply` | execute the plan |
 | `... --apply <digest>` | execute **exactly** the previewed plan — exit 3 if anything drifted since review |
-| (tail rule) | one note per call: after the operands only `--apply [SHA8]` is accepted — an extra positional, an unknown flag, a non-hex plan id, or a flag in an operand slot is a usage error before anything resolves or prints |
+| (tail rule) | one note per call: after the operands only `--apply [SHA8]` is accepted — an extra positional, an unknown flag, a non-hex plan id, or a flag in an operand slot is a usage error before anything resolves or prints. A bare name or id whose note is a symlink out of the vault is `escape:` |
 
 ### Graph & query
 
