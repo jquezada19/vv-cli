@@ -145,7 +145,7 @@ and it does not change link resolution (`[[24995]]` stays unresolved).
 | `VV_ENGINE=rust\|python` | force an engine — the test gate runs both |
 | `VV_NO_INDEX=1` / `VV_INDEX_ROOT` | disable the index · relocate it (tests) |
 | exit `0 · 1 · 3 · 4 · 5` | ok · usage/not-found · stale hash or plan · dirty journal · not UTF-8 |
-| errors | grep-stable: `kind: message — next: <command>` on one line (plus a `did you mean:` line after a name miss); control characters in a token are escaped, and the `next` step never comes from a token |
+| errors | grep-stable: `kind: message — next: <command>` on one line (plus a `did you mean:` line after a name miss, and a `warning:` line when a directory in the vault is unreadable); control characters in a token are escaped, and the `next` step never comes from a token |
 
 ## Why not just read the files?
 

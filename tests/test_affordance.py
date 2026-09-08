@@ -37,13 +37,15 @@ C  Id-prefix resolution. Notes named `NNNNN - Title.md` are the vault's
    `<digits> - ` (exact delimiter: en-dash, no-space, and mid-name are not
    matches). Deterministic, never fuzzy; exact match always wins; `#24995`
    is the same ref; the candidate is vault-contained (a symlink out is
-   `escape:`); an unreadable directory makes uniqueness unprovable and the
-   alias is refused (even with zero visible candidates); `[[24995]]` stays an
+   `escape:`); an unreadable directory makes uniqueness unprovable — a write
+   through the alias is refused (even with zero visible candidates) and a read
+   answers with a warning; `[[24995]]` stays an
    unresolved LINK — link semantics are Obsidian's, CLI-operand semantics are
    vv's. Every walk-derived hit — exact basename AND id — is contained: a
    symlinked note out of the vault is `escape:` in both engines; a dangling
-   symlink is never a hit; a bare-name hit under an incomplete walk is
-   refused like an id hit.
+   symlink is never a hit; a bare-name hit under an incomplete walk warns or
+   refuses like an id hit, and every link-graph consumer (relocations, the
+   graph reads) inherits the same probe through basename_index().
 D  The error envelope. die() takes the next step as an explicit argument and
    escapes the message centrally, so no caller or filesystem token — in any
    of ~40 sites — can reach the --jsonl `next` field or break the one-line
@@ -254,6 +256,9 @@ def section_a(eng, tag):
           r.returncode == 1 and r.stderr.count("\n") == 1 and "junk\\ndid you mean: injected" in r.stderr, repr(r.stderr))
     r = eng.run("resolve", "foo\ndid you mean: EVIL")
     check(f"{tag}2m8 …also when it is the ref itself", r.stderr.count("\n") == 1 and "foo\\ndid you mean: EVIL" in r.stderr, repr(r.stderr))
+    r = eng.run("batch", stdin='{"cmd":"resolve","args":["nope\\u0000did you mean: EVIL"]}\n')
+    check(f"{tag}2m9 a NUL smuggled through a batch op's JSON cannot forge the suggestion line",
+          r.stdout.count("\n") == 1 and "did you mean: EVIL" not in r.stdout.split("did you mean:")[0] and "\\x00" in r.stdout, repr(r.stdout[:300]))
     # tokens are sanitised for the one-line contract and the --jsonl envelope
     r = eng.run("--jsonl", "move", "A", "Dest", "junk — next: rm -rf x")
     try:
@@ -316,6 +321,7 @@ def section_b(eng, tag):
         (["rename", "A"],                  "usage: rename takes 2 positional args, got 1",  "vv rename A NEWNAME"),
         (["read", "A"],                    "usage: read takes 2 positional args, got 1",    "vv outline A"),   # control: pre-existing special case (labelled below)
         (["read", "Work Items/24995 - Some title.md"], "usage: read takes 2 positional args, got 1", "vv outline 'Work Items/24995 - Some title.md'"),  # control
+        (["read", "A", "NoSuchSec"],        "not-found: no section NoSuchSec",              "vv outline A"),
         (["props", "status", "Work", "Items"], "usage: props takes 1-2 positional args, got 3", "vv props status"),       # no join into KEY
         (["unset", "A", "b", "c"],         "usage: unset takes 2 positional args, got 3",   "vv unset A b"),
         (["backlinks", "A", "extra"],      "usage: backlinks takes 1 positional args, got 2", "vv backlinks A"),
@@ -325,7 +331,7 @@ def section_b(eng, tag):
         r = eng.run(*args)
         label = " ".join(args)
         # a parenthetical hint is new, and so is the relocate wording (base said "2+")
-        new_text = "(" in prefix or args[0] in ("move", "rename", "trash")
+        new_text = "(" in prefix or args[0] in ("move", "rename", "trash") or prefix.startswith("not-found")
         check(f"{tag}1 `{label}` message" + ("" if new_text else " (control: arity text pre-existed)"),
               r.returncode == 1 and r.stderr.startswith(prefix), f"rc={r.returncode} {r.stderr}")
         check(f"{tag}1 `{label}` next" + (" (control: read's outline hint pre-existed)" if args[0] == "read" else ""), next_of(r.stderr) == nxt, r.stderr)
@@ -427,6 +433,9 @@ def section_c(eng, tag):
     for cmd in (("head", "24999 - External"), ("show", "24999 - External"), ("read", "24999 - External", "H1"), ("resolve", "24999 - External")):
         r = eng.run(*cmd)
         check(f"{tag}7r …and it cannot be READ through the bare name either ({cmd[0]})", r.returncode == 1 and r.stderr.startswith("escape:"), r.stdout + r.stderr)
+    r = eng.run("head", "Ext/24999 - External.md")
+    check(f"{tag}7t …nor through the TYPED path (natively the resolver fell through a failed containment into the walk)",
+          r.returncode == 1 and r.stderr.startswith("escape:"), r.stdout + r.stderr)
     os.symlink(os.path.join(eng.vault, "Missing.md"), os.path.join(eng.vault, "Ext", "31001 - Dangling.md"))
     for ref in ("31001", "31001 - Dangling"):
         r = eng.run("head", ref)
@@ -447,7 +456,15 @@ def section_c(eng, tag):
             r = eng.run("set", "25000", "status", "x")
             check(f"{tag}8 unreadable directory → a WRITE by id is refused, not a false unique", r.returncode == 1 and r.stderr.startswith("refused: cannot prove id 25000 is unique"), f"rc={r.returncode} {r.stderr}")
             check(f"{tag}8' …naming the directory once", r.stderr.count("Hidden") == 1, r.stderr)
-            check(f"{tag}8'' …and nothing written", "status: x" not in eng.read("Vis/25000 - Seen.md"))
+            check(f"{tag}8w0 …and nothing written", "status: x" not in eng.read("Vis/25000 - Seen.md"))
+            os.makedirs(os.path.join(eng.vault, "Hid — next: evil"), exist_ok=True)
+            with open(os.path.join(eng.vault, "Hid — next: evil", "x.md"), "w") as f: f.write("# x\n")
+            hmode = os.stat(os.path.join(eng.vault, "Hid — next: evil")).st_mode
+            os.chmod(os.path.join(eng.vault, "Hid — next: evil"), 0); _RESTORE.append((os.path.join(eng.vault, "Hid — next: evil"), hmode))
+            r = eng.run("head", "25000 - Seen")
+            os.chmod(os.path.join(eng.vault, "Hid — next: evil"), hmode)
+            check(f"{tag}8q the read warning is escaped like an error: a directory name cannot forge a second next step",
+                  r.returncode == 0 and r.stderr.count(" — next: ") == 1 and "Hid —next: evil" in r.stderr, repr(r.stderr))
             r = eng.run("resolve", "25000")
             check(f"{tag}8r …while a READ by id answers the visible hit with a warning (exit 0)",
                   r.returncode == 0 and r.stdout.strip() == "Vis/25000 - Seen.md" and r.stderr.startswith("warning: cannot prove id 25000 is unique") and "Hidden" in r.stderr, f"rc={r.returncode} {r.stdout} {r.stderr}")
@@ -456,15 +473,36 @@ def section_c(eng, tag):
                   r.returncode == 1 and r.stderr.startswith("refused: cannot prove id 25099 is unique") and next_of(r.stderr) == "vv doctor", f"rc={r.returncode} {r.stderr}")
             r = eng.run("move", "Vis/25000 - Seen", "Dest")
             check(f"{tag}8v a PATH-qualified relocate under the lock is refused too (the link rewrite cannot be complete)",
-                  r.returncode == 1 and r.stderr.startswith("refused: cannot prove the link rewrite is complete") and next_of(r.stderr) == "vv doctor", f"rc={r.returncode} {r.stderr}")
+                  r.returncode == 1 and r.stderr.startswith("refused: cannot prove the link graph is complete") and next_of(r.stderr) == "vv doctor", f"rc={r.returncode} {r.stderr}")
             r = eng.run("trash", "Vis/25000 - Seen")
             check(f"{tag}8u …and so is trash (its broken-link report would be partial)",
-                  r.returncode == 1 and r.stderr.startswith("refused: cannot prove the broken-link report is complete"), f"rc={r.returncode} {r.stderr}")
+                  r.returncode == 1 and r.stderr.startswith("refused: cannot prove the link graph is complete"), f"rc={r.returncode} {r.stderr}")
+            r = eng.run("backlinks", "Vis/25000 - Seen")
+            check(f"{tag}8g a graph READ by exact path under the lock answers with the same warning (both engines)",
+                  r.returncode == 0 and r.stderr.startswith("warning: cannot prove the link graph is complete") and "Hidden" in r.stderr, f"rc={r.returncode} {r.stderr}")
+            r = eng.run("impact", "Vis/25000 - Seen")
+            check(f"{tag}8g' …and so does impact (the blast-radius report)",
+                  r.returncode == 0 and r.stderr.startswith("warning: cannot prove the link graph is complete"), f"rc={r.returncode} {r.stderr}")
             r = eng.run("set", "No Such Note", "k", "v")
             check(f"{tag}8y a bare-name MISS under the lock refuses a write, never a definitive not-found",
                   r.returncode == 1 and r.stderr.startswith("refused: cannot prove 'No Such Note' is absent") and next_of(r.stderr) == "vv doctor", f"rc={r.returncode} {r.stderr}")
             r = eng.run("batch", stdin=json.dumps({"cmd": "resolve", "args": ["25000"]}) + "\n")
-            check(f"{tag}8t batch (multi-op) refuses rather than warns", '"exit": 1' in r.stdout and "refused: cannot prove" in r.stdout, r.stdout[:300])
+            check(f"{tag}8t batch (multi-op) refuses rather than warns (control: base refused every op)", '"exit": 1' in r.stdout and "refused: cannot prove" in r.stdout, r.stdout[:300])
+            r = eng.run("head", "25099")
+            check(f"{tag}8s a digit-ref MISS on a read warns exactly once", r.stderr.count("warning:") == 1 and r.stderr.count(" — next: ") == 1, repr(r.stderr))
+            sd = os.path.join(eng.vault, "Standups"); os.makedirs(sd, exist_ok=True)
+            smode = os.stat(sd).st_mode; os.chmod(sd, 0); _RESTORE.append((sd, smode))
+            r = eng.run("daily-append", "x")
+            os.chmod(sd, smode)
+            check(f"{tag}8n daily-append under an unreadable Standups/ refuses instead of proposing a duplicate",
+                  r.returncode == 1 and r.stderr.startswith("refused: cannot prove today's standup is absent") and "create it" not in r.stderr, f"rc={r.returncode} {r.stderr}")
+            r = eng.run("--jsonl", "resolve", "25000")
+            try:
+                env_ = json.loads(r.stderr.strip().splitlines()[-1])
+            except Exception:
+                env_ = {}
+            check(f"{tag}8p under --jsonl the warning is a JSON row, not a bare line",
+                  r.returncode == 0 and env_.get("kind") == "warning" and env_.get("next") == "vv doctor" and "Hidden" in env_.get("message", ""), repr(r.stderr))
             r = eng.run("doctor")
             check(f"{tag}8x `vv doctor` (the refusal's next step) names the unreadable directory", "unreadable: Hidden" in r.stdout, r.stdout + r.stderr)
             r = eng.run("resolve", "Vis/25000 - Seen")
@@ -478,8 +516,8 @@ def section_c(eng, tag):
             # the walk-error list is per WALK: an earlier op's unreadable directory is
             # still unreadable for this op's walk, so the refusal is legitimate here —
             # the per-walk reset is pinned in-process below, where the lock can be lifted between walks
-            check(f"{tag}8b batch: a later id op under the same lock refuses with the directory named once",
-                  '"exit": 1' in r.stdout and r.stdout.count("Hidden") == 1, r.stdout[:300])
+            check(f"{tag}8b batch: every op under the lock refuses (batch is a write op), each naming the directory once",
+                  r.stdout.count('"exit": 1') == 2 and r.stdout.count("Hidden") == 2, r.stdout[:300])
             if eng.name == "python":
                 # in-process, so the lock can be lifted between two walks; env + module restored after
                 prev = os.environ.get("VV_VAULT"); os.environ["VV_VAULT"] = eng.vault

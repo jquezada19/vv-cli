@@ -9,8 +9,10 @@ changes an exit code, is a major change.
 ## [Unreleased]
 
 Affordance sweep of the five days after 2.0.1 (457 telemetry rows,
-2026-09-03 → 2026-09-07; re-derive with `bench/pilot_report.py --since
-2026-09-03 --until 2026-09-08`). Three fixes, pinned through both entries by
+2026-09-03 → 2026-09-07, as counted when the sweep was written on
+2026-09-07; re-derive with `bench/pilot_report.py --since 2026-09-03 --until
+2026-09-08` — the sink kept growing that evening, partly with this change's
+own review probes). Three fixes, pinned through both entries by
 `tests/test_affordance.py`; two seven-seat review rounds added the rest.
 
 ### Added
@@ -21,8 +23,9 @@ Affordance sweep of the five days after 2.0.1 (457 telemetry rows,
   always wins, for both spellings (a literal `#24995` note wins the `#`
   spelling; a literal `24995.md` wins both); two candidates refuse
   `ambiguous:` with a runnable `next:`; an unreadable directory makes
-  uniqueness — and absence — unprovable and the lookup is `refused:`,
-  naming the directory. A filename convention, not link semantics:
+  uniqueness — and absence — unprovable: a write through the id is
+  `refused:` and a read answers with a `warning:`, both naming the
+  directory. A filename convention, not link semantics:
   `[[24995]]` stays an unresolved link, and `new 24995` still creates
   `24995.md`. Motivation: 17 not-found rows on 2026-09-03, 9 of them in one
   second, from a `vv set <id> …` loop.
@@ -51,27 +54,39 @@ A/B of every listed input against 2.0.1, both engines:
   fallback branch fired on not-found now writes instead.
 - **0 → 1** — a bare name whose unique hit is a symlink to a file OUTSIDE
   the vault is `escape:` in both engines, for reads (`head`, `show`, `read`,
-  `resolve`) as well as writes. Typed paths were always contained; the
-  walk-derived alias was not, and `set`/`append`/`patch` through it wrote
-  outside the vault. Found in review. (The id spelling of the same case is
-  `escape:` too, but that is a kind change from `not-found:`, exit 1 either
-  way — ids did not resolve before this release.)
+  `resolve`) as well as writes. In Python a typed path was always contained
+  and only the walk-derived alias was not (`set`/`append`/`patch` through it
+  wrote outside the vault); natively even a typed path escaped, because the
+  resolver fell through a failed containment into the walk — so the typed
+  spelling is **0 → 1 natively** as well. Found in review. (The id spelling
+  of the same case is `escape:` too, but that is a kind change from
+  `not-found:`, exit 1 either way — ids did not resolve before this
+  release.)
 - **0 → 1 for writes** — a WRITE (`set`/`unset`/`append`/`appendsec`/
   `prepend`/`patch`, `batch`) through a bare-name or id hit under an
   incomplete walk (an unreadable directory somewhere in the vault) is
   `refused:` in both engines — the directory may hold a second note, so
   "unique" is unprovable; a bare-name MISS under the same condition is
-  `refused:` too (absence is as unprovable). A READ (`head`/`read`/`show`/
+  `refused:` too (a kind change, exit 1 either way: absence is as
+  unprovable). A READ (`head`/`read`/`show`/
   `resolve`/graph commands) answers the visible hit and prints a
   `warning:` line on stderr naming the directory — exit 0, output
   unchanged — because one unreadable directory turning every bare-name read
-  into an outage is the larger harm. `vv doctor` — the next step both name —
+  into an outage is the larger harm. The warning is escaped and neutralised
+  like an error, once per invocation, billed to the metrics row, and under
+  `--jsonl` it is a `{"kind": "warning", …}` row, never a bare line. A
+  `batch` op's JSON arguments have `\u0000` escaped before dispatch (the
+  one byte argv and filenames cannot carry, and the suggestion sentinel). `vv doctor` — the next step both name —
   lists the unreadable directories. The native walk treats a
   directory-iterator error or an unreadable entry type as incomplete, never
-  as "a file". A `rename`/`move`/`trash` — even by exact path — is
-  `refused:` under the same condition (**0 → 1**): the link rewrite or
-  broken-link report would be planned over a partial corpus and still verify
-  "clean".
+  as "a file". The same probe sits in the link graph itself (the basename
+  index every link scan goes through), in both engines: a `rename`/`move`/
+  `trash` — even by exact path — is `refused:` under the condition
+  (**0 → 1**, the rewrite or broken-link report would be planned over a
+  partial corpus and still verify "clean"), and a graph READ (`backlinks`,
+  `links`, `impact`, `orphans`, `unresolved`, `lint`) answers with the
+  `warning:` instead of silently under-reporting over an index that prunes
+  what the walk could not see.
 - A dangling symlink whose name matches is no longer a hit: `not-found:`
   instead of a resolved path followed by a traceback on the read (`head`,
   `set`: exit 1 as before; **`resolve`: 0 → 1**, it used to print the
@@ -98,7 +113,8 @@ A/B of every listed input against 2.0.1, both engines:
   carry a control character or the separator into a runnable next step is
   replaced by its placeholder. "One line" means the error line plus, for a
   name miss, the `did you mean:` line — the only newline the grammar allows,
-  and only code can introduce it. The metrics row bills the bytes actually
+  and only code can introduce it — and, under an incomplete walk, one
+  `warning:` line before the answer or the error. The metrics row bills the bytes actually
   written (the `--jsonl` envelope, not the plain line — pre-existing).
 - Arity misses name a runnable next step derived from the command table —
   the caller's own operands, shell-quoted, in the slots they filled

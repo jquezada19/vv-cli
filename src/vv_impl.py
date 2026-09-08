@@ -246,17 +246,8 @@ def resolve(ref):
         die(f"not-found: no note matches '{ref}'{extra}")
     die("ambiguous: " + " | ".join(os.path.relpath(h, VAULT) for h in sorted(hits)[:5]), nxt=f"vv resolve {_q(os.path.relpath(sorted(hits)[0], VAULT))}")
 
-def _require_complete_walk(what):
-    """A link rewrite (rename/move/trash) plans over EVERY note; an unreadable
-    directory may hold a backlink the plan cannot see, and the post-write
-    verification would still print clean. The index-backed link scans do not
-    walk, so completeness is probed explicitly here (review round 3)."""
-    list(md_files())
-    if _walk_errors:
-        die(f"refused: cannot prove the {what} is complete — unreadable: {', '.join(_walk_errors[:3])}",
-            nxt="vv doctor")
-
 _WRITE_OPS = {"set", "unset", "append", "appendsec", "prepend", "patch", "rename", "move", "trash", "batch"}
+_warned_incomplete = False
 
 def _incomplete(claim):
     """An incomplete walk cannot prove a bare name or id unique (or absent):
@@ -264,11 +255,24 @@ def _incomplete(claim):
     hit is refused; a READ answers the visible hit with a warning — the
     wrong note in a read is loud and recoverable, one unreadable directory
     turning every bare-name read into an outage is not (review round 3,
-    2026-09-07). `batch` is read-only but multi-op, so it refuses too."""
+    2026-09-07). `batch` refuses because it captures each op's stderr and
+    surfaces it only on a non-zero exit — a warning there would be swallowed."""
+    global _out_total, _warned_incomplete
     where = ", ".join(_walk_errors[:3])
     if _op in _WRITE_OPS:
         die(f"refused: cannot prove {claim} — unreadable: {where}", nxt="vv doctor")
-    sys.stderr.write(f"warning: cannot prove {claim} — unreadable: {where} — next: vv doctor\n")
+    if _warned_incomplete:
+        return   # one warning per invocation: the id branch and the miss branch may both reach here
+    _warned_incomplete = True
+    # not routed through die() (the command still answers), so it is escaped,
+    # enveloped under --jsonl, and billed the same way
+    body = _neutralise(_esc(f"cannot prove {claim} — unreadable: {where}"))
+    if _JSONL:
+        wire = json.dumps({"kind": "warning", "message": body, "next": "vv doctor", "exit": 0}, ensure_ascii=False) + "\n"
+    else:
+        wire = f"warning: {body} — next: vv doctor\n"
+    sys.stderr.write(wire)
+    _out_total += len(wire.encode("utf-8"))
 
 def _name_hits(want, all_notes):
     """Exact-basename matches from a completed walk (see _incomplete)."""
@@ -419,7 +423,7 @@ def sec_text(lines, s):
 def sha8(t):
     return hashlib.sha256(t.encode()).hexdigest()[:8]
 
-def find_sec(lines, secs, sid):
+def find_sec(lines, secs, sid, ref=None):
     """Resolve a section by id, and forgive the four ways agents actually ask.
 
     A replay of 50 real sessions (2026-08-26) found section addressing was
@@ -450,7 +454,7 @@ def find_sec(lines, secs, sid):
         ids = ", ".join(m["id"] for m in matches)
         die(f"ambiguous: {len(matches)} sections are titled {want!r} ({ids})",
             nxt="pass the id from vv outline NOTE")
-    die(f"not-found: no section {sid}", nxt="vv outline NOTE")
+    die(f"not-found: no section {sid}", nxt=f"vv outline {_q(ref)}" if ref else "vv outline NOTE")
 
 def split_fm(text):
     fm, body, _tail, _bom = split_fm_full(text)
@@ -581,7 +585,7 @@ def cmd_outline(ref):
 
 def cmd_read(ref, sid):
     lines, secs = parse(read_raw(resolve(ref)))
-    s = find_sec(lines, secs, sid)
+    s = find_sec(lines, secs, sid, ref)
     out(sec_text(lines, s))
     out(f"--sha8:{sha8(sec_text(lines, s))}")
 
@@ -596,7 +600,7 @@ def cmd_patch(ref, sid, expect):
     _dirty_gate()
     fp = resolve(ref)
     lines, secs = parse(read_raw(fp))
-    s = find_sec(lines, secs, sid)
+    s = find_sec(lines, secs, sid, ref)
     if sid == "H0" and s["end"] > 0 and lines and lines[0].rstrip("\r") == "---":
         die("refused: H0 contains frontmatter", nxt="vv set/unset (patch would rewrite YAML as body)")
     cur = sec_text(lines, s)
@@ -615,7 +619,7 @@ def cmd_appendsec(ref, sid, text):
     fp = resolve(ref)
     _sig = file_sig(fp)
     lines, secs = parse(read_raw(fp))
-    s = find_sec(lines, secs, sid)
+    s = find_sec(lines, secs, sid, ref)
     ins = s["end"]
     while ins > s["start"] and lines[ins - 1].strip() == "":
         ins -= 1
@@ -1233,7 +1237,12 @@ def cmd_daily_append(text):
     _dirty_gate()
     import datetime, glob
     today = datetime.date.today().isoformat()
-    hits = glob.glob(os.path.join(VAULT, "Standups", f"*{today}*.md"))
+    sd = os.path.join(VAULT, "Standups")
+    if os.path.isdir(sd) and not os.access(sd, os.R_OK):
+        # glob swallows EACCES and would report a false absence — and the
+        # next step would create a duplicate of a note that exists
+        die("refused: cannot prove today's standup is absent — unreadable: Standups", nxt="vv doctor")
+    hits = glob.glob(os.path.join(sd, f"*{today}*.md"))
     if not hits:
         die(f"not-found: no standup note for {today} under Standups/", nxt="create it, then re-run")
     # Three defects lived in this one line (Codex review 2026-08-26), and this is
@@ -1678,10 +1687,21 @@ def cmd_index(*args):
 
 
 def basename_index():
-    """lowercased basename -> [paths]"""
+    """lowercased basename -> [paths]. The link graph's completeness is probed
+    here — the one entry every link-scan consumer (backlinks, impact, orphans,
+    unresolved, lint, and the rename/move/trash rewrite) goes through — so an
+    unreadable directory warns a read and refuses a write (see _incomplete)
+    instead of under-reporting silently over an index that prunes what the
+    walk could not see (code-review seat, round 4, 2026-09-08)."""
     idx = {}
     h = index_handle()
-    paths = (os.path.join(VAULT, r) for r in h.rel_paths()) if h is not None else md_files()
+    if h is not None:
+        list(md_files())             # the index does not walk; a probe walk does
+        paths = (os.path.join(VAULT, r) for r in h.rel_paths())
+    else:
+        paths = list(md_files())
+    if _walk_errors:
+        _incomplete("the link graph is complete")
     for p in paths:
         idx.setdefault(os.path.basename(p)[:-3].lower(), []).append(p)
     return idx
@@ -1826,7 +1846,6 @@ def cmd_trash(ref, *args):
     apply_, expect = _relocate_tail("trash", (ref,), args)   # before resolve: syntax outranks lookup
     fp = resolve(ref)
     src_rel = rel(fp)
-    _require_complete_walk("broken-link report")
     hits, ambiguous = occurrences(fp, include_bare=True)
     if ambiguous:
         die("refused: source basename is ambiguous in vault", nxt="resolve duplicate notes first")
@@ -1948,7 +1967,10 @@ def cmd_batch():
             continue
         try:
             op = json.loads(line)
-            cmd, cargs = op["cmd"], [str(x) for x in op.get("args", [])]
+            # JSON strings may carry \u0000 — the one byte argv and filenames
+            # cannot — and NUL is die()'s suggestion-line sentinel; escape it
+            # here so a batch op can never forge a second stderr line
+            cmd, cargs = op["cmd"], [str(x).replace("\x00", "\\x00") for x in op.get("args", [])]
             if cmd not in _BATCH_READS:
                 raise ValueError(f"'{cmd}' is not a batch-able read command")
             fn = CMDS[cmd]
@@ -2287,7 +2309,6 @@ def _do_relocate(ref, dest_rel_noext, apply_, opname, expect_plan=None):
     idx = basename_index()
     if rename_base and rename_base.lower() in idx:
         die(f"refused: another note already has basename '{new_base}' — bare links would be ambiguous")
-    _require_complete_walk("link rewrite")
     hits, ambiguous = occurrences(fp, include_bare=bool(rename_base))
     if ambiguous:
         # rename: bare links can't be rewritten safely. move: bare links aren't
@@ -2545,7 +2566,7 @@ def cmd_doctor(*args):
     out(f"journals: {'none pending' if not js else 'UNRESOLVED (writes blocked): '
         + ', '.join(os.path.basename(j) for j in js) + ' — vv doctor --rollback | --discard'}")
     list(md_files())   # a complete walk is what bare-name and id resolution need
-    out("unreadable: " + (", ".join(_walk_errors[:10]) + " (bare-name and id lookups refuse until readable)"
+    out("unreadable: " + (_neutralise(_esc(", ".join(_walk_errors[:10]))) + " (bare-name and id lookups: writes refuse, reads warn, until readable)"
                           if _walk_errors else "none"))
     try:
         with open(METRICS, "a"):

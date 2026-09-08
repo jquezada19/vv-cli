@@ -90,7 +90,9 @@ pub fn walk_checked(dir: &Path, out: &mut Vec<PathBuf>, exclude_sandbox: bool) -
         Ok(rd) => {
             for e in rd {
                 // an iterator error or an unreadable file type is an entry we
-                // could not evaluate: the walk is incomplete, never "a file"
+                // could not evaluate: the walk is marked incomplete (the entry
+                // itself is still collected by name — its consumers discard an
+                // incomplete walk, or never needed completeness)
                 let e = match e {
                     Ok(e) => e,
                     Err(_) => {
