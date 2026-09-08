@@ -5,16 +5,18 @@ Read:    outline NOTE · read NOTE SEC · head NOTE · show NOTE [--max-bytes N]
          resolve NAME · search TERMS [--k N] [--w CHARS] [--files]
 Write:   patch NOTE SEC SHA8 <stdin · appendsec NOTE SEC TEXT · append NOTE TEXT · prepend NOTE TEXT
          set NOTE KEY VALUE · unset NOTE KEY · new PATH [--template T] [--k v ...]
-Relocate rename NOTE NEWNAME [--apply [SHA8]] · move NOTE DESTFOLDER [--apply [SHA8]] · trash NOTE [--apply SHA8]
+Relocate rename NOTE NEWNAME [--apply [SHA8]] · move NOTE DESTFOLDER [--apply [SHA8]] · trash NOTE [--apply [SHA8]]
          link-aware + journaled. Dry-run prints a plan SHA8; --apply SHA8 executes
          exactly that reviewed plan (exit 3 if the plan drifted). Never bare `mv`.
+         One note per call; anything after the operands except --apply [SHA8] is refused.
 Graph:   backlinks NOTE · links NOTE · impact NOTE · orphans [FOLDER] · deadends · unresolved\nMisc:    templates
 Query:   board FOLDER [k=v ...] · tags [--counts] · props KEY [FOLDER]
 Agent:   changed --since <epoch|ISO> · batch  (JSONL read-ops on stdin, one process)
 Daily:   daily-append TEXT   (today's standup note; creates from convention if missing)
 Health:  doctor [--rollback | --discard] · lint [--quick [--limit N]] · index [--rebuild]
 
-NOTE = vault-relative path OR bare name (wikilink-style resolution).
+NOTE = vault-relative path OR bare name (wikilink-style resolution) OR a bare id:
+       digits ('24995', quote '#24995') name the unique note titled '24995 - …'.
 SEC  = an outline id (H3) or the heading title exactly as `outline` prints it.
 search: unquoted args are AND-ed terms; a QUOTED arg is ONE phrase.
         `vv search a b` != `vv search "a b"`.
@@ -118,8 +120,19 @@ def use_rust():
         die("engine: VV_ENGINE=rust but the engine is not built — next: cd vrust && cargo build --release")
     return os.path.exists(VRUST)
 
+_walk_errors = []   # directories os.walk could not read this invocation (rel paths)
+
+def _walk_onerror(err):
+    # os.walk skips an unreadable directory SILENTLY; a uniqueness claim over
+    # the corpus (id-prefix resolution) is unprovable when that happens, so
+    # the miss is recorded and the alias branch refuses (review 2026-09-07).
+    try:
+        _walk_errors.append(os.path.relpath(err.filename, VAULT))
+    except (TypeError, ValueError):
+        _walk_errors.append(str(err.filename))
+
 def md_files():
-    for dirpath, dirs, names in os.walk(VAULT):
+    for dirpath, dirs, names in os.walk(VAULT, onerror=_walk_onerror):
         dirs[:] = [d for d in dirs if not d.startswith(".") and d not in SKIP_DIRS]
         for n in names:
             if n.endswith(".md"):
@@ -168,22 +181,67 @@ def resolve(ref):
     if os.path.isfile(fp_md):
         return _cf(fp_md)
     want = (ref[:-3] if ref.endswith(".md") else ref).lower()
+    # `#24995` is the same ref as `24995` (a ticket id, either spelling): the
+    # exact-basename pass sees both, so a literal `24995.md` wins for both
+    forms = (want, want[1:]) if want.startswith("#") and _ID_REF.fullmatch(want) else (want,)
     all_notes = list(md_files())
-    hits = [p for p in all_notes if os.path.basename(p)[:-3].lower() == want]
+    hits = [p for p in all_notes if os.path.basename(p)[:-3].lower() in forms]
     if len(hits) == 1:
         return _cf(hits[0])
     if not hits:
+        idhit = _resolve_id_prefix(want, all_notes)
+        if idhit:
+            return _cf(idhit)
         sugg = suggest_names(want, all_notes)
         extra = ("\ndid you mean: " + " | ".join(sugg)) if sugg else ""
         die(f"not-found: no note matches '{ref}'{extra}")
     die("ambiguous: " + " | ".join(os.path.relpath(h, VAULT) for h in sorted(hits)[:5]))
+
+# A bare ASCII-digit ref (optionally `#`-prefixed) names the UNIQUE note whose
+# basename starts with `<digits> - ` — the `NNNNN - Title` work-item filename
+# convention. Deterministic, never fuzzy: exact path and exact basename have
+# already missed by the time this runs, the delimiter is literal (an en-dash,
+# a missing space, or digits mid-name are not matches), and 2+ candidates
+# refuse. It is a filename convention, not verified ticket identity: `[[24995]]`
+# stays an unresolved LINK (link resolution never reads this). Motivated by
+# 44 not-found rows in one second on 2026-09-03 from `vv set <id> …` loops.
+_ID_REF = re.compile(r"#?([0-9]+)")
+
+def _resolve_id_prefix(want, all_notes):
+    m = _ID_REF.fullmatch(want)
+    if not m or "/" in want:
+        return None
+    digits = m.group(1)
+    prefix = digits + " - "
+    cands = sorted(p for p in all_notes if os.path.basename(p).startswith(prefix))
+    if not cands:
+        return None
+    if _walk_errors:
+        die(f"refused: cannot prove id {digits} is unique — unreadable: "
+            f"{', '.join(_walk_errors[:3])} — next: vv resolve {shlex_quote(rel(cands[0]))}")
+    if len(cands) > 1:
+        die(f"ambiguous: {digits} matches {len(cands)} notes: "
+            + " | ".join(rel(c) for c in cands[:5])
+            + f" — next: vv resolve {shlex_quote(rel(cands[0]))}")
+    # the candidate came from a directory walk, not from the caller: it gets the
+    # same containment as a typed path (a symlinked note whose target is
+    # outside the vault must never become a write target through an alias)
+    real = os.path.realpath(cands[0])
+    if real != _VAULT_REAL and not real.startswith(_VAULT_REAL + os.sep):
+        die(f"escape: {rel(cands[0])} resolves outside the vault")
+    return cands[0]
+
+def shlex_quote(s):
+    import shlex
+    return shlex.quote(s)
 
 def suggest_names(want, paths, n=3):
     """Suggestions for a failed name lookup, tiered like rustdoc search:
     substring match outranks edit-distance similarity. A path-qualified miss
     (Folder/Notte) is compared by its basename. Ties break lexicographically so
     filesystem iteration order never changes the output. Suggestion only —
-    resolve never auto-picks a fuzzy match, because resolve feeds the write path."""
+    resolve never auto-picks a fuzzy match, because resolve feeds the write path
+    (the id-prefix rule in _resolve_id_prefix is exact and unique, not fuzzy)."""
     import difflib
     want = want.rsplit("/", 1)[-1]
     by_name = {}
@@ -1668,6 +1726,7 @@ def cmd_trash(ref, *args):
     same reason move refuses it: removing one silently repoints the survivors'
     bare links. Recovery: the same journal endpoints as rename/move — a crash
     between the move and the commit is reversed by doctor --rollback."""
+    apply_, expect = _relocate_tail("trash", (ref,), args)   # before resolve: syntax outranks lookup
     fp = resolve(ref)
     src_rel = rel(fp)
     hits, ambiguous = occurrences(fp, include_bare=True)
@@ -1688,10 +1747,9 @@ def cmd_trash(ref, *args):
     out(f"files with links that will BREAK: {len(hits)} ({sum(hits.values())} occurrences)")
     for p_, n_ in sorted(hits.items()):
         out(f"  {n_}\t{rel(p_)}")
-    if "--apply" not in args:
+    if not apply_:
         out(f"(dry-run — apply with: --apply {plan_id} to bind to THIS plan)")
         return
-    expect = _plan_token(args)
     if expect and expect != plan_id:
         die(f"stale: plan is now {plan_id}, you reviewed {expect} — next: re-run the dry-run", 3)
     _dirty_gate()
@@ -2069,16 +2127,52 @@ def _rewrite_links(text, source_fp, new_rel_noext, rename_base, linking_fp=None)
         lines[i] = l
     return "\n".join(lines), changed
 
-def _plan_token(args):
-    """The 8-hex token following --apply, if any: `--apply <sha8>` binds the apply
-    to the exact previewed plan (sqlx checksums an applied migration for the same
-    reason). Plain --apply keeps the one-shot behavior."""
-    a = list(args)
-    if "--apply" in a:
-        i = a.index("--apply")
-        if i + 1 < len(a) and re.fullmatch(r"[0-9a-f]{8}", a[i + 1]):
-            return a[i + 1]
-    return None
+_RELOCATE_OPERANDS = {"move": ("NOTE", "FOLDER"), "rename": ("NOTE", "NEWNAME"), "trash": ("NOTE",)}
+
+def _relocate_tail(cmd, operands, tail):
+    """The trailing-argument GRAMMAR of rename/move/trash: after the fixed
+    operands, the only accepted tokens are `--apply`, optionally followed by
+    ONE 8-hex plan id (case-insensitive, normalised to lowercase). Anything
+    else is a usage error, raised BEFORE the note resolves or a plan prints.
+
+    Why a grammar and not `"--apply" in args`: `*args` swallowed extra
+    positionals silently, so `vv move A B C D Dest --apply` used note B as the
+    destination (2026-09-07: four stray folders at the vault root, exit 0), and
+    a non-hex token after --apply degraded to an UNBOUND apply — the typo'd
+    plan id was ignored and the write went ahead. A flag in an operand slot
+    (`vv move A --apply`, `vv move --apply A Dest`) is refused for the same
+    reason: it would resolve `--apply` as a note or plan a move into a folder
+    named `--apply`. Returns (apply, plan_id_or_None)."""
+    names = _RELOCATE_OPERANDS[cmd]
+    synopsis = f"{cmd} takes {' '.join(names)}"
+    template = f"vv {cmd} {' '.join(names)}"
+    for nm, val in zip(names, operands):
+        if val.startswith("--"):
+            die(f"usage: {synopsis}, got flag '{val}' where {nm} was expected — next: {template}")
+    dry = "vv " + " ".join([cmd] + [shlex_quote(o) for o in operands])
+    apply_, token = False, None
+    it = iter(tail)
+    for tok in it:
+        if tok == "--apply":
+            if apply_:
+                die(f"usage: --apply given twice — next: {dry}")
+            apply_ = True
+            nxt = next(it, None)
+            if nxt is None:
+                break
+            if nxt.startswith("--"):
+                if nxt == "--apply":
+                    die(f"usage: --apply given twice — next: {dry}")
+                die(f"usage: {synopsis} [--apply [SHA8]], got unknown flag '{nxt}' — next: {dry}")
+            if not re.fullmatch(r"[0-9a-fA-F]{8}", nxt):
+                die(f"usage: --apply takes an 8-hex plan id, got '{nxt}' — next: {dry}")
+            token = nxt.lower()
+        elif tok.startswith("--"):
+            die(f"usage: {synopsis} [--apply [SHA8]], got unknown flag '{tok}' — next: {dry}")
+        else:
+            hint = " (one note per call)" if cmd == "move" else ""
+            die(f"usage: {synopsis}, got extra positional '{tok}'{hint} — next: {template}")
+    return apply_, token
 
 def _do_relocate(ref, dest_rel_noext, apply_, opname, expect_plan=None):
     fp = resolve(ref)
@@ -2199,14 +2293,16 @@ def _do_relocate(ref, dest_rel_noext, apply_, opname, expect_plan=None):
         die(f"rolled-back: ({e}); originals restored")
 
 def cmd_rename(ref, new_name, *args):
+    apply_, token = _relocate_tail("rename", (ref, new_name), args)   # before resolve: syntax outranks lookup
     fp = resolve(ref)
     dest = os.path.join(os.path.dirname(rel(fp)), new_name[:-3] if new_name.endswith(".md") else new_name)
-    _do_relocate(ref, dest, "--apply" in args, "rename", _plan_token(args))
+    _do_relocate(ref, dest, apply_, "rename", token)
 
 def cmd_move(ref, dest_folder, *args):
+    apply_, token = _relocate_tail("move", (ref, dest_folder), args)
     fp = resolve(ref)
     dest = os.path.join(dest_folder.rstrip("/"), os.path.basename(rel(fp))[:-3])
-    _do_relocate(ref, dest, "--apply" in args, "move", _plan_token(args))
+    _do_relocate(ref, dest, apply_, "move", token)
 
 def _table_pipe_findings(text):
     """[(line_idx0, raw_target)] for unescaped alias pipes inside wikilinks on
@@ -2383,10 +2479,65 @@ CMDS = {
 # outline — with the note the caller already named.
 def _next_read(args):
     if args:
-        import shlex
-        return f"vv outline {shlex.quote(args[0])}"
+        return f"vv outline {shlex_quote(args[0])}"
     return "vv outline NOTE"
-ARITY_NEXT = {"read": _next_read}   # runnable, per the `next:` contract
+
+def _table_operands(cmd):
+    """The REQUIRED operand placeholders of a command, from COMMAND_TABLE:
+    tokens up to the first optional group `[…]` or stdin marker `<…`. That
+    keeps brackets and redirects out of a `next:` line — a copied
+    `vv patch NOTE SEC SHA8 <stdin` would redirect from a file named stdin."""
+    for c in COMMAND_TABLE:
+        if c["name"] == cmd:
+            ops = []
+            for tok in c["args"].split():
+                if tok.startswith("[") or tok.startswith("<"):
+                    break
+                ops.append(tok)
+            return ops
+    return []
+
+def _next_from_table(cmd, args):
+    """A RUNNABLE next step for an arity miss: the caller's own operands,
+    shell-quoted, in the slots they filled; placeholders for the rest. Too
+    many arguments with no flag among them is almost always an unquoted TEXT
+    or VALUE (`vv append A hello world` — 4 of the pilot's append misses), so
+    the surplus is joined into the last slot as one quoted argument."""
+    ops = _table_operands(cmd)
+    if not ops:
+        return "vv --help"
+    args = list(args)
+    flags = [a for a in args if a.startswith("--")]
+    if len(args) > len(ops) and not flags:
+        head = [shlex_quote(a) for a in args[:len(ops) - 1]]
+        return " ".join(["vv", cmd] + head + [shlex_quote(" ".join(args[len(ops) - 1:]))])
+    filled = []
+    for i, ph in enumerate(ops):
+        if i < len(args) and not args[i].startswith("--"):
+            filled.append(shlex_quote(args[i]))
+        else:
+            filled.append(ph)
+    return " ".join(["vv", cmd] + filled)
+
+def _next_append(args):
+    # `--section` is not a flag append has; the section variant is appendsec
+    if any(a == "--section" or a.startswith("--section=") for a in args):
+        note = shlex_quote(args[0]) if args and not args[0].startswith("--") else "NOTE"
+        return f"vv appendsec {note} SEC TEXT"
+    return _next_from_table("append", args)
+
+# read/patch: the honest next step is the outline — with the note the caller
+# already named — because SEC (and patch's SHA8) come from it.
+ARITY_NEXT = {"read": _next_read, "patch": _next_read, "append": _next_append}   # runnable, per the `next:` contract
+
+def _arity_hint(cmd, args):
+    """Parenthetical BEFORE `— next:` (the next line itself stays a bare command)."""
+    if cmd == "append" and any(a == "--section" or a.startswith("--section=") for a in args):
+        return " (append has no --section; append inside a section is appendsec)"
+    ops = _table_operands(cmd)
+    if ops and len(args) > len(ops) and not any(a.startswith("--") for a in args) and ops[-1] in ("TEXT", "VALUE"):
+        return f" ({ops[-1]} is one argument; quote it)"
+    return ""
 
 # Words the pilot week typed that are not commands but name a real one.
 # `journal` (two rows, one double-logged attempt, before 2026-09-02): journals
@@ -2403,11 +2554,16 @@ def _check_arity(cmd, fn, args):
     pos_n = code.co_argcount
     var = bool(code.co_flags & 0x04)          # CO_VARARGS
     req = pos_n - len(fn.__defaults__ or ())
+    # rename/move/trash carry *args for the --apply tail only: their operand
+    # count is exact, and _relocate_tail refuses extra positionals — so the
+    # message must not advertise "2+" (a wording that contradicts the refusal
+    # the next call would get; panel 2026-09-07)
     hi = None if var else pos_n
     if len(args) < req or (hi is not None and len(args) > hi):
-        want = f"{req}+" if hi is None else (str(req) if req == hi else f"{req}-{hi}")
-        die(f"usage: {cmd} takes {want} positional args, got {len(args)} — "
-            f"next: {ARITY_NEXT[cmd](args) if cmd in ARITY_NEXT else 'run vv with no args for the command list'}")
+        exact_tail = cmd in _RELOCATE_OPERANDS     # the *args tail is flags-only, never operands
+        want = str(req) if exact_tail else (f"{req}+" if hi is None else (str(req) if req == hi else f"{req}-{hi}"))
+        nxt = ARITY_NEXT[cmd](args) if cmd in ARITY_NEXT else _next_from_table(cmd, args)
+        die(f"usage: {cmd} takes {want} positional args, got {len(args)}{_arity_hint(cmd, args)} — next: {nxt}")
 
 VERSION_FALLBACK = "2.0.1"  # used only when VERSION is absent (bare-file deploys)
 
@@ -2477,7 +2633,7 @@ COMMAND_TABLE = [
     {"name": "daily-append", "args": "TEXT",                    "summary": "append to today's daily note"},
     {"name": "rename",       "args": "NOTE NEWNAME [--apply [SHA8]]", "summary": "link-aware journaled rename; dry-run by default"},
     {"name": "move",         "args": "NOTE FOLDER [--apply [SHA8]]",  "summary": "link-aware journaled move; dry-run by default"},
-    {"name": "trash",        "args": "NOTE [--apply SHA8]",     "summary": "journaled removal to .trash/; reports links that will break"},
+    {"name": "trash",        "args": "NOTE [--apply [SHA8]]",   "summary": "journaled removal to .trash/; reports links that will break"},
     {"name": "backlinks",    "args": "NOTE",                    "summary": "notes linking here"},
     {"name": "links",        "args": "NOTE",                    "summary": "outgoing wiki links"},
     {"name": "impact",       "args": "NOTE",                    "summary": "blast radius before a refactor"},

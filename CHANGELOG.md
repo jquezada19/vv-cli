@@ -8,6 +8,54 @@ changes an exit code, is a major change.
 
 ## [Unreleased]
 
+Affordance sweep of the five days after 2.0.1 (615 telemetry rows, 2026-09-03
+→ 2026-09-07). Three fixes; each is pinned through both entries by
+`tests/test_affordance.py`.
+
+### Exit-code changes — read before choosing the next version
+Under this file's header rule these are CLI-surface changes; whether the
+next release is a MAJOR or treats them as bug fixes is the release PR's call
+(a four-seat design review split 2–2 on exactly that). All three flips:
+- `move`/`rename`/`trash` with an extra positional (`vv move A B C Dest
+  --apply`), with a non-hex token after `--apply` (`--apply abc`), with an
+  unknown flag, with `--apply` twice, or with a flag in an operand slot:
+  **exit 0 → 1**. Every one of these used to WRITE: the extra-positional form
+  used note B as the destination folder (2026-09-07, four stray folders at
+  the vault root); the non-hex form silently dropped the plan id and applied
+  UNBOUND.
+- A bare digit ref that names a unique `NNNNN - Title` note (`vv set 24995
+  status done`): **exit 1 → 0**. A script whose fallback branch fired on
+  not-found now writes instead.
+
+### Fixed
+- The relocate tail is a grammar (`--apply` optionally followed by ONE 8-hex
+  plan id, nothing else), validated before the note resolves or a plan is
+  printed, so a syntax error never reports as `not-found:` and a dry-run never
+  previews the wrong move. The plan id is case-insensitive; a valid id that
+  no longer matches is still `stale:` exit 3.
+- Arity misses name a runnable next step derived from the command table —
+  the caller's own operands, shell-quoted, in the slots they filled
+  (`vv set A status VALUE`); surplus arguments with no flag among them are
+  joined into the last slot as one quoted argument (`vv append A 'hello
+  world'`); `append … --section …` points at `appendsec`; `patch`, like
+  `read`, points at the note's outline (SEC and SHA8 come from it). The
+  generic "run vv with no args for the command list" pointer is gone, and no
+  emitted `next:` carries a bracket, a redirect, or a placeholder in
+  brackets. `move NOTE` no longer advertises "2+" positionals.
+- The table entry for `trash` says `[--apply [SHA8]]` — a bare `--apply` was
+  always accepted; the synopsis overstated.
+
+### Added
+- Id-prefix resolution: a `NOTE` operand of ASCII digits (`24995`, or the
+  quoted `'#24995'`) that matches no exact path or basename resolves to the
+  unique note whose basename starts with `24995 - `. Exact delimiter (an
+  en-dash, a missing space, or digits mid-name are not matches); exact match
+  always wins; two candidates refuse `ambiguous:` with a runnable `next:`;
+  a candidate that is a symlink out of the vault is `escape:`; an unreadable
+  directory makes uniqueness unprovable and the alias is `refused:`. This is
+  a filename convention, not link semantics — `[[24995]]` stays an unresolved
+  link, and `new 24995` still creates `24995.md`.
+
 ## [2.0.1] — 2026-09-06
 
 Patch release; also the first tag to exercise the bumped release workflow
