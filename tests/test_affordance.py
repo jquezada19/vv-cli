@@ -113,10 +113,11 @@ class Engine:
         for d in ("Dest", "Dest2"):
             os.makedirs(os.path.join(self.vault, d))
 
-    def run(self, *args, stdin=None):
+    def run(self, *args, stdin=None, env=None):
         e = dict(os.environ, VV_VAULT=self.vault, VV_NO_METRICS="1", VV_INDEX_ROOT=self.index,
-                 VV_JOURNAL_ROOT=self.journals, **self.env)
-        e.pop("VV_NO_INDEX", None)
+                 VV_JOURNAL_ROOT=self.journals, **self.env, **(env or {}))
+        if not (env or {}).get("VV_NO_INDEX"):
+            e.pop("VV_NO_INDEX", None)
         entry = [VRUST] if self.name == "rust" else [sys.executable, VV]
         # stdin is ALWAYS a closed pipe: `batch`/`patch` read it, and an inherited
         # open stdin (a background runner's) blocks the suite forever.
@@ -500,6 +501,11 @@ def section_c(eng, tag):
             r = eng.run("impact", "Vis/25000 - Seen")
             check(f"{tag}8g' …and so does impact (the blast-radius report)",
                   r.returncode == 0 and r.stderr.startswith("warning: cannot prove the link graph is complete"), f"rc={r.returncode} {r.stderr}")
+            dang = os.path.join(eng.vault, "Ext", "31001 - Dangling.md")
+            if os.path.lexists(dang): os.remove(dang)   # a dangling symlink would force the native fallback for another reason
+            r = eng.run("orphans")
+            check(f"{tag}8g3 …and orphans (native guard pinned on its own)",
+                  r.returncode == 0 and r.stderr.startswith("warning: cannot prove the link graph is complete"), f"rc={r.returncode} {r.stderr}")
             r = eng.run("deadends")
             check(f"{tag}8g'' …and deadends, the one graph read that never touches basename_index (both engines)",
                   r.returncode == 0 and r.stderr.startswith("warning: cannot prove the link graph is complete") and "(" in r.stdout, f"rc={r.returncode} {r.stderr}")
@@ -548,7 +554,7 @@ def section_c(eng, tag):
             os.chmod(hidden, mode)
             r = eng.run("doctor")
             check(f"{tag}8w …and doctor reports none once readable", "unreadable: none" in r.stdout, r.stdout + r.stderr)
-            r = eng.run("resolve", "24996")
+            r = eng.run("resolve", "25000 - Seen")
             check(f"{tag}8w' …and a read over a complete walk carries NO warning (control)", r.returncode == 0 and r.stderr == "", repr(r.stderr))
             os.chmod(hidden, 0)
             r = eng.run("batch", stdin=json.dumps({"cmd": "orphans", "args": []}) + "\n" + json.dumps({"cmd": "resolve", "args": ["24996"]}) + "\n")
@@ -597,17 +603,42 @@ def section_c(eng, tag):
                   r.returncode == 1 and r.stderr.startswith("refused: cannot prove '25000 - seen' is unique") and next_of(r.stderr) == "vv doctor", f"rc={r.returncode} {r.stderr}")
             check(f"{tag}8d' …and a bare-NAME read warns and answers", r2.returncode == 0 and r2.stderr.startswith("warning: cannot prove '25000 - seen' is unique"), f"rc={r2.returncode} {r2.stderr}")
             # round 6: an unreadable NOTE is walk-incomplete evidence for every corpus scan (directory readable again)
-            with open(os.path.join(eng.vault, "Locked.md"), "w") as f: f.write("# L\n\n[[24996 - Other]]\n")
-            lk = os.path.join(eng.vault, "Locked.md"); lmode = os.stat(lk).st_mode
+            with open(os.path.join(eng.vault, "Work Items", "Locked.md"), "w") as f: f.write("# L\n\n[[24996 - Other]]\n")
+            lk = os.path.join(eng.vault, "Work Items", "Locked.md"); lmode = os.stat(lk).st_mode
             os.chmod(lk, 0); _RESTORE.append((lk, lmode))
             r = eng.run("rename", "Work Items/24996 - Other", "Renamed")
             check(f"{tag}8k a rename whose backlink scan cannot read a note is REFUSED, never a half rewrite verifying clean",
                   r.returncode == 1 and r.stderr.startswith("refused: cannot prove the link graph is complete") and "Locked.md" in r.stderr and "plan " not in r.stdout, f"rc={r.returncode} {r.stdout} {r.stderr}")
             r = eng.run("backlinks", "Work Items/24996 - Other")
             check(f"{tag}8k' …and a graph READ over it warns and answers", r.returncode == 0 and r.stderr.startswith("warning: cannot prove the link graph is complete") and "Locked.md" in r.stderr, f"rc={r.returncode} {r.stderr}")
-            for cmd in (("deadends",), ("board", "."), ("props", "status"), ("tags",)):
+            for cmd in (("deadends",), ("board", "."), ("board", "Work Items"), ("props", "status", "Work Items"), ("tags",)):
                 r2 = eng.run(*cmd)
                 check(f"{tag}8k'' `{cmd[0]}` over an unreadable note: no traceback, warns", "Traceback" not in r2.stderr and r2.returncode == 0 and "warning:" in r2.stderr, f"rc={r2.returncode} {r2.stderr[:160]}")
+            # the same four, with the index OFF: the live scans must record the note themselves
+            NOIDX = {"VV_NO_INDEX": "1"}
+            r = eng.run("rename", "Work Items/24996 - Other", "Renamed", env=NOIDX)
+            check(f"{tag}8k3 …rename refused with the index off (the live link scan records the note)",
+                  r.returncode == 1 and r.stderr.startswith("refused: cannot prove the link graph is complete") and "Locked.md" in r.stderr and "plan " not in r.stdout, f"rc={r.returncode} {r.stdout} {r.stderr}")
+            r = eng.run("backlinks", "Work Items/24996 - Other", env=NOIDX)
+            check(f"{tag}8k4 …backlinks warns with the index off", r.returncode == 0 and r.stderr.startswith("warning: cannot prove the link graph is complete") and "Locked.md" in r.stderr, f"rc={r.returncode} {r.stderr}")
+            for cmd in (("deadends",), ("board", "."), ("props", "status"), ("tags",)):
+                r2 = eng.run(*cmd, env=NOIDX)
+                check(f"{tag}8k5 `{cmd[0]}` over an unreadable note with the index off: warns, no traceback", "Traceback" not in r2.stderr and r2.returncode == 0 and "Locked.md" in r2.stderr, f"rc={r2.returncode} {r2.stderr[:160]}")
+            # batch: evidence is per op — a lock applied BETWEEN two ops must be seen by the second
+            import subprocess as _sp
+            e = dict(os.environ, VV_VAULT=eng.vault, VV_NO_METRICS="1", VV_INDEX_ROOT=eng.index, VV_JOURNAL_ROOT=eng.journals, **eng.env)
+            os.chmod(lk, lmode)   # note readable again; the directory lock is what flips mid-batch
+            entry = [VRUST] if eng.name == "rust" else [sys.executable, VV]
+            pr = _sp.Popen([*entry, "batch"], stdin=_sp.PIPE, stdout=_sp.PIPE, stderr=_sp.PIPE, text=True, env=e)
+            pr.stdin.write('{"cmd":"resolve","args":["24996"]}\n'); pr.stdin.flush()
+            first = pr.stdout.readline()
+            os.chmod(hidden, 0)
+            pr.stdin.write('{"cmd":"backlinks","args":["Work Items/24996 - Other"]}\n'); pr.stdin.close()
+            second = pr.stdout.readline(); pr.wait(timeout=60)
+            os.chmod(hidden, mode)
+            check(f"{tag}8h batch: a directory locked BETWEEN two ops is seen by the second op (evidence is per op)",
+                  '"exit": 0' in first and '"exit": 1' in second and "cannot prove" in second and "Hidden" in second, (first[:120], second[:200]))
+            os.chmod(lk, 0)
             r = eng.run("batch", stdin='{"cmd":"read","args":["\\ud800"]}\n{"cmd":"resolve","args":["24996"]}\n')
             check(f"{tag}8j a lone surrogate in a batch arg cannot kill the batch (every op records)", r.stdout.count('"i": ') == 2 and "Traceback" not in r.stderr, r.stdout[:300] + r.stderr[:200])
             os.chmod(lk, lmode)

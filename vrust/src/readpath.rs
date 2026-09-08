@@ -284,7 +284,7 @@ pub fn resolve(vault: &Path, ref_: &str) -> Option<PathBuf> {
     }
     let want = ref_.strip_suffix(".md").unwrap_or(ref_).to_lowercase();
     let mut files = Vec::new();
-    if !crate::walk_checked(vault, &mut files, false) {
+    if !crate::walk_checked(vault, &mut files, false, false) {
         return None; // incomplete walk: uniqueness is unprovable — python refuses
     }
     let hits: Vec<&PathBuf> = files

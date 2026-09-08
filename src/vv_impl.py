@@ -504,10 +504,15 @@ def file_sig(fp):
         return None
 
 
+def _read_strict(fp):
+    """UTF-8 text or an exception (UnicodeDecodeError / PermissionError) —
+    the corpus scans catch and record; single-note commands die through read_raw."""
+    with open(fp, newline="", encoding="utf-8") as f:
+        return f.read()
+
 def read_raw(fp):
     try:
-        with open(fp, newline="", encoding="utf-8") as f:
-            return f.read()
+        return _read_strict(fp)
     except UnicodeDecodeError as e:
         die(f"utf8: {rel(fp)} is not valid UTF-8 ({e.reason} at byte {e.start}) — vv only edits UTF-8 notes", 5)
     except PermissionError as e:
@@ -1065,7 +1070,7 @@ def cmd_tags(*args):
     c = Counter()
     h = index_handle()
     rows = h.props() if h is not None else (
-        (rel(p), fm_props(split_fm((_read_lossy(p) or "")[0:] )[0]))
+        (rel(p), fm_props(split_fm((_read_lossy(p) or ""))[0]))
         for p in sorted(md_files()))
     for _rp, props in rows:
         t = props.get("tags", "")
@@ -1098,7 +1103,7 @@ def cmd_props(key, folder=""):
     c = Counter()
     h = index_handle(scope=rroot or None)
     rows = h.props() if h is not None else (
-        (rel(p), fm_props(split_fm((_read_lossy(p) or "")[0:] )[0]))
+        (rel(p), fm_props(split_fm((_read_lossy(p) or ""))[0]))
         for p in sorted(_walk_scope(rroot)))
     for rp, props in rows:
         if rroot and not (rp == rroot or rp.startswith(rroot + os.sep)):
@@ -1381,16 +1386,23 @@ def scan_links(needle=None):
                 if not line:
                     continue
                 rel_, ln, kind, tgt = line.split("\t", 3)
+                if kind == "u":
+                    # the native scan could not read this note: incomplete evidence
+                    if rel_ not in _walk_errors:
+                        _walk_errors.append(rel_)
+                    continue
                 yield os.path.join(VAULT, rel_), int(ln) - 1, ("wiki" if kind == "w" else "md"), tgt
+            if _walk_errors:
+                _incomplete("the link graph is complete")
             return
     n = needle.lower() if needle else None
     for p in md_files():
         try:
-            text = read_raw(p)
-        except SystemExit:
+            text = _read_strict(p)
+        except (UnicodeDecodeError, PermissionError):
             # non-UTF-8 or unreadable: the walk is incomplete for the link
             # graph — a rename over it would rewrite half the backlinks and
-            # verify "clean" (round 6). Recorded; judged after the scan.
+            # verify "clean" (round 6). Recorded silently; judged after the scan.
             r = rel(p)
             if r not in _walk_errors:
                 _walk_errors.append(r)
@@ -1546,7 +1558,7 @@ def _index_stat_walk(scope=None):
                     st = os.stat(fp)
                 except OSError:
                     continue
-                if not scope and not os.access(fp, os.R_OK):
+                if not os.access(fp, os.R_OK):
                     # the index-backed link scan never opens notes: an unreadable
                     # note must still count as incomplete evidence (round 6)
                     r_ = os.path.relpath(fp, VAULT)
@@ -2056,7 +2068,7 @@ def cmd_batch():
             rec["out"] = o.getvalue().rstrip("\n")
         else:
             rec["error"] = (e_.getvalue() or o.getvalue()).rstrip("\n")
-        print(json.dumps(rec, ensure_ascii=False).encode("utf-8", "backslashreplace").decode("utf-8"))
+        print(json.dumps(rec, ensure_ascii=False).encode("utf-8", "backslashreplace").decode("utf-8"), flush=True)
 
 def _git(args_):
     import subprocess
@@ -2565,8 +2577,8 @@ def cmd_lint(*args):
         return
     for p in sorted(md_files()):
         try:
-            text = read_raw(p)
-        except SystemExit:
+            text = _read_strict(p)
+        except (UnicodeDecodeError, PermissionError):
             r = rel(p)
             if r not in _walk_errors:
                 _walk_errors.append(r)

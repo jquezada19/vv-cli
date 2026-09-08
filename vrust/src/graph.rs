@@ -414,7 +414,7 @@ fn cmd_backlinks(ref_: &str, vault: &Path, t0: Instant) -> Outcome {
         .to_lowercase();
 
     let mut files = Vec::new();
-    if !crate::walk_checked(vault, &mut files, false) {
+    if !crate::walk_checked(vault, &mut files, false, true) {
         return Outcome::Fallback; // incomplete walk: python warns (read) or refuses (write)
     }
     let idx = basename_index(&files);
@@ -572,7 +572,7 @@ fn cmd_orphans(folder: &str, vault: &Path, t0: Instant) -> Outcome {
         }
     };
     let mut files = Vec::new();
-    if !crate::walk_checked(vault, &mut files, false) {
+    if !crate::walk_checked(vault, &mut files, false, true) {
         return Outcome::Fallback; // incomplete walk: python warns (read) or refuses (write)
     }
     let idx = basename_index(&files);
@@ -663,7 +663,7 @@ fn cmd_orphans(folder: &str, vault: &Path, t0: Instant) -> Outcome {
 
 fn cmd_deadends(vault: &Path, t0: Instant) -> Outcome {
     let mut files = Vec::new();
-    if !crate::walk_checked(vault, &mut files, false) {
+    if !crate::walk_checked(vault, &mut files, false, true) {
         return Outcome::Fallback; // incomplete walk: python warns (read) or refuses (write)
     }
     let mut rels: Vec<String> = files.iter().map(|p| rel_string(p, vault)).collect();

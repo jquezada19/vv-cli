@@ -93,7 +93,12 @@ A/B of every listed input against 2.0.1, both engines:
   backlinks and verify "clean"). Completeness evidence is per `batch` op and
   refreshed by an index sync, never carried across a readability change.
   The escaper covers every lone surrogate, so a `batch` argument like
-  `\ud800` records its own error instead of killing the batch. The native walk treats a
+  `\ud800` records its own error instead of killing the batch; `batch`
+  flushes each record as it completes. The native link scan reports a note
+  it could not read as an unreadable row, so the Python side records it
+  whichever engine scanned. The native readability check runs only for the
+  graph reads that consume it (a resolver needs names, not contents — an
+  open per note would cost the hot path an order of magnitude). The native walk treats a
   directory-iterator error or an unreadable entry type as incomplete, never
   as "a file". The same probe sits in the link graph itself (the basename
   index every link scan goes through), in both engines: a `rename`/`move`/
@@ -103,7 +108,7 @@ A/B of every listed input against 2.0.1, both engines:
   (`backlinks`, `impact`, `orphans`, `unresolved`, `deadends`, `lint
   --quick`) answers with the `warning:` instead of silently under-reporting
   over an index that prunes what the walk could not see. `links` reads one
-  note and needs no walk; the default `lint` delegates to the vault's own
+  note and needs no walk; the default `lint` delegates (when the vault ships its own linter) to the vault's own
   linter before the graph is touched. The probe walks once per invocation
   — a walk the command already did is the evidence. Not covered: an
   enumeration that fails mid-listing without a permission error (an I/O

@@ -76,7 +76,7 @@ pub const SKIP_DIRS: [&str; 5] = [".git", ".obsidian", ".claude", ".trash", "gra
 /// `exclude_sandbox` is a SEARCH-relevance choice, never a graph-correctness one:
 /// link/graph scans must see every note the Python side sees.
 pub fn walk_ex(dir: &Path, out: &mut Vec<PathBuf>, exclude_sandbox: bool) {
-    walk_checked(dir, out, exclude_sandbox);
+    walk_checked(dir, out, exclude_sandbox, false);
 }
 
 /// Like `walk_ex`, but reports whether EVERY directory could be listed. A
@@ -84,7 +84,16 @@ pub fn walk_ex(dir: &Path, out: &mut Vec<PathBuf>, exclude_sandbox: bool) {
 /// an unreadable directory may hold a second note — so `readpath::resolve`
 /// hands an incomplete walk to Python, which refuses (parity with
 /// `_walk_errors` in vv_impl.py, review round 2, 2026-09-07).
-pub fn walk_checked(dir: &Path, out: &mut Vec<PathBuf>, exclude_sandbox: bool) -> bool {
+/// `check_read`: also treat a note we cannot open as incomplete evidence.
+/// Only the graph reads ask for it — they read every note anyway; a resolver
+/// needs names, not contents, and must not pay an open per note (an 18×
+/// regression on `resolve` was measured when the check sat in the walker).
+pub fn walk_checked(
+    dir: &Path,
+    out: &mut Vec<PathBuf>,
+    exclude_sandbox: bool,
+    check_read: bool,
+) -> bool {
     let mut complete = true;
     match fs::read_dir(dir) {
         Ok(rd) => {
@@ -119,13 +128,13 @@ pub fn walk_checked(dir: &Path, out: &mut Vec<PathBuf>, exclude_sandbox: bool) -
                     {
                         continue;
                     }
-                    if !walk_checked(&p, out, exclude_sandbox) {
+                    if !walk_checked(&p, out, exclude_sandbox, check_read) {
                         complete = false;
                     }
                 } else if name.ends_with(".md") {
                     // a note we cannot open is incomplete evidence too: the
                     // Python fallback records it and warns or refuses (round 6)
-                    if fs::File::open(&p).is_err() {
+                    if check_read && fs::File::open(&p).is_err() {
                         complete = false;
                     }
                     out.push(p);
@@ -344,7 +353,15 @@ fn cmd_linkscan(args: &[String]) {
     for fp in &files {
         let text = match fs::read_to_string(fp) {
             Ok(t) => t,
-            Err(_) => continue,
+            Err(_) => {
+                // unreadable or non-UTF-8: an `u` row so python records it as
+                // incomplete evidence instead of the note vanishing (round 7)
+                println!(
+                    "{}\t0\tu\t",
+                    fp.strip_prefix(&root).unwrap_or(fp).to_string_lossy()
+                );
+                continue;
+            }
         };
         let rel = fp
             .strip_prefix(&root)
