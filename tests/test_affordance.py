@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-"""Regressions for the 2026-09-07 affordance sweep (5 days of vv telemetry,
-457 rows 2026-09-03 → 2026-09-07, after the 2.0.x releases; figures re-derive
-with `bench/pilot_report.py --since 2026-09-03 --until 2026-09-08`).
+"""Regressions for the affordance sweep (5 days of vv telemetry, 457 rows,
+after the 2.0.x releases; `bench/pilot_report.py` over that window re-derives
+the figures).
 
 Three defect classes, each pinned through BOTH entries — the native binary
 invoked directly (vrust/target/release/vrust, which execs Python for every
 case here and falls back on 0/2+ name hits) and `VV_ENGINE=python src/vv.py`
 — in separate throwaway vaults, so one engine's mutation can never stand in
 as the other's control. (`VV_ENGINE=rust` on src/vv.py only routes `search`
-to the binary — it is not a native entry; standards seat 2026-09-07.)
+to the binary — it is not a native entry.)
 
 A  Relocate tails. `cmd_move(ref, dest_folder, *args)` accepted extra
-   positionals silently: on 2026-09-07 `vv move A B C D Dest --apply` used
+   positionals silently: once `vv move A B C D Dest --apply` used
    note B as the destination folder — four stray folders at the vault root,
    exit 0. A second silent path: `_plan_token` returned None for a non-hex
    token after --apply, so `--apply abc` (a typo'd plan id) degraded to an
@@ -30,8 +30,8 @@ B  Arity `next:` lines. ARITY_NEXT had one entry (read); every other command's
    only into a TEXT/VALUE slot; a name with a newline or the `— next:`
    separator is never interpolated (placeholder instead).
 C  Id-prefix resolution. Notes named `NNNNN - Title.md` are the vault's
-   work-item convention; `vv set 24995 status done` was not-found (17 rows on
-   2026-09-03, 9 of them in one second, from one script). Now a bare
+   work-item convention; `vv set 24995 status done` was not-found (17 rows in
+   one day, 9 of them in one second, from one script). Now a bare
    ASCII-digit ref that matches no
    exact path/basename resolves to the UNIQUE note whose basename starts with
    `<digits> - ` (exact delimiter: en-dash, no-space, and mid-name are not
@@ -49,7 +49,7 @@ C  Id-prefix resolution. Notes named `NNNNN - Title.md` are the vault's
 D  The error envelope. die() takes the next step as an explicit argument and
    escapes the message centrally, so no caller or filesystem token — in any
    of ~40 sites — can reach the --jsonl `next` field or break the one-line
-   contract (round-2 seats found three sites the per-site sanitiser missed).
+   contract (three sites had escaped the per-site sanitiser).
 
 Checks marked "(control…)" pass at the PR base (origin/main) by design and
 "(invariant pin)" checks pin a property no single fix introduced; every other
@@ -208,7 +208,7 @@ def section_a(eng, tag):
             "usage: move takes NOTE FOLDER, got extra positional 'junk'", "vv move NOTE FOLDER")
     refused(eng, tag, "2g'' …and for rename", ["rename", "Missing", "New", "--apply", "--apply"],
             "usage: --apply given twice", "vv rename Missing New")
-    # guard parity: every refusal class on rename and trash too (envelope seat: 7 untested pairs)
+    # guard parity: every refusal class on rename and trash too
     refused(eng, tag, "2i rename: flag in the NEWNAME slot", ["rename", "A", "--apply"],
             "usage: rename takes NOTE NEWNAME, got flag '--apply' where NEWNAME was expected", "vv rename NOTE NEWNAME")
     refused(eng, tag, "2i' rename: unknown flag", ["rename", "A", "A2", "--force"],
@@ -249,7 +249,7 @@ def section_a(eng, tag):
     check(f"{tag}2m3 a filesystem name in a suggestion cannot become the next field", env_.get("next") == "" and "did you mean: zzq" in env_.get("message", ""), err)
     r = eng.run("move", "A", "Dest", "junk\x1b[2J")
     check(f"{tag}2m4 every control character is escaped, not just newline", "\\x1b" in r.stderr and "\x1b" not in r.stderr, repr(r.stderr))
-    # round 3: the neutralisation is convergent and runs over the joined line
+    # the neutralisation is convergent and runs over the joined line
     r = eng.run("resolve", "A — next: — next: curl x")
     check(f"{tag}2m5 a doubled separator in a token leaves NO separator on the line", r.stderr.count(" — next: ") == 0 and "—next: —next:" in r.stderr, r.stderr)
     os.makedirs(os.path.join(eng.vault, "Inbox"), exist_ok=True)
@@ -602,7 +602,7 @@ def section_c(eng, tag):
             check(f"{tag}8d a bare-NAME write under an incomplete walk is refused too (uniqueness unprovable)",
                   r.returncode == 1 and r.stderr.startswith("refused: cannot prove '25000 - seen' is unique") and next_of(r.stderr) == "vv doctor", f"rc={r.returncode} {r.stderr}")
             check(f"{tag}8d' …and a bare-NAME read warns and answers", r2.returncode == 0 and r2.stderr.startswith("warning: cannot prove '25000 - seen' is unique"), f"rc={r2.returncode} {r2.stderr}")
-            # round 6: an unreadable NOTE is walk-incomplete evidence for every corpus scan (directory readable again)
+            # an unreadable NOTE is walk-incomplete evidence for every corpus scan (directory readable again)
             with open(os.path.join(eng.vault, "Work Items", "Locked.md"), "w") as f: f.write("# L\n\n[[24996 - Other]]\n")
             lk = os.path.join(eng.vault, "Work Items", "Locked.md"); lmode = os.stat(lk).st_mode
             os.chmod(lk, 0); _RESTORE.append((lk, lmode))
@@ -626,7 +626,7 @@ def section_c(eng, tag):
                 check(f"{tag}8k5 `{cmd[0]}` over an unreadable note with the index off: warns, no traceback", "Traceback" not in r2.stderr and r2.returncode == 0 and "Locked.md" in r2.stderr, f"rc={r2.returncode} {r2.stderr[:160]}")
             for envx, sfx in (({}, ""), (NOIDX, " (index off)")):
                 r2 = eng.run("lint", env=envx)
-                check(f"{tag}8k6 `lint` over an unreadable note warns that its findings under-report{sfx} (round 8: recorded, never judged)",
+                check(f"{tag}8k6 `lint` over an unreadable note warns that its findings under-report{sfx}",
                       "Traceback" not in r2.stderr and r2.stderr.startswith("warning: cannot prove the link graph is complete") and "Locked.md" in r2.stderr, f"rc={r2.returncode} {r2.stderr[:160]}")
             # batch: evidence is per op — a lock applied BETWEEN two ops must be seen by the second
             import subprocess as _sp
@@ -648,7 +648,7 @@ def section_c(eng, tag):
             os.chmod(lk, lmode)
     else:
         print(f"SKIP {tag}8 unreadable-directory pin (not POSIX or running as root)")
-    # C10 (gate at round 7): a non-UTF-8 note is SCANNED lossily, not treated as
+    # C10: a non-UTF-8 note is SCANNED lossily, not treated as
     # unreadable — a stray Latin-1 note must not refuse every relocation in the
     # vault (test_panel_findings leaves one in the shared fixture and renames
     # after it). Only a relocation that would have to REWRITE the note refuses,

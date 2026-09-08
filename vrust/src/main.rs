@@ -83,7 +83,7 @@ pub fn walk_ex(dir: &Path, out: &mut Vec<PathBuf>, exclude_sandbox: bool) {
 /// resolver that claims a bare name or id is unique needs a complete walk —
 /// an unreadable directory may hold a second note — so `readpath::resolve`
 /// hands an incomplete walk to Python, which refuses (parity with
-/// `_walk_errors` in vv_impl.py, review round 2, 2026-09-07).
+/// `_walk_errors` in vv_impl.py).
 /// A corpus scan's read: non-UTF-8 decoded lossily (the link grammar is
 /// ASCII, python's `_read_lossy` does the same), `None` only on an I/O error.
 pub fn read_lossy(fp: &Path) -> Option<String> {
@@ -121,7 +121,7 @@ pub fn walk_checked(
                 let p = e.path();
                 let name = e.file_name().to_string_lossy().to_string();
                 // file_type() does NOT follow symlinks — parity with os.walk(followlinks=False):
-                // a symlinked directory is never descended (Codex parity audit 2026-08-27)
+                // a symlinked directory is never descended (parity with python)
                 let is_dir = match e.file_type() {
                     Ok(t) => t.is_dir(),
                     Err(_) => {
@@ -141,7 +141,7 @@ pub fn walk_checked(
                     }
                 } else if name.ends_with(".md") {
                     // a note we cannot open is incomplete evidence too: the
-                    // Python fallback records it and warns or refuses (round 6)
+                    // Python fallback records it and warns or refuses
                     if check_read && fs::File::open(&p).is_err() {
                         complete = false;
                     }

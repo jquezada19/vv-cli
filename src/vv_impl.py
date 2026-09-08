@@ -94,7 +94,7 @@ _CTL = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029\ud800-\udfff]")   # incl. ev
 # The suggestion line is the one newline the error grammar allows. Its marker
 # is a NUL sentinel: neither argv nor a filename can carry NUL, so only code
 # can introduce a second line — a token containing the literal text
-# "\ndid you mean: " is escaped like any other newline (round 3, 2026-09-07).
+# "\ndid you mean: " is escaped like any other newline.
 _DYM = "\x00did you mean: "
 
 def _esc(s):
@@ -109,8 +109,7 @@ def _neutralise(s):
     left, so the separator die() appends is the only one on the line. To
     convergence, over the JOINED text: `str.replace` is non-overlapping and
     the separator overlaps itself (` — next: — next: `), and the suggestion
-    line's own space can complete one across the join (security seat,
-    round 3)."""
+    line's own space can complete one across the join."""
     while " — next: " in s:
         s = s.replace(" — next: ", " —next: ")
     return s
@@ -121,7 +120,7 @@ def die(msg, code=1, nxt=None):
     that lands in the message can become the --jsonl envelope's `next` field.
     The message is escaped centrally: a caller or filesystem token reaches
     it through any of ~40 sites, and per-site sanitising missed three
-    (review rounds 1–3, 2026-09-07)."""
+    before the escaping was centralised."""
     msg = _neutralise("\ndid you mean: ".join(_esc(part) for part in msg.split(_DYM, 1)))
     nxt = _neutralise(_esc(nxt)) if nxt is not None else None
     if _JSONL:
@@ -157,7 +156,7 @@ _walk_errors = []   # directories os.walk could not read this invocation (rel pa
 def _walk_onerror(err):
     # os.walk skips an unreadable directory SILENTLY; a uniqueness claim over
     # the corpus (id-prefix resolution) is unprovable when that happens, so
-    # the miss is recorded and the alias branch refuses (review 2026-09-07).
+    # the miss is recorded and the alias branch refuses.
     try:
         d = os.path.relpath(err.filename, VAULT)
     except (TypeError, ValueError):
@@ -170,7 +169,7 @@ _walked = 0   # walks this process — a completeness probe reuses the last one
 def md_files():
     global _walked
     # the list describes THIS walk: `batch` runs many ops in one process, and a
-    # stale entry from an earlier op refused later resolutions (3 seats, 2026-09-07)
+    # stale entry from an earlier op refused later resolutions
     _walk_errors.clear()
     _walked += 1
     for dirpath, dirs, names in os.walk(VAULT, onerror=_walk_onerror):
@@ -227,7 +226,7 @@ def resolve(ref):
     all_notes = [p for p in md_files() if os.path.isfile(p)]
     hits = _name_hits(want, all_notes)
     if not hits and want.startswith("#") and _ID_REF.fullmatch(want):
-        # `#24995` resolves exactly as `24995` would once a literal `#24995`
+        # `#NNNNN` resolves exactly as `NNNNN` would once a literal `#NNNNN`
         # note has missed: exact path, exact basename, then the id rule — all
         # against THIS walk (a second walk could see a different tree)
         bare = ref[1:]
@@ -258,8 +257,7 @@ def _incomplete(claim):
     the unreadable directory may hold a second note. A WRITE through such a
     hit is refused; a READ answers the visible hit with a warning — the
     wrong note in a read is loud and recoverable, one unreadable directory
-    turning every bare-name read into an outage is not (review round 3,
-    2026-09-07). `batch` refuses because it captures each op's stderr and
+    turning every bare-name read into an outage is not. `batch` refuses because it captures each op's stderr and
     surfaces it only on a non-zero exit — a warning there would be swallowed."""
     global _out_total, _warned_incomplete
     where = ", ".join(_walk_errors[:3])
@@ -289,8 +287,7 @@ def _contained(p):
     """A note chosen from a directory WALK (not typed by the caller) gets the
     same containment as a typed path: a symlinked note whose target is
     outside the vault must never become a read or write target through a
-    bare name or an id (security seat + author-opposite seat, 2026-09-07;
-    the bare-name half was pre-existing). Mirrored in vrust readpath::resolve."""
+    bare name or an id (the bare-name half was pre-existing). Mirrored in vrust readpath::resolve."""
     real = os.path.realpath(p)
     if real != _VAULT_REAL and not real.startswith(_VAULT_REAL + os.sep):
         die(f"escape: path leaves the vault: {rel(p)}")
@@ -303,8 +300,8 @@ def _contained(p):
 # a missing space, or digits mid-name are not matches), and 2+ candidates
 # refuse. It is a filename convention, not verified ticket identity: `[[24995]]`
 # stays an unresolved LINK (link resolution never reads this). Motivated by
-# the 2026-09-03 sink: 17 not-found rows that day, 9 of them in one second,
-# from a `vv set <id> …` loop (`bench/pilot_report.py --since 2026-09-03`).
+# one day's telemetry sink: 17 not-found rows, 9 of them in one second,
+# from a `vv set <id> …` loop (`bench/pilot_report.py` re-derives it).
 _ID_REF = re.compile(r"#?([0-9]+)")
 
 def _resolve_id_prefix(want, all_notes):
@@ -329,9 +326,9 @@ def _q(s, placeholder="NOTE"):
     """A token interpolated into a RUNNABLE next step: shell-quoted, unless it
     carries a control character or the ` — next: ` separator — then the
     placeholder, because a next step that spans lines or re-splits is not a
-    command an agent can copy (review seats, 2026-09-07). shlex is imported
+    command an agent can copy. shlex is imported
     here, not at module level: ~0.4–0.9 ms on every invocation for an
-    error-path-only helper (standards seat measurement)."""
+    error-path-only helper (measured)."""
     if _CTL.search(s) or " — next: " in s:
         return placeholder
     import shlex
@@ -523,7 +520,7 @@ def _read_lossy(fp):
     """A corpus scan's read: decoding errors replaced, an unreadable note
     recorded as an unreadable path (the scan then warns or refuses through
     _incomplete like an unreadable directory) and skipped — never a
-    traceback, never a silent omission (security seat, round 6)."""
+    traceback, never a silent omission."""
     try:
         with open(fp, errors="replace") as f:
             return f.read()
@@ -1404,13 +1401,13 @@ def scan_links(needle=None):
             # still finds every link (a target carrying the bad bytes can never
             # equal a UTF-8 note name). The note is scanned, not skipped and
             # not treated as unreadable — one Latin-1 stray must not refuse
-            # every relocation in the vault (gate at round 7). A relocation
+            # every relocation in the vault. A relocation
             # that would have to REWRITE it is refused at plan time (utf8:, 5).
             text = _read_lossy(p)
         except PermissionError:
             # unreadable: the walk is incomplete for the link graph — a rename
             # over it would rewrite half the backlinks and verify "clean"
-            # (round 6). Recorded silently; judged after the scan.
+            # Recorded silently; judged after the scan.
             r = rel(p)
             if r not in _walk_errors:
                 _walk_errors.append(r)
@@ -1553,7 +1550,7 @@ def _index_stat_walk(scope=None):
     root = os.path.join(VAULT, scope) if scope else VAULT
     if not scope:
         # a full-vault sync walk is the freshest completeness evidence the
-        # invocation has: record its errors and count it (round 6 — an index
+        # invocation has: record its errors and count it (an index
         # sync after resolve()'s walk could prune a newly unreadable note
         # while the probe reused the older, clean walk)
         _walk_errors.clear(); _walked += 1
@@ -1568,7 +1565,7 @@ def _index_stat_walk(scope=None):
                     continue
                 if not os.access(fp, os.R_OK):
                     # the index-backed link scan never opens notes: an unreadable
-                    # note must still count as incomplete evidence (round 6)
+                    # note must still count as incomplete evidence
                     r_ = os.path.relpath(fp, VAULT)
                     if r_ not in _walk_errors:
                         _walk_errors.append(r_)
@@ -1765,7 +1762,7 @@ def basename_index():
     unresolved, lint, and the rename/move/trash rewrite) goes through — so an
     unreadable directory warns a read and refuses a write (see _incomplete)
     instead of under-reporting silently over an index that prunes what the
-    walk could not see (code-review seat, round 4, 2026-09-08)."""
+    walk could not see."""
     idx = {}
     h = index_handle()
     if h is not None:
@@ -2338,7 +2335,7 @@ def _relocate_tail(cmd, operands, tail):
 
     Why a grammar and not `"--apply" in args`: `*args` swallowed extra
     positionals silently, so `vv move A B C D Dest --apply` used note B as the
-    destination (2026-09-07: four stray folders at the vault root, exit 0), and
+    destination (four stray folders at the vault root once, exit 0), and
     a non-hex token after --apply degraded to an UNBOUND apply — the typo'd
     plan id was ignored and the write went ahead. A flag in an operand slot
     (`vv move A --apply`, `vv move --apply A Dest`) is refused for the same
@@ -2614,7 +2611,7 @@ def cmd_lint(*args):
                 findings.append(("broken-link", f"{rel(p)}:{i+1}", tgt))
         for i, tgt in _table_pipe_findings(text):
             findings.append(("table-pipe", f"{rel(p)}:{i+1}", tgt))
-    if _walk_errors:   # recorded by the live loop above (round 8: it was recorded, never judged)
+    if _walk_errors:   # recorded by the live loop above (once recorded and never judged)
         _incomplete("the link graph is complete")
     _lint_report(findings, limit, check="--check" in args)
 
@@ -2731,7 +2728,7 @@ def _next_from_table(cmd, args):
     args = list(args)
     if _surplus_slot(ops, args):
         # only a free-text last slot may absorb the surplus; `props KEY [FOLDER]`
-        # must not fold a folder into the key (code-review seat, 2026-09-07)
+        # must not fold a folder into the key
         head = [_q(a, ops[i]) for i, a in enumerate(args[:len(ops) - 1])]
         return " ".join(["vv", cmd] + head + [_q(" ".join(args[len(ops) - 1:]), ops[-1])])
     filled = []
@@ -2791,7 +2788,7 @@ def _check_arity(cmd, fn, args):
     # rename/move/trash carry *args for the --apply tail only: their operand
     # count is exact, and _relocate_tail refuses extra positionals — so the
     # message must not advertise "2+" (a wording that contradicts the refusal
-    # the next call would get; panel 2026-09-07)
+    # the next call would get)
     hi = None if var else pos_n
     if len(args) < req or (hi is not None and len(args) > hi):
         exact_tail = cmd in _RELOCATE               # the *args tail is flags-only, never operands
