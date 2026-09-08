@@ -90,8 +90,14 @@ A/B of every listed input against 2.0.1, both engines:
   `lint`) is recorded like an unreadable directory — the scan warns on a
   read and refuses on a write instead of skipping it silently, in both
   engines (a rename over one used to rewrite the readable half of the
-  backlinks and verify "clean"). Completeness evidence is per `batch` op and
-  refreshed by an index sync, never carried across a readability change.
+  backlinks and verify "clean"). A note that is not valid UTF-8 is NOT
+  unreadable evidence: the link grammar is ASCII-delimited, so every corpus
+  scan in both engines (and the native cache rows) decodes it lossily and
+  scans it — one Latin-1 stray must not refuse every relocation in the
+  vault; a `rename`/`move` whose backlink lives in such a note is `utf8:`
+  (exit 5) at plan time — never a lossy rewrite, never a journal.
+  Completeness evidence is refreshed by every walk and by an index sync,
+  never carried across a readability change.
   The escaper covers every lone surrogate, so a `batch` argument like
   `\ud800` records its own error instead of killing the batch; `batch`
   flushes each record as it completes. The native link scan reports a note
