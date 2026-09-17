@@ -43,6 +43,14 @@ suite, so by the time cmd_patch's own `file_sig()` runs, the concurrent
 write from `eng.write()` is already the file it reads; there's no window
 inside a single python invocation for that edit to arrive late.
 
+That is why a SECOND case (on H.md) spawns `patch` with stdin held open and
+writes the competing edit while the command is blocked on the pipe, which
+is a real mid-flight race for both engines and the case that actually fails
+when the whole-file guard is removed. The two engines end that race
+differently on purpose — python refuses `stale:` (exit 3, no patch), native
+falls back to python and completes (exit 0, both edits) — and the code
+there says why.
+
 A first attempt at this second case tried to patch the SAME section whose
 own heading line the concurrent edit touched (id H1, since H1's span
 starts at its own heading line — confirmed by `vv outline`, not assumed).
@@ -53,7 +61,7 @@ whole-file signature exists. Patching H2 instead, while the concurrent
 edit touches H1's heading line, is what actually isolates the whole-file
 guard as the thing doing the catching.
 """
-import os, sys, shutil, subprocess, tempfile, atexit
+import os, sys, shutil, subprocess, tempfile, atexit, time
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 VV = os.path.join(REPO, "src", "vv.py")
@@ -75,7 +83,8 @@ def check(name, cond, detail=""):
     if not cond:
         fails.append(name)
 
-NOTES = {"F.md": "---\nk: v\n---\n# F\n\nbody\n", "G.md": "# G\n\n## S\n\nold\n"}
+NOTES = {"F.md": "---\nk: v\n---\n# F\n\nbody\n", "G.md": "# G\n\n## S\n\nold\n",
+         "H.md": "# H\n\n## S\n\nold\n"}
 
 class Engine:
     def __init__(self, name, env):
@@ -175,10 +184,58 @@ for eng in engines:
     h = sha8_of(eng, "G", "H2")
     eng.write("G.md", "# G changed\n\n## S\n\nold\n")
     r = eng.run("patch", "G", "H2", h, stdin="## S\n\nnew\n")
-    check(f"{eng.name}: patch succeeds across the whole-file CAS window",
+    check(f"{eng.name}: patch succeeds (edit landed before the read)",
           r.returncode == 0, f"rc={r.returncode} {r.stderr}")
-    check(f"{eng.name}: patch keeps the concurrent out-of-section edit",
+    check(f"{eng.name}: patch keeps the earlier out-of-section edit",
           eng.read("G.md") == "# G changed\n\n## S\n\nnew\n", eng.read("G.md"))
+
+    # ...and the same thing with the edit INSIDE the window. The case above
+    # never opens one: `eng.run` hands `patch` a stdin pipe that is already
+    # closed, so by the time the command starts, the competing write is
+    # simply the file it reads — reverting the whole-file guard leaves it
+    # green. Here `patch` is spawned with stdin held OPEN, which pins the
+    # interleaving on the ordering both engines document: every check that
+    # can refuse or fall back runs BEFORE stdin is consumed, so the process
+    # has read the note and is blocked on the pipe when the competing write
+    # lands. The sleep is the handshake — there is no output before the read
+    # to wait on, and the alternative (inspecting the child's open file
+    # descriptors) buys determinism this suite does not need; the wait is
+    # generous relative to a read of a four-line note, and a machine slow
+    # enough to miss it fails loudly rather than passing wrongly, because
+    # the competing write would then precede the read and the patch would
+    # land with the heading edit lost.
+    #
+    # THE TWO ENGINES END DIFFERENTLY, BY DESIGN:
+    #   python  — its own signature is stale, `atomic_write` refuses:
+    #             `stale:` exit 3, the note keeps the competing edit and
+    #             does NOT get the patch. The caller re-reads and retries.
+    #   native  — the same mismatch is `Outcome::Fallback`, not a refusal:
+    #             the captured stdin bytes are piped to a fresh python
+    #             process, which reads the now-current file, and since the
+    #             competing edit is outside H2 the section sha8 still
+    #             matches, so the patch lands, exit 0, with BOTH edits.
+    hh = sha8_of(eng, "H", "H2")
+    entry = [VRUST] if eng.name == "rust" else [sys.executable, VV]
+    e = dict(os.environ, VV_VAULT=eng.vault, VV_NO_METRICS="1", VV_INDEX_ROOT=eng.index,
+             VV_JOURNAL_ROOT=eng.journals, **eng.env)
+    proc = subprocess.Popen([*entry, "patch", "H", "H2", hh], stdin=subprocess.PIPE,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=e)
+    time.sleep(0.3)          # long enough for the note read; see the note above
+    eng.write("H.md", "# H changed\n\n## S\n\nold\n")
+    sout, serr = proc.communicate("## S\n\nnew\n", timeout=60)
+    after = eng.read("H.md")
+    if eng.name == "python":
+        check(f"{eng.name}: mid-window edit refuses stale", proc.returncode == 3,
+              f"rc={proc.returncode} {serr}")
+        check(f"{eng.name}: mid-window refusal names the whole-file guard",
+              serr.startswith("stale: H.md changed on disk since it was read"), serr)
+        check(f"{eng.name}: mid-window refusal leaves the competing edit and no patch",
+              after == "# H changed\n\n## S\n\nold\n", after)
+    else:
+        check(f"{eng.name}: mid-window mismatch falls back and completes",
+              proc.returncode == 0, f"rc={proc.returncode} {serr}")
+        check(f"{eng.name}: fallback keeps both the competing edit and the patch",
+              after == "# H changed\n\n## S\n\nnew\n", after)
 
 print(f"\n{len(fails)} failures" if fails else "\nALL PASS")
 sys.exit(1 if fails else 0)

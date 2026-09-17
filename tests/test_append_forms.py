@@ -166,6 +166,75 @@ for eng in engines:
             ["append", "Dup", "Same", "- x"],
             "ambiguous: 2 sections are titled 'Same' (H2, H3)", "vv outline Dup")
 
+# --- the delegation window is one guarded snapshot -------------------------
+# `cmd_append`'s 3-operand form resolves SEC itself and then calls
+# `cmd_appendsec`, which RE-READS the note. Between those two reads another
+# writer (Obsidian, a peer session) can insert a heading: ids number every
+# heading in document order, so an inserted heading above the resolved
+# section shifts every id below it and the canonical `Hn` handed over a
+# moment ago now names a DIFFERENT section. `cmd_appendsec`'s own
+# compare-and-swap cannot see it — it captures its signature AFTER the
+# intervening write, so the signature it compares against is already the
+# post-edit file.
+#
+# The window is closed by handing the signature captured before the FIRST
+# read through to the delegated write, so the whole dispatch is one guarded
+# snapshot: the resolve and the write either see the same bytes or the write
+# is refused with `stale:` (exit 3). Delegating the caller's original
+# selector string instead would only cover a caller who typed a TITLE (a
+# caller who typed `H2` would still be re-resolving a stale id), and it would
+# change the reported id away from the canonical one the native engine prints
+# for the same call.
+#
+# The race cannot be staged from outside the process — both reads happen
+# inside one `vv` invocation — so it is staged from inside: a child python
+# process imports vv_impl, monkeypatches `cmd_appendsec` to record the
+# delegated selector and to perform the competing edit before calling the
+# real function, and runs `cmd_append` directly. That makes the interleaving
+# exact rather than timing-dependent.
+UNIT_RACE = r"""
+import os, sys
+sys.path.insert(0, sys.argv[1])
+import vv_impl
+note = os.path.join(os.environ["VV_VAULT"], "Race.md")
+real, seen = vv_impl.cmd_appendsec, {}
+
+def spy(ref, sid, text, *a, **kw):
+    seen["sid"] = sid
+    # the competing writer, landing in the window: "## Intruder" above the
+    # resolved section pushes Alpha from H2 to H3
+    with open(note, "w") as f:
+        f.write("# R\n\n## Intruder\n\ni\n\n## Alpha\n\na\n\n## Beta\n\nb\n")
+    return real(ref, sid, text, *a, **kw)
+
+vv_impl.cmd_appendsec = spy
+try:
+    vv_impl.cmd_append("Race", "Alpha", "- x")
+    rc = 0
+except SystemExit as e:
+    rc = e.code
+print("DELEGATED_SID=%s" % seen.get("sid"))
+print("EXIT=%s" % rc)
+with open(note) as f:
+    sys.stdout.write("FILE<<%s>>" % f.read())
+"""
+
+for eng in engines:
+    if eng.name != "python":
+        continue   # a unit-level call into vv_impl; the entry point is not what is under test
+    eng.write("Race.md", "# R\n\n## Alpha\n\na\n\n## Beta\n\nb\n")
+    env = dict(os.environ, VV_VAULT=eng.vault, VV_NO_METRICS="1", VV_INDEX_ROOT=eng.index,
+               VV_JOURNAL_ROOT=eng.journals, VV_ENGINE="python")
+    r = subprocess.run([sys.executable, "-c", UNIT_RACE, os.path.join(REPO, "src")],
+                       capture_output=True, text=True, env=env, input="", timeout=60)
+    body = r.stdout.partition("FILE<<")[2].rpartition(">>")[0]
+    check("delegation carries the selector resolved on the guarded snapshot",
+          "DELEGATED_SID=H2" in r.stdout, r.stdout)
+    check("a heading inserted inside the delegation window refuses stale",
+          "EXIT=3" in r.stdout and r.stderr.startswith("stale:"), r.stdout + r.stderr)
+    check("the refused delegation writes nothing",
+          body == "# R\n\n## Intruder\n\ni\n\n## Alpha\n\na\n\n## Beta\n\nb\n", body)
+
 # --- Task 8: daily-append lands at the end of the Today section ------------
 # cmd_daily_append used to append unconditionally at EOF, which lands inside
 # whatever section happens to be last (usually "Blockers / Needs") instead of

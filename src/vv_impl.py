@@ -424,6 +424,17 @@ def sec_text(lines, s):
 def sha8(t):
     return hashlib.sha256(t.encode()).hexdigest()[:8]
 
+def _sec_hint(sid):
+    """The title a SEC operand is asking for: trimmed, and with a `#Heading` /
+    `##Heading` spelling reduced to the heading text. One definition for the
+    matcher and for the `ambiguous:` message it produces, which quote the same
+    string and drifted apart while each stripped its own copy."""
+    want = (sid or "").strip()
+    if want.startswith("#"):
+        want = want.lstrip("#").strip()
+    return want
+
+
 def find_sec(lines, secs, sid, ref):
     """Resolve a section by id, and forgive the four ways agents actually ask.
 
@@ -442,9 +453,7 @@ def find_sec(lines, secs, sid, ref):
     if sec is not None:
         return sec
     if len(matches) > 1:
-        want = (sid or "").strip()
-        if want.startswith("#"):
-            want = want.lstrip("#").strip()      # `#Heading` / `##Heading`
+        want = _sec_hint(sid)
         ids = ", ".join(m["id"] for m in matches)
         die(f"ambiguous: {len(matches)} sections are titled {want!r} ({ids})",
             nxt=f"vv outline {_q(ref)}")
@@ -461,9 +470,7 @@ def _find_sec_or_none(lines, secs, sid):
     for s in secs:
         if s["id"] == sid:
             return s, []
-    want = (sid or "").strip()
-    if want.startswith("#"):
-        want = want.lstrip("#").strip()          # `#Heading` / `##Heading`
+    want = _sec_hint(sid)
     if want.lower() in ("(preamble)", "preamble"):
         for s in secs:
             if s["title"] == "(preamble)" or s["id"] == "H0":
@@ -654,10 +661,21 @@ def cmd_patch(ref, sid, expect):
     atomic_write(fp, splice(lines, s["start"], s["end"], body_lines), expect_sig=_sig)
     out(f"patched {sid} in {rel(fp)} ({len(cur.encode('utf-8'))}B -> {len(body.encode('utf-8'))}B)")
 
-def cmd_appendsec(ref, sid, text):
+def cmd_appendsec(ref, sid, text, *, _expect_sig=None):
+    """_expect_sig: a signature a CALLER already captured, for a dispatch that
+    read the note before delegating here (`append NOTE SEC TEXT`). This
+    Keyword-ONLY: `_check_arity` reads the arity off the code object, so a
+    positional parameter here would advertise `appendsec takes 3-4 positional
+    args` and let a fourth operand from the command line land in it.
+
+    This function re-reads the note, so its own `file_sig` would be taken after any
+    write that landed in the caller's window — and an id resolved before that
+    write names a different section after it, because ids number every heading
+    in document order. Threading the caller's signature through makes the
+    resolve and the write one guarded snapshot: same bytes, or `stale:`."""
     _dirty_gate()
     fp = resolve(ref)
-    _sig = file_sig(fp)
+    _sig = file_sig(fp) if _expect_sig is None else _expect_sig
     lines, secs = parse(read_raw(fp))
     s = find_sec(lines, secs, sid, ref)
     ins = s["end"]
@@ -675,19 +693,26 @@ def cmd_append(ref, *rest):
         # fires, rather than duplicating it here)
         sid, text = rest
         fp = resolve(ref)
+        # captured BEFORE the read this resolution is based on, and handed to
+        # the delegated write: appendsec re-reads the note, and a heading
+        # inserted in between renumbers the ids, so the id resolved here would
+        # address a different section by the time it is written. One snapshot
+        # guards both reads — the delegated write refuses `stale:` rather than
+        # appending to whatever now carries that id.
+        _sig = file_sig(fp)
         lines, secs = parse(read_raw(fp))
         sec, matches = _find_sec_or_none(lines, secs, sid)
         if sec is not None:
             _op = "appendsec"   # _op is read at argv time; the delegated write is an appendsec, and the log/metrics row should say so
             # the canonical id, not the caller's SEC spelling: `appended to H1`
             # is unambiguous even when the caller typed a title
-            return cmd_appendsec(ref, sec["id"], text)
+            return cmd_appendsec(ref, sec["id"], text, _expect_sig=_sig)
         if matches:
             # ambiguous — delegate the ORIGINAL sid so appendsec's own
             # find_sec() re-derives the same title match and refuses
             # `ambiguous:` with it, rather than this call picking a winner
             _op = "appendsec"
-            return cmd_appendsec(ref, sid, text)
+            return cmd_appendsec(ref, sid, text, _expect_sig=_sig)
         die("usage: append takes 2 positional args, got 3 "
             "(TEXT is one argument; quote it; a section append is appendsec)",
             nxt=_next_from_table("append", [ref, sid, text]))

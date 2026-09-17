@@ -12,6 +12,17 @@ their native `run` matchers have a `args.len() == 1` arm (`outline NOTE`,
 `backlinks NOTE`) — a resolve miss on the literal name `--help` returns
 Fallback, so Python still answers, but that path is worth confirming
 directly rather than by inference from the exact-arity rule alone.
+
+The exact-arity rule is not enough on its own, which is why the natively
+answered commands are here too. `search TERMS`, `tags` and `props KEY`
+accept the arity a bare `--help` presents, so the native entry answered
+them itself: `search --help` scored the literal string `--help` against the
+corpus and printed HITS (the fixture note below puts that string in a
+note's body so the wrong answer is a visible one), `tags --help` printed
+the tag table, `props --help` printed the note count for a property named
+`--help`. All three exited 0 with no synopsis anywhere. The native entry now
+hands `<cmd> --help` / `<cmd> -h` to Python before any handler is chosen,
+so every command answers with its own synopsis line through either entry.
 """
 import os, sys, subprocess, tempfile, atexit, shutil
 
@@ -36,6 +47,9 @@ def check(name, cond, detail=""):
 
 NOTES = {
     "A.md": "# A\n",
+    # the literal flag in a note BODY: without it, `search --help` returns no
+    # hits and a native miss is indistinguishable from a correct hand-off.
+    "Help Note.md": "# Help Note\n\nthe literal --help string lives in this body\n",
 }
 
 class Engine:
@@ -69,7 +83,9 @@ engines = [
 # desync the test's expectation from the implementation.
 COMMAND_TABLE_LINES = [f"vv {c['name']} {c['args']}".rstrip() for c in vv_impl.COMMAND_TABLE]
 
-COMMANDS = ("read", "append", "appendsec", "patch", "daily-append", "move", "outline", "backlinks")
+COMMANDS = ("read", "append", "appendsec", "patch", "daily-append", "move", "outline", "backlinks",
+            # natively handled at this arity — the cases the arity rule misses
+            "search", "links", "board", "tags", "props", "show")
 
 for eng in engines:
     for cmd in COMMANDS:
