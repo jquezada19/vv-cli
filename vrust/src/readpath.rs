@@ -228,12 +228,29 @@ pub fn sec_text(lines: &[&str], s: &Sec) -> String {
     lines[s.start..s.end].join("\n")
 }
 
-// find_sec happy path: id, #Heading, (preamble), unambiguous title. Anything
-// else (miss OR ambiguity) -> None -> python fallback for the canonical error.
-pub fn find_sec<'a>(secs: &'a [Sec], sid: &str) -> Option<&'a Sec> {
+// find_sec: one total order, mirroring vv_impl.py's _match_sec —
+// id -> (preamble) -> exact title -> content sha8 -> unique title prefix.
+// Ok carries the SECTION and the TIER that answered (the metrics row's
+// selector). Any miss — nothing matched, or a tier matched more than once —
+// returns Err and the caller falls back so python emits the one canonical
+// refusal; the two are kept apart here because the reasons are different, and
+// a resolver that fed the write path could not afford to conflate them.
+pub enum Miss {
+    NotFound,
+    Ambiguous,
+}
+
+// Below this a prefix selects almost anything, so it is never tried.
+const PREFIX_MIN: usize = 3;
+
+pub fn find_sec<'a>(
+    lines: &[&str],
+    secs: &'a [Sec],
+    sid: &str,
+) -> Result<(&'a Sec, &'static str), Miss> {
     for s in secs {
         if s.id == sid {
-            return Some(s);
+            return Ok((s, "id"));
         }
     }
     let mut want = sid.trim().to_string();
@@ -244,16 +261,67 @@ pub fn find_sec<'a>(secs: &'a [Sec], sid: &str) -> Option<&'a Sec> {
     if wl == "(preamble)" || wl == "preamble" {
         return secs
             .iter()
-            .find(|s| s.title == "(preamble)" || s.id == "H0");
+            .find(|s| s.title == "(preamble)" || s.id == "H0")
+            .map(|s| (s, "preamble"))
+            .ok_or(Miss::NotFound);
     }
     let matches: Vec<&Sec> = secs
         .iter()
         .filter(|s| s.title.trim().to_lowercase() == wl)
         .collect();
-    if matches.len() == 1 {
-        Some(matches[0])
+    if !matches.is_empty() {
+        return only(&matches, "title");
+    }
+    // sha8 sits BELOW exact title: a heading that happens to be 8 hex
+    // characters is what someone typing those 8 characters means.
+    if want.len() == 8 && want.chars().all(|c| c.is_ascii_hexdigit()) {
+        let hits: Vec<&Sec> = secs
+            .iter()
+            .filter(|s| sha8(&sec_text(lines, s)) == wl)
+            .collect();
+        if !hits.is_empty() {
+            return only(&hits, "sha8");
+        }
+    }
+    let n = want.chars().count();
+    if n >= PREFIX_MIN {
+        let hits: Vec<&Sec> = secs
+            .iter()
+            .filter(|s| s.title.trim().to_lowercase().starts_with(&wl))
+            .collect();
+        if !hits.is_empty() {
+            // a token that ends at a word break outranks one stopping
+            // mid-word, so `Today` reaches `Today (Tuesday)` past `Today's
+            // plan`; when the break singles out nobody, every prefix hit
+            // counts, so the refusal names what the caller is choosing between
+            let whole: Vec<&Sec> = hits
+                .iter()
+                .copied()
+                .filter(|s| ends_at_break(s.title.trim(), n))
+                .collect();
+            if whole.len() == 1 {
+                return Ok((whole[0], "prefix"));
+            }
+            return only(&hits, "prefix");
+        }
+    }
+    Err(Miss::NotFound)
+}
+
+fn only<'a>(hits: &[&'a Sec], kind: &'static str) -> Result<(&'a Sec, &'static str), Miss> {
+    if hits.len() == 1 {
+        Ok((hits[0], kind))
     } else {
-        None
+        Err(Miss::Ambiguous)
+    }
+}
+
+// True when a prefix of n CHARS stops at the end of `title` or at a word break
+// in it. `(` is a break because the parenthetical is what a caller leaves off.
+fn ends_at_break(title: &str, n: usize) -> bool {
+    match title.chars().nth(n) {
+        None => true,
+        Some(c) => c == ' ' || c == '(',
     }
 }
 
@@ -483,13 +551,13 @@ pub fn run(cmd: &str, args: &[String], vault: &Path) -> Outcome {
                 Err(_) => return Outcome::Fallback,
             };
             let (lines, secs) = parse(&text);
-            let s = match find_sec(&secs, &args[1]) {
-                Some(s) => s,
-                None => return Outcome::Fallback,
+            let (s, kind) = match find_sec(&lines, &secs, &args[1]) {
+                Ok(v) => v,
+                Err(_) => return Outcome::Fallback,
             };
             let t = sec_text(&lines, s);
             let n = emit(&format!("{}\n--sha8:{}\n", t, sha8(&t)));
-            log_metrics("read", t0, n, cf, None);
+            log_metrics("read", t0, n, cf, Some(kind));
             Outcome::Done(0)
         }
         _ => Outcome::Fallback,

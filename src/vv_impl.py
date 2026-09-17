@@ -341,8 +341,13 @@ def _q(s, placeholder="NOTE"):
 def _is_flag(tok):
     """`-h` is a flag spelling too: one predicate for the relocate tail, the
     operand slots, and the next-step interpolator, so they cannot disagree.
-    A note whose name starts with `-` is spelled `./-name`."""
-    return tok.startswith("-") and len(tok) > 1
+    A note whose name starts with `-` is spelled `./-name`.
+
+    Whitespace disqualifies a token: no flag contains a space, but a markdown
+    bullet does -- and `append NOTE SEC "- text"` read its own TEXT as a flag,
+    which dropped it out of the suggested next step entirely. A `next:` line
+    that quietly asks for something the caller did not is worse than no hint."""
+    return tok.startswith("-") and len(tok) > 1 and not any(c.isspace() for c in tok)
 
 def suggest_names(want, paths, n=3):
     """Suggestions for a failed name lookup, tiered like rustdoc search:
@@ -440,49 +445,108 @@ def _sec_hint(sid):
 
 
 def find_sec(lines, secs, sid, ref):
-    """Resolve a section by id, and forgive the four ways agents actually ask.
+    """Resolve a section by id, and forgive the ways agents actually ask.
 
     A replay of 50 real sessions (2026-08-26) found section addressing was
     guessed wrong four distinct ways -- `--section H9`, `Note#Heading`, the
     heading TITLE instead of the id, and the outline's display label
     `(preamble)`. Every one was correctly refused, which is the tool being right
     and unhelpful at the same time: four different wrong guesses is an
-    affordance problem, not four careless callers.
+    affordance problem, not four careless callers. Two more showed up in the
+    weeks after: the outline's own content sha8 handed back as an address (the
+    outline PRINTS it, so it reads like one) and a partial heading, typed when
+    the real heading carries a parenthetical the caller did not memorise.
 
-    Ids stay canonical and win outright; a title match is accepted only when it
-    is UNAMBIGUOUS, because duplicate headings are common in these notes and
-    silently picking the first would be worse than refusing.
+    Ids stay canonical and win outright; every other tier is accepted only when
+    it is UNAMBIGUOUS, because duplicate headings are common in these notes and
+    silently picking the first would be worse than refusing -- the resolver
+    feeds the WRITE path, where the wrong section is a corrupted note.
     """
-    sec, matches = _find_sec_or_none(lines, secs, sid)
+    global _sel
+    sec, kind, matches = _match_sec(lines, secs, sid)
     if sec is not None:
+        _sel = kind
         return sec
-    if len(matches) > 1:
+    if matches:
         want = _sec_hint(sid)
         ids = ", ".join(m["id"] for m in matches)
-        die(f"ambiguous: {len(matches)} sections are titled {want!r} ({ids})",
-            nxt=f"vv outline {_q(ref)}")
+        if kind == "sha8":
+            msg = f"{len(matches)} sections have content sha8 {want.lower()} ({ids})"
+        elif kind == "prefix":
+            msg = f"{len(matches)} sections match {want!r} ({ids})"
+        else:
+            msg = f"{len(matches)} sections are titled {want!r} ({ids})"
+        die(f"ambiguous: {msg}", nxt=f"vv outline {_q(ref)}")
     die(f"not-found: no section {sid}", nxt=f"vv outline {_q(ref)}")
 
-def _find_sec_or_none(lines, secs, sid):
-    """The non-dying half of find_sec's matching: an id, the `(preamble)`
-    alias, or a title match, without ever calling die(). Returns
-    (sec, matches) — sec is the resolved section when the id/preamble alias
-    hit or exactly one title matched, else None; matches is the title-match
-    list (empty unless a title lookup ran and found at least one hit), so a
-    caller can tell "not found" (both empty) from "ambiguous" (matches has 2+)
-    without re-deriving the title search itself."""
+# A content sha8 is exactly what `vv outline` prints in its 5th column.
+_SHA8_TOKEN = re.compile(r"[0-9a-fA-F]{8}")
+# Below this a prefix selects almost anything, so it is never tried: a token
+# that short falls through to `not-found:` rather than to a lottery.
+_PREFIX_MIN = 3
+
+def _match_sec(lines, secs, sid):
+    """The non-dying half of find_sec's matching, in one total order:
+    id -> `(preamble)` alias -> exact title -> content sha8 -> unique prefix.
+
+    Returns (sec, kind, matches). `sec` is the resolved section, or None.
+    `kind` names the TIER that answered -- "id", "preamble", "title", "sha8" or
+    "prefix" -- and is what find_sec records as the metrics row's selector, so
+    the sink shows which spelling agents actually use. On a miss `sec` is None
+    and `matches` holds the tier's hits: empty means nothing matched anywhere,
+    and two or more means that tier was ambiguous, with `kind` naming it so the
+    refusal can be worded for that tier without re-deriving the search.
+
+    sha8 sits BELOW exact title deliberately: a heading that happens to be 8 hex
+    characters is what someone typing those 8 characters means.
+    """
     for s in secs:
         if s["id"] == sid:
-            return s, []
+            return s, "id", []
     want = _sec_hint(sid)
     if want.lower() in ("(preamble)", "preamble"):
         for s in secs:
             if s["title"] == "(preamble)" or s["id"] == "H0":
-                return s, []
+                return s, "preamble", []
     matches = [s for s in secs if s["title"].strip().lower() == want.lower()]
-    if len(matches) == 1:
-        return matches[0], matches
-    return None, matches
+    if matches:
+        return (matches[0] if len(matches) == 1 else None), "title", matches
+    if _SHA8_TOKEN.fullmatch(want):
+        tok = want.lower()
+        hits = [s for s in secs if sha8(sec_text(lines, s)) == tok]
+        if hits:
+            return (hits[0] if len(hits) == 1 else None), "sha8", hits
+    if len(want) >= _PREFIX_MIN:
+        hits = [s for s in secs if s["title"].strip().lower().startswith(want.lower())]
+        if hits:
+            # A caller who typed a whole word meant a whole word: among the
+            # prefix hits, those where the token ENDS at a word break outrank
+            # the ones that stop mid-word, so `Today` reaches `Today (Tuesday)`
+            # even beside a `Today's plan`. `(` counts as a break because the
+            # parenthetical is exactly what a caller leaves off. When the break
+            # does not single one out, the refusal names every prefix hit --
+            # narrowing the report to the break would hide the sections the
+            # caller is actually choosing between.
+            whole = [s for s in hits if _ends_at_break(s["title"].strip(), len(want))]
+            if len(whole) == 1:
+                return whole[0], "prefix", whole
+            return (hits[0] if len(hits) == 1 else None), "prefix", hits
+    return None, None, []
+
+def _ends_at_break(title, n):
+    """True when a prefix of n characters stops at the end of `title` or at a
+    word break in it. Sliced, not indexed: the native engine's `chars().nth(n)`
+    is total, and an IndexError here where it returns None would be a parity
+    break on exactly the inputs nobody tests."""
+    return title[n:n + 1] in ("", " ", "(")
+
+def _find_sec_or_none(lines, secs, sid):
+    """find_sec's matching as (sec, matches), for the `append NOTE SEC TEXT`
+    dispatch: it needs "resolved" / "ambiguous" / "no such section" and not the
+    tier that decided. Ambiguity is delegated, not re-worded here -- the write
+    it delegates to re-resolves and emits the one canonical refusal."""
+    sec, _kind, matches = _match_sec(lines, secs, sid)
+    return sec, matches
 
 def split_fm(text):
     fm, body, _tail, _bom = split_fm_full(text)
