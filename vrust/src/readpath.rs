@@ -233,12 +233,8 @@ pub fn sec_text(lines: &[&str], s: &Sec) -> String {
 // Ok carries the SECTION and the TIER that answered (the metrics row's
 // selector). Any miss — nothing matched, or a tier matched more than once —
 // returns Err and the caller falls back so python emits the one canonical
-// refusal; the two are kept apart here because the reasons are different, and
-// a resolver that fed the write path could not afford to conflate them.
-pub enum Miss {
-    NotFound,
-    Ambiguous,
-}
+// refusal, which is the only place the two reasons are told apart.
+pub struct Miss;
 
 // Below this a prefix selects almost anything, so it is never tried.
 const PREFIX_MIN: usize = 3;
@@ -278,7 +274,7 @@ pub fn find_sec_opts<'a>(
                 .iter()
                 .find(|s| s.title == "(preamble)" || s.id == "H0")
                 .map(|s| (s, "preamble"))
-                .ok_or(Miss::NotFound);
+                .ok_or(Miss);
         }
         let matches: Vec<&Sec> = secs
             .iter()
@@ -313,7 +309,7 @@ pub fn find_sec_opts<'a>(
             let whole: Vec<&Sec> = hits
                 .iter()
                 .copied()
-                .filter(|s| ends_at_break(s.title.trim(), n))
+                .filter(|s| ends_at_break(s.title.trim(), &want))
                 .collect();
             if whole.len() == 1 {
                 return Ok((whole[0], "prefix"));
@@ -321,7 +317,7 @@ pub fn find_sec_opts<'a>(
             return only(&hits, "prefix");
         }
     }
-    Err(Miss::NotFound)
+    Err(Miss)
 }
 
 // read's flag-spelled SEC operand as (selector, hash_only), mirroring
@@ -355,14 +351,23 @@ fn only<'a>(hits: &[&'a Sec], kind: &'static str) -> Result<(&'a Sec, &'static s
     if hits.len() == 1 {
         Ok((hits[0], kind))
     } else {
-        Err(Miss::Ambiguous)
+        Err(Miss)
     }
 }
 
-// True when a prefix of n CHARS stops at the end of `title` or at a word break
-// in it. `(` is a break because the parenthetical is what a caller leaves off.
-fn ends_at_break(title: &str, n: usize) -> bool {
-    match title.chars().nth(n) {
+// True when `want` stops at the end of `title` or at a word break in it. `(` is
+// a break because the parenthetical is what a caller leaves off.
+//
+// Measured on the FOLDED text, using the folded selector's char count: the tier
+// above matched case-insensitively, and a case fold can change a string's
+// length (a dotted capital I folds to two characters). An offset taken from the
+// original title at the raw selector's length then points at the wrong
+// character, and two headings that fold to the same text stop being ambiguous —
+// one of them wins by an accident of encoding, on the resolver that feeds the
+// write path.
+fn ends_at_break(title: &str, want: &str) -> bool {
+    let n = want.to_lowercase().chars().count();
+    match title.to_lowercase().chars().nth(n) {
         None => true,
         Some(c) => c == ' ' || c == '(',
     }
@@ -581,6 +586,10 @@ pub fn run(cmd: &str, args: &[String], vault: &Path) -> Outcome {
         }
         // A bare `read NOTE` (len 1) is python's `show`, so it is not matched
         // here and falls through to Fallback with everything else unhandled.
+        // `show` HAS a native arm, so this is a deliberate parity exception
+        // rather than an unimplemented one: the budget line and the
+        // continuation token are output this delegation keeps under a single
+        // author, instead of two engines each wording it.
         "read" if args.len() == 2 || args.len() == 3 => {
             let (sid, hash_only, flagged) = if args.len() == 2 && !args[1].starts_with("--") {
                 (args[1].clone(), false, false)

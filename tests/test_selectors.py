@@ -53,7 +53,12 @@ NOTES = {"N.md": "# N\n\n## Today (Tuesday)\n\n- a\n\n## Tomorrow\n\n- b\n\n"
          # P.md exercises the word-break preference on its own so N.md's
          # numbering -- which the messages above quote -- stays undisturbed.
          "P.md": "# P\n\n## Today (Tuesday)\n\n- a\n\n## Today's plan\n\n- b\n\n"
-                 "## Alpha one\n\n- c\n\n## Alpha two\n\n- d\n"}
+                 "## Alpha one\n\n- c\n\n## Alpha two\n\n- d\n",
+         # U.md's two headings FOLD to the same text: `\u0130` (capital I with
+         # dot) lowercases to TWO characters, so either spelling of the
+         # selector prefixes both. Written as escapes because the second
+         # heading's combining dot is invisible in a source listing.
+         "U.md": "# U\n\n## \u0130tem one\n\n- a\n\n## i\u0307tem two\n\n- b\n"}
 
 
 class Engine:
@@ -152,6 +157,10 @@ def outline_rows(eng, note="N"):
     return by_title
 
 
+# stderr of the length-changing-fold refusals, per selector per engine: the
+# two engines must word it byte for byte, not merely each refuse.
+fold_stderr = {}
+
 engines = [Engine("python", {"VV_ENGINE": "python"})]
 if os.path.exists(VRUST):
     engines.append(Engine("rust", {}))
@@ -204,10 +213,35 @@ for eng in engines:
             f"ambiguous: 2 sections match 'Alpha' "
             f"({pl['Alpha one'][0]['id']}, {pl['Alpha two'][0]['id']})", "vv outline P")
 
+    # --- a case fold that changes LENGTH ------------------------------------
+    # The word break that ranks prefix hits is an OFFSET, and it has to be
+    # measured on the folded text: `\u0130tem one` and `i\u0307tem two`
+    # lowercase to the same five characters, so a boundary taken from the
+    # original title at the raw selector's length lands on the wrong character
+    # and hands one of them the win. Neither spelling singles out a section, so
+    # both must be refused, and both engines must word the refusal the same.
+    ul = outline_rows(eng, "U")
+    fold_one, fold_two = ul["\u0130tem one"][0], ul["i\u0307tem two"][0]
+    for tok in ("\u0130tem", "i\u0307tem"):
+        rf = refused(eng, f"a length-changing fold stays ambiguous ({tok!r})",
+                     ["read", "U", tok],
+                     f"ambiguous: 2 sections match {tok!r} "
+                     f"({fold_one['id']}, {fold_two['id']})", "vv outline U")
+        fold_stderr.setdefault(tok, {})[eng.name] = rf.stderr
+
     # --- the tiers stay in order --------------------------------------------
     r = eng.run("read", "N", "deadbeef")
     check(f"{eng.name}: 8-hex TITLE wins over hash lookup", "hex title" in r.stdout,
           (r.returncode, r.stdout[:80], r.stderr[:120]))
+    # the flag spelling changes the SINK's label, never the order: `--section`
+    # is the positional operand, so an 8-hex TITLE still wins there, and the
+    # `--hash` spelling of the same token reaches content only -- nothing holds
+    # that content hash, so it is a plain miss.
+    r = eng.run("read", "N", "--section", "deadbeef")
+    check(f"{eng.name}: --section 8-hex still reaches the TITLE tier", "hex title" in r.stdout,
+          (r.returncode, r.stdout[:80], r.stderr[:120]))
+    refused(eng, "--hash of an 8-hex TITLE is a miss", ["read", "N", "--hash", "deadbeef"],
+            "not-found: no section deadbeef", "vv outline N")
     r = eng.run("read", "N", "## Tomorrow")
     check(f"{eng.name}: '## Title' form", r.stdout.startswith("## Tomorrow"),
           (r.returncode, r.stdout[:80], r.stderr[:120]))
@@ -261,6 +295,18 @@ for eng in engines:
     s, r1 = eng.run("show", "N"), eng.run("read", "N")
     check(f"{eng.name}: read NOTE is show NOTE",
           r1.returncode == 0 and r1.stdout == s.stdout, (r1.returncode, r1.stderr[:120]))
+    # The row keeps the CALLER's spelling -- `op: read`, because what the
+    # affordance measures is the command that was typed -- and carries
+    # `sel: bare` so the report can count the whole-note class apart from the
+    # section selectors. The native entry does not serve this shape, so the row
+    # says `python` on both entries by design.
+    bare_row, r_bare = eng.last_row_after("read", "N")
+    check(f"{eng.name}: bare read logs op=read", bare_row.get("op") == "read",
+          (bare_row, r_bare.returncode, r_bare.stderr[:120]))
+    check(f"{eng.name}: bare read logs sel=bare", bare_row.get("sel") == "bare",
+          (bare_row, r_bare.returncode, r_bare.stderr[:120]))
+    check(f"{eng.name}: bare read runs on python", bare_row.get("engine") == "python",
+          (bare_row, r_bare.returncode, r_bare.stderr[:120]))
 
     # --- writers share the resolver -----------------------------------------
     r = eng.run("appendsec", "N", "Tomor", "- z")
@@ -316,6 +362,11 @@ for eng in engines:
             ["append", "N", "Nope", "- via append"],
             "usage: append takes 2 positional args, got 3",
             "vv append N 'Nope - via append'")
+
+for tok, by_engine in fold_stderr.items():
+    if len(by_engine) > 1:
+        vals = list(by_engine.values())
+        check(f"both engines refuse {tok!r} byte for byte", vals[0] == vals[1], vals)
 
 print(("ALL PASS (selectors: %d)" % checks_run) if not fails
       else "FAILURES: " + ", ".join(fails))

@@ -41,8 +41,9 @@ SKIP_DIRS = {".git", ".obsidian", ".claude", ".trash", "graphify-out"}
 _t0 = time.perf_counter()
 _op = sys.argv[1] if len(sys.argv) > 1 else "?"
 _sel = None  # selector kind ("id"|"preamble"|"title"|"sha8"|"prefix"), set by find_sec on a hit;
-             # "flag" when read's --section/--hash spelling drove it, so the sink
-             # shows the SPELLING and not only the tier that answered
+             # "flag" when read's --section/--hash spelling drove it, and "bare"
+             # when `read NOTE` asked for the whole note, so the sink shows the
+             # SPELLING and not only the tier that answered
 
 _cf_bytes = 0  # counterfactual: what a whole-file read of the touched notes would cost
 
@@ -536,18 +537,29 @@ def _match_sec(lines, secs, sid, hash_only=False):
             # does not single one out, the refusal names every prefix hit --
             # narrowing the report to the break would hide the sections the
             # caller is actually choosing between.
-            whole = [s for s in hits if _ends_at_break(s["title"].strip(), len(want))]
+            whole = [s for s in hits if _ends_at_break(s["title"].strip(), want)]
             if len(whole) == 1:
                 return whole[0], "prefix", whole
             return (hits[0] if len(hits) == 1 else None), "prefix", hits
     return None, None, []
 
-def _ends_at_break(title, n):
-    """True when a prefix of n characters stops at the end of `title` or at a
-    word break in it. Sliced, not indexed: the native engine's `chars().nth(n)`
-    is total, and an IndexError here where it returns None would be a parity
-    break on exactly the inputs nobody tests."""
-    return title[n:n + 1] in ("", " ", "(")
+def _ends_at_break(title, want):
+    """True when `want` stops at the end of `title` or at a word break in it.
+
+    Measured on the FOLDED text, using the folded selector's length: the tier
+    above matched case-insensitively, and a case fold can change the length of
+    a string (a dotted capital I folds to two characters). Taking the offset
+    from the original title at the raw selector's length then points at the
+    wrong character, and two headings that fold to the same text stop being
+    ambiguous -- one of them wins by an accident of encoding, on the resolver
+    that feeds the write path.
+
+    Sliced, not indexed: the native engine's `chars().nth(n)` is total, and an
+    IndexError here where it returns None would be a parity break on exactly
+    the inputs nobody tests."""
+    t = title.lower()
+    n = len(want.lower())
+    return t[n:n + 1] in ("", " ", "(")
 
 def _find_sec_or_none(lines, secs, sid):
     """find_sec's matching as (sec, matches), for the `append NOTE SEC TEXT`
@@ -757,6 +769,15 @@ def cmd_read(ref, *rest):
     if sid is None:
         # A bare note name is not a usage error: asking the read command for a
         # whole note means `show`, budget and continuation token included.
+        #
+        # The row keeps `op: read` and gains a selector kind of its own.
+        # `cmd_append` relabels `_op` when it delegates because the DELEGATE is
+        # the operation that happened -- an appendsec writes a section, and the
+        # log has to name the write it performed. Nothing is written here: the
+        # affordance being measured is which spelling callers reach for, so the
+        # caller's own spelling is the answer, and `bare` lets the report count
+        # the whole-note class apart from the section selectors.
+        _sel = "bare"
         return cmd_show(ref)
     lines, secs = parse(read_raw(resolve(ref)))
     s = find_sec(lines, secs, sid, ref, hash_only=forced_hash)
