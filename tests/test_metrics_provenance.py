@@ -132,7 +132,7 @@ def main():
     def run(argv, src=None, native=True, extra=None):
         env = dict(os.environ, HOME=home, VV_VAULT=vault)
         env.pop("VV_NO_METRICS", None); env.pop("VV_JOURNAL_ROOT", None)
-        env.pop("VV_METRICS_SRC", None)
+        env.pop("VV_METRICS_SRC", None); env.pop("VV_ENGINE", None)
         if src is not None: env["VV_METRICS_SRC"] = src
         env.update(extra or {})
         cmd = [VR] + argv if native else [sys.executable, VV] + argv
@@ -248,6 +248,36 @@ def main():
     row = last_row_after(rust, "search", "body")   # "body" is present in A.md
     check("native search logs a row",
           row.get("op") == "search" and row.get("engine") == "native", row)
+
+    # --- native search's out_bytes is the emitted output, not the hit count -
+    res = run(["search", "body"], native=True)
+    row = rows()[-1]
+    check("native search out_bytes is the emitted output length, not the hit count",
+          row.get("out_bytes") == len(res.stdout),
+          (row.get("out_bytes"), len(res.stdout)))
+
+    # --- python delegating search to native logs exactly one row ------------
+    # Python's cmd_search shells to the native binary with VV_FROM_PY=1 and
+    # then logs its own row at exit; the native binary's own log_metrics call
+    # for that same invocation must be suppressed or every python-engine
+    # search under the native path double-logs. This is the DEFAULT engine
+    # (VV_ENGINE unset, native binary built) -- the task write-up's suggested
+    # repro, `VV_ENGINE=python`, forces use_rust() to return False outright
+    # (see vv_impl.py use_rust()), so it never delegates and always logged
+    # exactly one row even before this fix; verified directly before writing
+    # this check (2 rows before the fix under the default engine, 1 after).
+    before = len(rows())
+    run(["search", "body"], native=False)   # python engine, default (unset) VV_ENGINE -> delegates to native
+    after = rows()[before:]
+    check("python search delegating to native logs exactly one row",
+          len(after) == 1 and after[0].get("engine") == "python", after)
+
+    # --- _phrase_hint's internal native re-search is not user activity ------
+    before = len(rows())
+    run(["search", "quoted phrase not present anywhere"], native=False)
+    after = rows()[before:]
+    check("a phrase-hint's internal native search logs no extra row",
+          len(after) == 1 and after[0].get("engine") == "python", after)
 
     shutil.rmtree(vault, ignore_errors=True); shutil.rmtree(home, ignore_errors=True)
     print(("ALL PASS (metrics provenance: %d)" % checks_run) if not fails

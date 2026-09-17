@@ -295,18 +295,31 @@ fn cmd_search(args: &[String], orig: &[String]) -> ! {
         exec_python(orig);
     }
     let shown = hits.len().min(k);
+    // Build the full output once and emit it in one shot: out_bytes must be
+    // the byte length of what was actually written (headings, snippets,
+    // trailer), not the hit count -- readpath::run's arms all emit(&buf)
+    // for the same reason.
+    let mut buf = String::new();
     if files_only {
         // --files: matching paths only, same ranking, same trailer (parity-pinned).
         for (_score, rel, _snip) in hits.iter().take(k) {
-            println!("{}", rel);
+            buf.push_str(rel);
+            buf.push('\n');
         }
     } else {
         for (score, rel, snip) in hits.iter().take(k) {
-            println!("== {} (score {})\n{}\n", rel, score, snip);
+            buf.push_str(&format!("== {} (score {})\n{}\n\n", rel, score, snip));
         }
     }
-    println!("({} of {} matches)", shown, hits.len());
-    readpath::log_metrics("search", t0, shown, 0, None);
+    buf.push_str(&format!("({} of {} matches)\n", shown, hits.len()));
+    let n = readpath::emit(&buf);
+    // Python delegates search to this binary with VV_FROM_PY set and logs its
+    // own row at exit (cmd_search in vv_impl.py) -- logging here too would
+    // double the row. _phrase_hint also runs an internal search this way
+    // (VV_FROM_PY set, k=0) that must not count as user activity either.
+    if std::env::var_os("VV_FROM_PY").is_none() {
+        readpath::log_metrics("search", t0, n, 0, None);
+    }
     exit(0);
 }
 

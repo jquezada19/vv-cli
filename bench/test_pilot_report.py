@@ -21,12 +21,16 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 REPORT = os.path.join(REPO, "bench/pilot_report.py")
 
 
-def run_report(args, metrics_path, legacy_path):
+def run_report_full(args, metrics_path, legacy_path):
     env = dict(os.environ, VV_METRICS_PATH=metrics_path, VV_LEGACY_PATH=legacy_path,
                PYTHONUTF8="1")
     return subprocess.run(
         [sys.executable, REPORT, *shlex.split(args)],
-        env=env, capture_output=True, text=True).stdout
+        env=env, capture_output=True, text=True)
+
+
+def run_report(args, metrics_path, legacy_path):
+    return run_report_full(args, metrics_path, legacy_path).stdout
 
 
 def main():
@@ -133,6 +137,36 @@ def main():
               "target ≥ 85% every active day | 50% |" in ver_crit_out
               and "29%" not in ver_crit_out,
               ver_crit_out)
+
+    # Regression pin: an all-synthetic vv window (every row carries `src`)
+    # with an empty legacy sink must still trip the synthetic-only abort
+    # (exit 2) instead of falling through to the silent "no vault ops
+    # logged" exit-0 message. strip_src() removes src-labelled rows from
+    # `rows` BEFORE classify_traffic runs, so classify_traffic never sees
+    # them and `marked` comes back empty even when every row was synthetic.
+    with tempfile.TemporaryDirectory(prefix="vv-pilot-report-allsynth-") as tmp:
+        metrics_path = os.path.join(tmp, "vv.jsonl")
+        legacy_path = os.path.join(tmp, "vv-legacy.jsonl")
+        synth_rows = [
+            {"ts": "2026-09-23T10:00:00", "op": "read", "ms": 1, "out_bytes": 1,
+             "exit": 0, "ver": "3.1.0", "src": "bench"},
+            {"ts": "2026-09-23T10:00:01", "op": "outline", "ms": 1, "out_bytes": 1,
+             "exit": 0, "ver": "3.1.0", "src": "bench"},
+        ]
+        with open(metrics_path, "w") as f:
+            for r in synth_rows:
+                f.write(json.dumps(r) + "\n")
+        open(legacy_path, "w").close()   # empty legacy sink
+
+        proc = run_report_full("--since 2026-09-23 --until 2026-09-24",
+                               metrics_path, legacy_path)
+        check("all-synthetic vv window with empty legacy still aborts (exit 2)",
+              proc.returncode == 2, (proc.returncode, proc.stdout, proc.stderr))
+        check("abort prints the synthetic-only message",
+              "every logged op was synthetic or machine-paced" in proc.stdout,
+              proc.stdout)
+        check("abort does not fall through to the silent no-ops message",
+              "no vault ops logged" not in proc.stdout, proc.stdout)
 
     print(("ALL PASS (pilot report: %d)" % checks_run) if not fails
           else "FAILURES: " + ", ".join(fails))

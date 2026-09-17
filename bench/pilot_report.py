@@ -349,7 +349,12 @@ def main():
                   f"        A benchmark ran without bench/sweepguard.mark_bench(), or vv\n"
                   f"        was driven by an ad-hoc loop. FIX THE MARKING — a heuristic\n"
                   f"        that has to guess will eventually guess wrong.")
-    excluded = len(marked) + len(unmarked_machine)
+    # dropped_vv rows never reach classify_traffic (strip_src ran above), so
+    # `marked` alone under-counts synthetic traffic — a window whose vv rows
+    # are ALL src-labelled leaves `marked` empty and `excluded` falsely zero,
+    # which skipped the synthetic-only abort below and fell through to the
+    # silent "no vault ops logged" exit-0 message instead.
+    excluded = len(marked) + len(unmarked_machine) + len(dropped_vv)
     if excluded:
         print(f"     reporting on the {len(human):,} remaining plausibly-interactive op(s).")
         rows = human
