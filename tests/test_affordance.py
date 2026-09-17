@@ -322,7 +322,7 @@ def section_b(eng, tag):
     cases = [
         (["append"],                       "usage: append takes 2 positional args, got 0",  "vv append NOTE TEXT"),
         (["append", "A"],                  "usage: append takes 2 positional args, got 1",  "vv append A TEXT"),
-        (["append", "A", "hello", "world"], "usage: append takes 2 positional args, got 3 (TEXT is one argument; quote it)", "vv append A 'hello world'"),
+        (["append", "A", "hello", "world"], "usage: append takes 2 positional args, got 3 (TEXT is one argument; quote it; a section append is appendsec)", "vv append A 'hello world'"),
         (["append", "A", "--section", "X", "hi"], "usage: append takes 2 positional args, got 4 (append has no --section; append inside a section is appendsec)", "vv appendsec A SEC TEXT"),
         (["prepend", "A", "--section", "X", "y"], "usage: prepend takes 2 positional args, got 4", "vv prepend A TEXT"),
         (["set", "A", "status"],           "usage: set takes 3 positional args, got 2",     "vv set A status VALUE"),

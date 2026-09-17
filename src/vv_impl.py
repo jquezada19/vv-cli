@@ -438,24 +438,40 @@ def find_sec(lines, secs, sid, ref):
     is UNAMBIGUOUS, because duplicate headings are common in these notes and
     silently picking the first would be worse than refusing.
     """
+    sec, matches = _find_sec_or_none(lines, secs, sid)
+    if sec is not None:
+        return sec
+    if len(matches) > 1:
+        want = (sid or "").strip()
+        if want.startswith("#"):
+            want = want.lstrip("#").strip()      # `#Heading` / `##Heading`
+        ids = ", ".join(m["id"] for m in matches)
+        die(f"ambiguous: {len(matches)} sections are titled {want!r} ({ids})",
+            nxt=f"vv outline {_q(ref)}")
+    die(f"not-found: no section {sid}", nxt=f"vv outline {_q(ref)}")
+
+def _find_sec_or_none(lines, secs, sid):
+    """The non-dying half of find_sec's matching: an id, the `(preamble)`
+    alias, or a title match, without ever calling die(). Returns
+    (sec, matches) — sec is the resolved section when the id/preamble alias
+    hit or exactly one title matched, else None; matches is the title-match
+    list (empty unless a title lookup ran and found at least one hit), so a
+    caller can tell "not found" (both empty) from "ambiguous" (matches has 2+)
+    without re-deriving the title search itself."""
     for s in secs:
         if s["id"] == sid:
-            return s
+            return s, []
     want = (sid or "").strip()
     if want.startswith("#"):
         want = want.lstrip("#").strip()          # `#Heading` / `##Heading`
     if want.lower() in ("(preamble)", "preamble"):
         for s in secs:
             if s["title"] == "(preamble)" or s["id"] == "H0":
-                return s
+                return s, []
     matches = [s for s in secs if s["title"].strip().lower() == want.lower()]
     if len(matches) == 1:
-        return matches[0]
-    if len(matches) > 1:
-        ids = ", ".join(m["id"] for m in matches)
-        die(f"ambiguous: {len(matches)} sections are titled {want!r} ({ids})",
-            nxt=f"vv outline {_q(ref)}")
-    die(f"not-found: no section {sid}", nxt=f"vv outline {_q(ref)}")
+        return matches[0], matches
+    return None, matches
 
 def split_fm(text):
     fm, body, _tail, _bom = split_fm_full(text)
@@ -649,7 +665,35 @@ def cmd_appendsec(ref, sid, text):
     atomic_write(fp, splice(lines, ins, ins, [text]), expect_sig=_sig)
     out(f"appended to {sid} in {rel(fp)}")
 
-def cmd_append(ref, text):
+def cmd_append(ref, *rest):
+    global _op
+    if len(rest) == 2:
+        # a 3rd operand is the section-append the agent meant, not a typo:
+        # dispatch to appendsec when SEC resolves (uniquely or ambiguously —
+        # ambiguous still delegates so appendsec's own `ambiguous:` refusal
+        # fires, rather than duplicating it here)
+        sid, text = rest
+        fp = resolve(ref)
+        lines, secs = parse(read_raw(fp))
+        sec, matches = _find_sec_or_none(lines, secs, sid)
+        if sec is not None:
+            _op = "appendsec"   # _op is read at argv time; the delegated write is an appendsec, and the log/metrics row should say so
+            # the canonical id, not the caller's SEC spelling: `appended to H1`
+            # is unambiguous even when the caller typed a title
+            return cmd_appendsec(ref, sec["id"], text)
+        if matches:
+            # ambiguous — delegate the ORIGINAL sid so appendsec's own
+            # find_sec() re-derives the same title match and refuses
+            # `ambiguous:` with it, rather than this call picking a winner
+            _op = "appendsec"
+            return cmd_appendsec(ref, sid, text)
+        die("usage: append takes 2 positional args, got 3 "
+            "(TEXT is one argument; quote it; a section append is appendsec)",
+            nxt=_next_from_table("append", [ref, sid, text]))
+    if len(rest) != 1:
+        die(f"usage: append takes 2 positional args, got {1 + len(rest)}",
+            nxt=_next_from_table("append", [ref, *rest]))
+    text, = rest
     _dirty_gate()
     fp = resolve(ref)
     _sig = file_sig(fp)
@@ -2779,6 +2823,16 @@ CMD_ALIASES = {"journal": "doctor"}
 def _check_arity(cmd, fn, args):
     """Positional-arg validation at the boundary, so an INTERNAL TypeError is a
     defect (traceback), never mislabeled as user error (review 2026-08-26)."""
+    # append takes *rest so it can accept a conditional 3rd operand (a SEC
+    # that resolves dispatches to appendsec) without a TypeError — the code
+    # object alone can't express "2 or 3", so the boundary check is hand-written
+    # here and the reported arity stays 2, since 3 is a conditional acceptance
+    # cmd_append itself adjudicates, not a second official arity.
+    if cmd == "append":
+        if len(args) not in (2, 3):
+            nxt = ARITY_NEXT[cmd](args) if cmd in ARITY_NEXT else _next_from_table(cmd, args)
+            die(f"usage: append takes 2 positional args, got {len(args)}{_arity_hint(cmd, args)}", nxt=nxt)
+        return
     # read arity off the code object directly: importing inspect costs ~4.4 ms
     # on EVERY command for the same three facts (Codex perf review 2026-08-27)
     code = fn.__code__
