@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """vv — fast, terse, agent-friendly CLI for Obsidian vaults.
 
-Read:    outline NOTE · read NOTE SEC · head NOTE · show NOTE [--max-bytes N] [--from SEC]
+Read:    outline NOTE · read NOTE [SEC | --section SEC | --hash SHA8] · head NOTE
+         show NOTE [--max-bytes N] [--from SEC]
          resolve NAME · search TERMS [--k N] [--w CHARS] [--files]
 Write:   patch NOTE SEC SHA8 <stdin · appendsec NOTE SEC TEXT · append NOTE TEXT · prepend NOTE TEXT
          set NOTE KEY VALUE · unset NOTE KEY · new PATH [--template T] [--k v ...]
@@ -39,7 +40,9 @@ SKIP_DIRS = {".git", ".obsidian", ".claude", ".trash", "graphify-out"}
 
 _t0 = time.perf_counter()
 _op = sys.argv[1] if len(sys.argv) > 1 else "?"
-_sel = None  # selector kind ("id"|"preamble"|"title"|"sha8"|"prefix"), set by find_sec on a hit
+_sel = None  # selector kind ("id"|"preamble"|"title"|"sha8"|"prefix"), set by find_sec on a hit;
+             # "flag" when read's --section/--hash spelling drove it, so the sink
+             # shows the SPELLING and not only the tier that answered
 
 _cf_bytes = 0  # counterfactual: what a whole-file read of the touched notes would cost
 
@@ -444,7 +447,7 @@ def _sec_hint(sid):
     return want
 
 
-def find_sec(lines, secs, sid, ref):
+def find_sec(lines, secs, sid, ref, hash_only=False):
     """Resolve a section by id, and forgive the ways agents actually ask.
 
     A replay of 50 real sessions (2026-08-26) found section addressing was
@@ -463,7 +466,7 @@ def find_sec(lines, secs, sid, ref):
     feeds the WRITE path, where the wrong section is a corrupted note.
     """
     global _sel
-    sec, kind, matches = _match_sec(lines, secs, sid)
+    sec, kind, matches = _match_sec(lines, secs, sid, hash_only=hash_only)
     if sec is not None:
         _sel = kind
         return sec
@@ -485,7 +488,7 @@ _SHA8_TOKEN = re.compile(r"[0-9a-fA-F]{8}")
 # that short falls through to `not-found:` rather than to a lottery.
 _PREFIX_MIN = 3
 
-def _match_sec(lines, secs, sid):
+def _match_sec(lines, secs, sid, hash_only=False):
     """The non-dying half of find_sec's matching, in one total order:
     id -> `(preamble)` alias -> exact title -> content sha8 -> unique prefix.
 
@@ -499,24 +502,30 @@ def _match_sec(lines, secs, sid):
 
     sha8 sits BELOW exact title deliberately: a heading that happens to be 8 hex
     characters is what someone typing those 8 characters means.
+
+    `hash_only` collapses the order to the sha8 tier alone: `read --hash X`
+    says the token is CONTENT, so the tiers that read it as a name are not the
+    caller's meaning -- a section titled with 8 hex characters must not
+    intercept a hash the caller took from the outline's 5th column.
     """
-    for s in secs:
-        if s["id"] == sid:
-            return s, "id", []
     want = _sec_hint(sid)
-    if want.lower() in ("(preamble)", "preamble"):
+    if not hash_only:
         for s in secs:
-            if s["title"] == "(preamble)" or s["id"] == "H0":
-                return s, "preamble", []
-    matches = [s for s in secs if s["title"].strip().lower() == want.lower()]
-    if matches:
-        return (matches[0] if len(matches) == 1 else None), "title", matches
+            if s["id"] == sid:
+                return s, "id", []
+        if want.lower() in ("(preamble)", "preamble"):
+            for s in secs:
+                if s["title"] == "(preamble)" or s["id"] == "H0":
+                    return s, "preamble", []
+        matches = [s for s in secs if s["title"].strip().lower() == want.lower()]
+        if matches:
+            return (matches[0] if len(matches) == 1 else None), "title", matches
     if _SHA8_TOKEN.fullmatch(want):
         tok = want.lower()
         hits = [s for s in secs if sha8(sec_text(lines, s)) == tok]
         if hits:
             return (hits[0] if len(hits) == 1 else None), "sha8", hits
-    if len(want) >= _PREFIX_MIN:
+    if not hash_only and len(want) >= _PREFIX_MIN:
         hits = [s for s in secs if s["title"].strip().lower().startswith(want.lower())]
         if hits:
             # A caller who typed a whole word meant a whole word: among the
@@ -697,9 +706,64 @@ def cmd_outline(ref):
         # expected-vectors now do).
         out(f"{s['id']}\t{'#'*s['level'] or '-'}\t{s['title']}\t{len(t.encode('utf-8'))}B\t{sha8(t)}")
 
-def cmd_read(ref, sid):
+def _peel_read_flags(rest, ref):
+    """read's optional tail as (sid, forced_hash).
+
+    The SEC operand has three spellings -- positional, `--section X` and
+    `--hash X` (each also in its `=` form) -- because the flag spellings are
+    what callers reach for when the operand order is not in front of them, and
+    refusing them on arity taught nothing. Exactly ONE selector may be given:
+    two of them is a caller who means two different sections, and picking
+    either would be a guess.
+
+    `--hash` additionally asserts the token is a CONTENT hash, which is why it
+    returns a flag rather than just a value: it turns off the tiers that would
+    read those 8 characters as a name."""
+    nxt = f"vv outline {_q(ref)}"
+    sid, forced = None, False
+    rest = list(rest)
+    i = 0
+    while i < len(rest):
+        tok = rest[i]
+        if tok.startswith("--"):
+            name, eq, val = tok.partition("=")
+            if name not in ("--section", "--hash"):
+                die(f"usage: read has no {name}", nxt=nxt)
+            want_hash = name == "--hash"
+            bad_value = ("usage: --hash takes an 8-hex sha8" if want_hash
+                         else "usage: --section takes a value")
+            if not eq:
+                if i + 1 >= len(rest):
+                    die(bad_value, nxt=nxt)
+                i += 1
+                val = rest[i]
+            if not val:
+                die(bad_value, nxt=nxt)
+            if want_hash and not _SHA8_TOKEN.fullmatch(val):
+                die("usage: --hash takes an 8-hex sha8", nxt=nxt)
+            if sid is not None:
+                die("usage: read takes one section selector", nxt=nxt)
+            sid, forced = val, want_hash
+        else:
+            if sid is not None:
+                die("usage: read takes one section selector", nxt=nxt)
+            sid = tok
+        i += 1
+    return sid, forced
+
+def cmd_read(ref, *rest):
+    global _sel
+    sid, forced_hash = _peel_read_flags(rest, ref)
+    if sid is None:
+        # A bare note name is not a usage error: asking the read command for a
+        # whole note means `show`, budget and continuation token included.
+        return cmd_show(ref)
     lines, secs = parse(read_raw(resolve(ref)))
-    s = find_sec(lines, secs, sid, ref)
+    s = find_sec(lines, secs, sid, ref, hash_only=forced_hash)
+    if any(t.startswith("--") for t in rest):
+        # The sink's question is which SPELLING callers use, so a flag-driven
+        # hit is its own selector kind rather than the tier that answered it.
+        _sel = "flag"
     out(sec_text(lines, s))
     out(f"--sha8:{sha8(sec_text(lines, s))}")
 
@@ -2957,6 +3021,15 @@ def _check_arity(cmd, fn, args):
             nxt = ARITY_NEXT[cmd](args) if cmd in ARITY_NEXT else _next_from_table(cmd, args)
             die(f"usage: append takes 2 positional args, got {len(args)}{_arity_hint(cmd, args)}", nxt=nxt)
         return
+    # read's *rest carries the optional SEC in its three spellings (positional,
+    # --section, --hash), so the code object cannot express the ceiling either:
+    # varargs alone would advertise "1+" while the tail is adjudicated by
+    # _peel_read_flags, which refuses a second selector by name, not by count.
+    if cmd == "read":
+        if not 1 <= len(args) <= 3:
+            die(f"usage: read takes 1-3 positional args, got {len(args)}{_arity_hint(cmd, args)}",
+                nxt=ARITY_NEXT[cmd](args))
+        return
     # read arity off the code object directly: importing inspect costs ~4.4 ms
     # on EVERY command for the same three facts (Codex perf review 2026-08-27)
     code = fn.__code__
@@ -3027,7 +3100,7 @@ def _list_out(rows, total, noun, cmd=None, fmt=None):
 # describe a command the dispatcher lacks nor miss one it has.
 COMMAND_TABLE = [
     {"name": "outline",      "args": "NOTE",                    "summary": "section map: id, level, title, bytes, sha8 anchor"},
-    {"name": "read",         "args": "NOTE SEC",                "summary": "one section, by outline id or heading title"},
+    {"name": "read",         "args": "NOTE [SEC | --section SEC | --hash SHA8]", "summary": "one section by id, title, prefix or content sha8; bare NOTE is a budgeted show"},
     {"name": "show",         "args": "NOTE [--max-bytes N] [--from SEC]", "summary": "budgeted read with a continuation token"},
     {"name": "head",         "args": "NOTE",                    "summary": "frontmatter only"},
     {"name": "resolve",      "args": "NAME",                    "summary": "name to vault-relative path"},

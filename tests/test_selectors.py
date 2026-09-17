@@ -212,6 +212,56 @@ for eng in engines:
     check(f"{eng.name}: '## Title' form", r.stdout.startswith("## Tomorrow"),
           (r.returncode, r.stdout[:80], r.stderr[:120]))
 
+    # --- the SEC operand may also be spelled as a flag -----------------------
+    # `read NOTE --section X` and `read NOTE --hash X` were typed repeatedly
+    # and refused on arity alone: the flag spelling is what a caller reaches
+    # for when the operand order is not in front of them. The flag
+    # carries the SAME selector the positional does, so the three spellings
+    # are one output, byte for byte.
+    a = eng.run("read", "N", "Tomorrow")
+    b = eng.run("read", "N", "--section", "Tomorrow")
+    c = eng.run("read", "N", "--section=Tomorrow")
+    check(f"{eng.name}: --section is the positional SEC",
+          b.returncode == 0 and c.returncode == 0 and a.stdout == b.stdout == c.stdout,
+          (b.returncode, b.stderr[:120], c.stderr[:120]))
+    # --hash skips the id/title tiers: the caller is saying "this is content",
+    # so the 8-hex TITLE that wins the positional form must NOT win here.
+    d = eng.run("read", "N", "--hash", today["sha8"])
+    check(f"{eng.name}: --hash forces the sha8 tier",
+          d.returncode == 0 and d.stdout.startswith("## Today (Tuesday)"),
+          (d.returncode, d.stdout[:80], d.stderr[:120]))
+    hexsec = ol["deadbeef"][0]
+    e = eng.run("read", "N", "--hash", hexsec["sha8"])
+    check(f"{eng.name}: --hash reaches the section whose TITLE is 8 hex",
+          e.returncode == 0 and "hex title" in e.stdout,
+          (e.returncode, e.stdout[:80], e.stderr[:120]))
+    refused(eng, "--hash with a non-hex value is usage", ["read", "N", "--hash", "Tomorrow"],
+            "usage: --hash takes an 8-hex sha8", "vv outline N")
+    refused(eng, "--hash with no value is usage", ["read", "N", "--hash"],
+            "usage: --hash takes an 8-hex sha8", "vv outline N")
+    refused(eng, "--section with no value is usage", ["read", "N", "--section"],
+            "usage: --section takes a value", "vv outline N")
+    refused(eng, "a positional SEC plus a flag is usage",
+            ["read", "N", today["id"], "--section=Tomorrow"],
+            "usage: read takes one section selector", "vv outline N")
+    refused(eng, "two flag selectors are usage",
+            ["read", "N", "--section=Tomorrow", "--hash=deadbeef"],
+            "usage: read takes one section selector", "vv outline N")
+    refused(eng, "an unknown flag is usage", ["read", "N", "--sec", "H2"],
+            "usage: read has no --sec", "vv outline N")
+    # Over the positional ceiling the ordinary arity refusal still answers, and
+    # its next step is still the note's own outline.
+    refused(eng, "past the positional ceiling it is an arity miss",
+            ["read", "N", today["id"], "--section", "Tomorrow"],
+            "usage: read takes 1-3 positional args, got 4", "vv outline N")
+
+    # --- bare `read NOTE` is a budgeted show ---------------------------------
+    # Asking for a whole note by the command that reads notes is not a usage
+    # error; it is `show`, budget and continuation token included.
+    s, r1 = eng.run("show", "N"), eng.run("read", "N")
+    check(f"{eng.name}: read NOTE is show NOTE",
+          r1.returncode == 0 and r1.stdout == s.stdout, (r1.returncode, r1.stderr[:120]))
+
     # --- writers share the resolver -----------------------------------------
     r = eng.run("appendsec", "N", "Tomor", "- z")
     check(f"{eng.name}: appendsec by unique prefix",
@@ -237,6 +287,13 @@ for eng in engines:
     for tok, kind in ((today["sha8"], "sha8"), ("Today", "prefix"),
                       (today["id"], "id"), ("Tomorrow", "title")):
         sel_row("read", kind, "read", "N", tok)
+
+    # A flag-spelled selector is its own kind in the sink: the question it
+    # answers is which SPELLING agents reach for, and folding it into the tier
+    # that resolved it would make the flag forms invisible.
+    sel_row("read --section title", "flag", "read", "N", "--section", "Tomorrow")
+    sel_row("read --section sha8", "flag", "read", "N", "--section", today["sha8"])
+    sel_row("read --hash", "flag", "read", "N", "--hash", today["sha8"])
 
     # the writers log their selector too, and they are separate native arms
     sel_row("appendsec", "prefix", "appendsec", "N", "Tomor", "- q")

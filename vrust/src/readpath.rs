@@ -248,9 +248,23 @@ pub fn find_sec<'a>(
     secs: &'a [Sec],
     sid: &str,
 ) -> Result<(&'a Sec, &'static str), Miss> {
-    for s in secs {
-        if s.id == sid {
-            return Ok((s, "id"));
+    find_sec_opts(lines, secs, sid, false)
+}
+
+// `hash_only` collapses the order to the sha8 tier alone, for `read --hash X`:
+// the caller is saying the token is CONTENT, so a section whose TITLE is 8 hex
+// characters must not intercept a hash taken from the outline's 5th column.
+pub fn find_sec_opts<'a>(
+    lines: &[&str],
+    secs: &'a [Sec],
+    sid: &str,
+    hash_only: bool,
+) -> Result<(&'a Sec, &'static str), Miss> {
+    if !hash_only {
+        for s in secs {
+            if s.id == sid {
+                return Ok((s, "id"));
+            }
         }
     }
     let mut want = sid.trim().to_string();
@@ -258,19 +272,21 @@ pub fn find_sec<'a>(
         want = want.trim_start_matches('#').trim().to_string();
     }
     let wl = want.to_lowercase();
-    if wl == "(preamble)" || wl == "preamble" {
-        return secs
+    if !hash_only {
+        if wl == "(preamble)" || wl == "preamble" {
+            return secs
+                .iter()
+                .find(|s| s.title == "(preamble)" || s.id == "H0")
+                .map(|s| (s, "preamble"))
+                .ok_or(Miss::NotFound);
+        }
+        let matches: Vec<&Sec> = secs
             .iter()
-            .find(|s| s.title == "(preamble)" || s.id == "H0")
-            .map(|s| (s, "preamble"))
-            .ok_or(Miss::NotFound);
-    }
-    let matches: Vec<&Sec> = secs
-        .iter()
-        .filter(|s| s.title.trim().to_lowercase() == wl)
-        .collect();
-    if !matches.is_empty() {
-        return only(&matches, "title");
+            .filter(|s| s.title.trim().to_lowercase() == wl)
+            .collect();
+        if !matches.is_empty() {
+            return only(&matches, "title");
+        }
     }
     // sha8 sits BELOW exact title: a heading that happens to be 8 hex
     // characters is what someone typing those 8 characters means.
@@ -284,7 +300,7 @@ pub fn find_sec<'a>(
         }
     }
     let n = want.chars().count();
-    if n >= PREFIX_MIN {
+    if !hash_only && n >= PREFIX_MIN {
         let hits: Vec<&Sec> = secs
             .iter()
             .filter(|s| s.title.trim().to_lowercase().starts_with(&wl))
@@ -306,6 +322,33 @@ pub fn find_sec<'a>(
         }
     }
     Err(Miss::NotFound)
+}
+
+// read's flag-spelled SEC operand as (selector, hash_only), mirroring
+// _peel_read_flags in vv_impl.py -- but only its ACCEPTING half: every
+// refusal (an unknown flag, a missing or non-hex value, two selectors) is
+// None here, so python emits the one canonical usage text.
+fn peel_read(args: &[String]) -> Option<(String, bool)> {
+    let (name, val) = match args.len() {
+        2 => {
+            let (n, v) = args[1].split_once('=')?;
+            (n.to_string(), v.to_string())
+        }
+        3 => (args[1].clone(), args[2].clone()),
+        _ => return None,
+    };
+    if val.is_empty() {
+        return None;
+    }
+    let hash_only = match name.as_str() {
+        "--section" => false,
+        "--hash" => true,
+        _ => return None,
+    };
+    if hash_only && !(val.len() == 8 && val.chars().all(|c| c.is_ascii_hexdigit())) {
+        return None;
+    }
+    Some((val, hash_only))
 }
 
 fn only<'a>(hits: &[&'a Sec], kind: &'static str) -> Result<(&'a Sec, &'static str), Miss> {
@@ -536,7 +579,17 @@ pub fn run(cmd: &str, args: &[String], vault: &Path) -> Outcome {
             log_metrics("outline", t0, n, cf, None);
             Outcome::Done(0)
         }
-        "read" if args.len() == 2 => {
+        // A bare `read NOTE` (len 1) is python's `show`, so it is not matched
+        // here and falls through to Fallback with everything else unhandled.
+        "read" if args.len() == 2 || args.len() == 3 => {
+            let (sid, hash_only, flagged) = if args.len() == 2 && !args[1].starts_with("--") {
+                (args[1].clone(), false, false)
+            } else {
+                match peel_read(args) {
+                    Some((v, h)) => (v, h, true),
+                    None => return Outcome::Fallback, // python words the refusal
+                }
+            };
             let fp = match resolve(vault, &args[0]) {
                 Some(f) => f,
                 None => return Outcome::Fallback,
@@ -551,10 +604,14 @@ pub fn run(cmd: &str, args: &[String], vault: &Path) -> Outcome {
                 Err(_) => return Outcome::Fallback,
             };
             let (lines, secs) = parse(&text);
-            let (s, kind) = match find_sec(&lines, &secs, &args[1]) {
+            let (s, tier) = match find_sec_opts(&lines, &secs, &sid, hash_only) {
                 Ok(v) => v,
                 Err(_) => return Outcome::Fallback,
             };
+            // A flag-spelled selector is its own kind in the sink (mirroring
+            // _sel = "flag"): the question it answers is which SPELLING
+            // callers reach for, which the tier would hide.
+            let kind = if flagged { "flag" } else { tier };
             let t = sec_text(&lines, s);
             let n = emit(&format!("{}\n--sha8:{}\n", t, sha8(&t)));
             log_metrics("read", t0, n, cf, Some(kind));
