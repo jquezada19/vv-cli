@@ -100,10 +100,10 @@ and it does not change link resolution (`[[24995]]` stays unresolved).
 | command | what it does |
 |---|---|
 | `patch NOTE SEC SHA8 <stdin` | replace one section, compare-and-swap on its sha8 — exit 3 = stale, re-outline |
-| `appendsec NOTE SEC TEXT` · `append NOTE TEXT` | append inside a section · at end of note |
+| `appendsec NOTE SEC TEXT` · `append NOTE [SEC] TEXT` | append inside a section · at end of note, or inside SEC when given |
 | `set NOTE KEY VALUE` · `unset NOTE KEY` | frontmatter field flip, body untouched |
 | `new PATH [--template T] [--key v ...]` | create from a vault template |
-| `daily-append TEXT` | append to today's daily note |
+| `daily-append TEXT` | append inside today's standup Today section |
 
 ### Refactor (link-aware, journaled)
 
@@ -146,6 +146,7 @@ and it does not change link resolution (`[[24995]]` stays unresolved).
 | `VV_NO_INDEX=1` / `VV_INDEX_ROOT` | disable the index · relocate it (tests) |
 | exit `0 · 1 · 3 · 4 · 5` | ok · usage/not-found · stale hash or plan · dirty journal · not UTF-8 |
 | errors | grep-stable: `kind: message — next: <command>` on one line (plus a `did you mean:` line after a name miss, and a `warning:` line when a directory in the vault is unreadable); control characters in a token are escaped, and the `next` step never comes from a token |
+| `vv <cmd> --help` | per-command usage + summary, ahead of arity checks — never needs real operands to answer |
 
 ## Why not just read the files?
 
@@ -267,7 +268,9 @@ same way (any doubt → live scan + rebuild, delete-don't-repair).
   is still read by every folder-scoped enumerator — `board`, `props`, `orphans`
   — (a symlinked *directory* is never descended).
 - **CAS on every writer** — section patches carry a sha8 of the section they replace, and
-  `set`/`unset`/`append`/`appendsec`/`daily-append` capture a `(mtime_ns, size)`
+  `patch` *also* captures the whole file's `(mtime_ns, size)` signature at read like every
+  other writer, alongside its sha8; `set`/`unset`/`append`/`appendsec`/`daily-append`
+  capture that same `(mtime_ns, size)`
   signature at read and refuse with exit 3 if the file changed underneath. Obsidian is
   a second writer whenever the app is open, so this is a live case, not a hypothetical.
   One documented deviation under the native entry: a CAS conflict there falls back to

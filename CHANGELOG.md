@@ -42,6 +42,9 @@ no-op on recovery; these changes remove the error classes instead.
 - `bench/pilot_report.py`: adoption over eligible vault-note ops (raw count
   secondary), friction/protocol error split, per-version blocks, selector
   census, `--criteria` for the pre-registered success table.
+- `daily-append` metrics rows carry `sel: today | eof`, naming which landing
+  kind the append used; the `--criteria` table's Today-landing row is
+  measured from it instead of printing `n/a`.
 
 ### Fixed
 - `patch` takes a whole-file signature before reading and refuses `stale:`
@@ -51,6 +54,8 @@ no-op on recovery; these changes remove the error classes instead.
   a dash (`- item`).
 - Prefix word boundaries are computed on case-folded text, so a fold that
   changes length cannot pick one of two ambiguous headings.
+- `bench/pilot_report.py` no longer crashes on a whitespace-only `op` field;
+  it groups under `?` like any other op the report can't otherwise name.
 
 ## [3.0.0] — 2026-09-16
 

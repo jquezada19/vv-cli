@@ -66,7 +66,7 @@ def load(path, since, until, funnel=None, label=""):
                 # sweep invocation) -- keep only the command word everywhere
                 # downstream groups/counts by op.
                 if r.get("op"):
-                    r["op"] = str(r["op"]).split()[0]
+                    r["op"] = (str(r["op"]).split() or ["?"])[0]
                 if not r.get("ts"):
                     diag["no_ts"] += 1
                     continue
@@ -203,8 +203,8 @@ def _ver_ge(v, floor):
     return key != (-1,) and key >= floor
 
 
-VER_OPS = ("read", "append", "set", "daily-append")
-SEL_OPS = ("read", "appendsec", "patch")
+VER_OPS = ("read", "append", "appendsec", "set", "daily-append")
+SEL_OPS = ("read", "appendsec", "patch", "daily-append")
 
 
 def print_version_blocks(rows):
@@ -290,12 +290,17 @@ def print_criteria(rows, legacy):
     note_touch = per_day_eligible_adoption_min(measured, legacy, restrict_days=measured_days)
     note_touch_s = f"{note_touch:.0f}%" if note_touch is not None else "n/a"
 
+    da_rows = [r for r in measured
+               if r["op"] == "daily-append" and r.get("exit", 0) == 0 and r.get("sel")]
+    da_today = len([r for r in da_rows if r["sel"] == "today"])
+    da_landing = f"{100 * da_today / len(da_rows):.0f}%" if da_rows else "n/a"
+
     print("\n| Metric | Baseline | Target | Measured |")
     print("|---|---|---|---|")
     print(f"| read nonzero-exit rate | baseline 36% (77/216) | target < 10% | {read_rate} |")
     print(f"| append usage rows | baseline 8 | target 0 | {append_usage} |")
     print(f"| set not-found rows | baseline 15 | target 0 | {set_nf} |")
-    print("| daily-append Today landings | baseline n/a | target 100% | n/a |")
+    print(f"| daily-append Today landings | baseline n/a | target 100% | {da_landing} |")
     print(f"| note-touching adoption | baseline 80–99% | target ≥ 85% every active day | {note_touch_s} |")
     print(f"| read selector kinds (sel) | baseline unmeasured | target flag, sha8, prefix each > 0 | {sel_summary} |")
 

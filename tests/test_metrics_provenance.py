@@ -242,7 +242,7 @@ def main():
         check(f"{eng.name}: row carries engine", row.get("engine") == expected_engine, row)
         check(f"{eng.name}: op is the bare command", row.get("op") == "outline", row)
     row = last_row_after(py, "board", "Link")      # the leaked-argv shape seen in the sink
-    check("python: op never carries operands (invariant pin)", row.get("op") == "board", row)
+    check("python: op is argv[1] for a two-token command", row.get("op") == "board", row)
 
     # --- native search's hit path logs its own row (was silent) -------------
     row = last_row_after(rust, "search", "body")   # "body" is present in A.md
