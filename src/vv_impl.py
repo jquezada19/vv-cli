@@ -39,6 +39,7 @@ SKIP_DIRS = {".git", ".obsidian", ".claude", ".trash", "graphify-out"}
 
 _t0 = time.perf_counter()
 _op = sys.argv[1] if len(sys.argv) > 1 else "?"
+_sel = None  # selector kind ("id"|"preamble"|"title"|"prefix"|"sha8"|"flag"), set by find_sec/cmd_read
 
 _cf_bytes = 0  # counterfactual: what a whole-file read of the touched notes would cost
 
@@ -69,12 +70,15 @@ def _log(out_bytes, exit_code=0, kind=None):
         import datetime
         rec = {"ts": datetime.datetime.now().isoformat(timespec="seconds"),
                "op": _op, "ms": round((time.perf_counter() - _t0) * 1000),
-               "out_bytes": out_bytes, "exit": exit_code}
+               "out_bytes": out_bytes, "exit": exit_code,
+               "ver": _version(), "engine": "python"}
         src = _metrics_src()
         if src:
             rec["src"] = src
         if kind:
             rec["kind"] = kind
+        if _sel:
+            rec["sel"] = _sel
         if _cf_bytes:
             rec["cf_bytes"] = _cf_bytes
         with open(METRICS, "a") as f:
