@@ -15,6 +15,13 @@ Native `cmd_append` (vrust/src/write.rs) returns Fallback for any
 runs BOTH entries (the native binary and `VV_ENGINE=python`), so the native
 arm proves the fallback itself reaches the same Python code, not just that
 the CLI script does.
+
+Task 8 (extended into this file rather than a new one) — `daily-append`
+used to append unconditionally at EOF, landing in whatever section happened
+to be last instead of "Today", the section its own name promises.
+`write.rs` has no `daily-append` arm and `main.rs` routes it to a Python
+fallback, so this is Python-only too; both entries still run for the same
+reason as Task 7's cases.
 """
 import os, sys, shutil, subprocess, tempfile, atexit
 
@@ -47,7 +54,12 @@ def check(name, cond, detail=""):
     if not cond:
         fails.append(name)
 
-NOTES = {"A.md": "# A\n\n## Alpha\n\na\n\n## Beta (Two)\n\nb\n", "B.md": "# B\nline\n"}
+STANDUP = ("---\ndate: 2026-09-20\n---\n# Standup 2026-09-20\n\n## Yesterday (Friday)\n\n- y\n\n"
+           "## Today (Saturday)\n\n- t1\n\n### Sub\n\n- sub\n\n## Blockers / Needs\n\n- b\n")
+
+NOTES = {"A.md": "# A\n\n## Alpha\n\na\n\n## Beta (Two)\n\nb\n", "B.md": "# B\nline\n",
+         "Dup.md": "# D\n\n## Same\n\nx\n\n## Same\n\ny\n\n## Other\n\nz\n",
+         "Standups/Standup 2026-09-20.md": STANDUP}
 
 class Engine:
     def __init__(self, name, env):
@@ -91,6 +103,16 @@ class Engine:
         with open(os.path.join(self.vault, relp)) as f:
             return f.read()
 
+    def write(self, relp, text):
+        p = os.path.join(self.vault, relp)
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "wb") as f:
+            f.write(text.encode("utf-8") if isinstance(text, str) else text)
+
+    def read_bytes(self, relp):
+        with open(os.path.join(self.vault, relp), "rb") as f:
+            return f.read()
+
 def next_of(stderr):
     """The next step — and an envelope-integrity assertion: exactly one
     separator per error line."""
@@ -98,10 +120,10 @@ def next_of(stderr):
         return f"<separator count {stderr.count(' — next: ')}>"
     return stderr.rstrip().partition(" — next: ")[2]
 
-def refused(eng, tag, name, args, want_prefix, want_next, exit_code=1):
+def refused(eng, tag, name, args, want_prefix, want_next, exit_code=1, env=None):
     """Run args; assert exit, stderr shape, and a byte-identical vault+journal."""
     before = eng.snapshot()
-    r = eng.run(*args)
+    r = eng.run(*args, env=env)
     check(f"{tag}{name} exit {exit_code}", r.returncode == exit_code, f"rc={r.returncode} {r.stderr[:160]}")
     check(f"{tag}{name} message", r.stderr.startswith(want_prefix), r.stderr)
     if want_next is not None:
@@ -136,6 +158,53 @@ for eng in engines:
 
     r = eng.run("append", "B", "- eof")
     check(f"{eng.name}: 2-arg append still EOF", eng.read("B.md").endswith("line\n- eof\n"), eng.read("B.md"))
+
+    # Deferred from this task's review: two sections sharing a title still
+    # refuse ambiguous through the 3-arg append→appendsec dispatch, and the
+    # vault is untouched — not just "not the wrong section".
+    refused(eng, "", "duplicate section titles refuse ambiguous append",
+            ["append", "Dup", "Same", "- x"],
+            "ambiguous: 2 sections are titled 'Same' (H2, H3)", "vv outline Dup")
+
+# --- Task 8: daily-append lands at the end of the Today section ------------
+# cmd_daily_append used to append unconditionally at EOF, which lands inside
+# whatever section happens to be last (usually "Blockers / Needs") instead of
+# inside "Today", the section the command's own name promises. VV_TODAY is a
+# test-only override next to datetime.date.today() so the suite can pin a
+# fixed date instead of racing the real day.
+for eng in engines:
+    env = {"VV_TODAY": "2026-09-20"}
+    r = eng.run("daily-append", "- t2", env=env)
+    after = eng.read("Standups/Standup 2026-09-20.md")
+    check(f"{eng.name}: lands after the last line of Today incl. its H3",
+          "- sub\n- t2\n\n## Blockers" in after, after)
+    # H3, not H2: ids number EVERY heading in document order regardless of
+    # level (same rule Task 7's test documents for "# A" itself being H1) —
+    # "# Standup 2026-09-20" is H1, "## Yesterday (Friday)" is H2, so the
+    # THIRD heading, Today, is H3.
+    check(f"{eng.name}: reports the landing",
+          r.stdout.strip() == "appended to H3 (Today (Saturday)) in Standups/Standup 2026-09-20.md", r.stdout)
+
+    # bold-label template shape (no "## Today…" H2) → EOF with an explicit report
+    eng.write("Standups/Standup 2026-09-21.md", "# S\n\n## 🧍 Standup\n\n**Today** _(after 7 AM)_\n- a\n")
+    r = eng.run("daily-append", "- z", env={"VV_TODAY": "2026-09-21"})
+    check(f"{eng.name}: no Today heading → EOF and says so",
+          r.returncode == 0 and r.stdout.strip().endswith("(no Today section — appended at end)"), r.stdout)
+
+    # two dated notes → ambiguous, no write
+    eng.write("Standups/Standup 2026-09-22.md", "# a\n")
+    eng.write("Standups/Standup 2026-09-22 draft.md", "# b\n")
+    refused(eng, "", "two notes for the date refuse", ["daily-append", "x"],
+            "ambiguous: 2 standup notes for 2026-09-22", "vv search 2026-09-22 --files",
+            env={"VV_TODAY": "2026-09-22"})
+
+    # CRLF preserved
+    eng.write("Standups/Standup 2026-09-23.md",
+              "# S\r\n\r\n## Today (Tue)\r\n\r\n- a\r\n\r\n## Blockers / Needs\r\n\r\n- b\r\n")
+    eng.run("daily-append", "- c", env={"VV_TODAY": "2026-09-23"})
+    want = b"# S\r\n\r\n## Today (Tue)\r\n\r\n- a\r\n- c\r\n\r\n## Blockers / Needs\r\n\r\n- b\r\n"
+    got = eng.read_bytes("Standups/Standup 2026-09-23.md")
+    check(f"{eng.name}: CRLF kept", got == want, got)
 
 print(f"\n{len(fails)} failures" if fails else "\nALL PASS")
 sys.exit(1 if fails else 0)

@@ -1314,15 +1314,21 @@ def cmd_search(*args):
 def cmd_daily_append(text):
     _dirty_gate()
     import datetime, glob
-    today = datetime.date.today().isoformat()
+    # VV_TODAY is a test-only override — real callers always hit date.today();
+    # nothing but the suite ever sets it.
+    today = os.environ.get("VV_TODAY") or datetime.date.today().isoformat()
     sd = os.path.join(VAULT, "Standups")
     if os.path.isdir(sd) and not os.access(sd, os.R_OK):
         # glob swallows EACCES and would report a false absence — and the
         # next step would create a duplicate of a note that exists
         die("refused: cannot prove today's standup is absent — unreadable: Standups", nxt="vv doctor")
-    hits = glob.glob(os.path.join(sd, f"*{today}*.md"))
+    hits = sorted(glob.glob(os.path.join(sd, f"*{today}*.md")))
     if not hits:
-        die(f"not-found: no standup note for {today} under Standups/", nxt="create it, then re-run")
+        die(f"not-found: no standup note for {today} under Standups/",
+            nxt=f"vv new 'Standups/Standup {today}' --template 'Daily Standup'")
+    if len(hits) > 1:
+        die(f"ambiguous: {len(hits)} standup notes for {today}", nxt=f"vv search {today} --files")
+    fp = hits[0]
     # Three defects lived in this one line (Codex review 2026-08-26), and this is
     # the most-used writer in the tool:
     #   1. no CAS -- the "every writer is guarded" claim skipped daily-append;
@@ -1331,12 +1337,34 @@ def cmd_daily_append(text):
     #   3. a non-UTF-8 note raised a traceback instead of the documented exit 5.
     # read_raw + file_sig fixes all three by using the same path as every other
     # writer, which is the actual lesson.
-    _sig = file_sig(hits[0])
-    cur = read_raw(hits[0])
+    _sig = file_sig(fp)
+    cur = read_raw(fp)
     eol = eol_of(cur)
-    sep = "" if cur.endswith(("\n", "\r\n")) else eol
-    atomic_write(hits[0], cur + sep + text + eol, expect_sig=_sig)
-    out(f"appended to {rel(hits[0])}")
+    lines, secs = parse(cur)
+    # "Today" as a whole word or immediately followed by "(" — never a false
+    # hit on e.g. "Today's Focus" as a differently-shaped heading, and never
+    # a level-3+ heading nested under something else entirely.
+    todays = [s for s in secs if s["level"] == 2 and re.match(r"(?i)today(\s*\(|$)", s["title"].strip())]
+    if len(todays) > 1:
+        die(f"ambiguous: {len(todays)} Today sections ({', '.join(s['id'] for s in todays)})",
+            nxt=f"vv outline {_q(rel(fp))}")
+    if todays:
+        s = todays[0]
+        # the Today block runs to the next heading of level <= 2 (its own
+        # H3 sub-bullets stay inside it), not the next heading of any level
+        nxt = next((t["start"] for t in secs if t["start"] > s["start"] and 0 < t["level"] <= 2), len(lines))
+        ins = nxt
+        while ins > s["start"] and lines[ins - 1].strip() == "":
+            ins -= 1
+        atomic_write(fp, splice(lines, ins, ins, [text]), expect_sig=_sig)
+        # sid/title come from the note under our own heading regex, not from
+        # caller input, so this is printed raw like appendsec's `sid` — there
+        # is no stdout escaper in this codebase (die()'s _esc is stderr-only).
+        out(f"appended to {s['id']} ({s['title']}) in {rel(fp)}")
+        return
+    sep = "" if cur.endswith(("\n", "\r\n")) or not cur else eol
+    atomic_write(fp, cur + sep + text + eol, expect_sig=_sig)
+    out(f"appended to {rel(fp)} (no Today section — appended at end)")
 
 # ================= v1.5: show / deadends / impact / rename / move / lint / doctor =================
 
@@ -2915,7 +2943,7 @@ COMMAND_TABLE = [
     {"name": "set",          "args": "NOTE KEY VALUE",          "summary": "frontmatter field flip, body untouched"},
     {"name": "unset",        "args": "NOTE KEY",                "summary": "remove a frontmatter field"},
     {"name": "new",          "args": "PATH [--template T] [--key v ...]", "summary": "create from a vault template"},
-    {"name": "daily-append", "args": "TEXT",                    "summary": "append to today's daily note"},
+    {"name": "daily-append", "args": "TEXT",                    "summary": "append inside today's standup Today section"},
     {"name": "rename",       "args": "NOTE NEWNAME [--apply [SHA8]]", "summary": "link-aware journaled rename; dry-run by default"},
     {"name": "move",         "args": "NOTE FOLDER [--apply [SHA8]]",  "summary": "link-aware journaled move; dry-run by default"},
     {"name": "trash",        "args": "NOTE [--apply [SHA8]]",   "summary": "journaled removal to .trash/; reports links that will break"},
