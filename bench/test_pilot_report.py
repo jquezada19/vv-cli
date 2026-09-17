@@ -85,6 +85,55 @@ def main():
               crit_out)
         check("criteria table has read row", "read nonzero-exit rate" in crit_out, crit_out)
 
+    # Regression pin: note-touching adoption must be computed over the SAME
+    # ver>=3.1.0 cohort as the rest of the --criteria table -- a pre-3.1.0 vv
+    # row must not pad a day's numerator, and a day with no ver>=3.1.0 vv
+    # traffic at all must not be dragged in by legacy volume alone. Both bugs
+    # would otherwise drop the printed value from the correct 50% to 29%.
+    with tempfile.TemporaryDirectory(prefix="vv-pilot-report-ver-") as tmp:
+        metrics_path = os.path.join(tmp, "vv.jsonl")
+        legacy_path = os.path.join(tmp, "vv-legacy.jsonl")
+        ver_rows = [
+            # D1 2026-09-21: one ver>=3.1.0 row (the only one that should
+            # count) plus three pre-3.1.0 rows that must NOT count.
+            {"ts": "2026-09-21T09:00:00", "op": "read", "ms": 1, "out_bytes": 1,
+             "exit": 0, "ver": "3.1.0"},
+            {"ts": "2026-09-21T09:01:00", "op": "read", "ms": 1, "out_bytes": 1,
+             "exit": 0, "ver": "3.0.0"},
+            {"ts": "2026-09-21T09:02:00", "op": "read", "ms": 1, "out_bytes": 1,
+             "exit": 0, "ver": "3.0.0"},
+            {"ts": "2026-09-21T09:03:00", "op": "read", "ms": 1, "out_bytes": 1,
+             "exit": 0, "ver": "3.0.0"},
+            # D2 2026-09-22: pre-3.1.0 vv traffic only -- this day must be
+            # excluded from the min entirely, not counted with 0 vv rows.
+            {"ts": "2026-09-22T09:00:00", "op": "read", "ms": 1, "out_bytes": 1,
+             "exit": 0, "ver": "3.0.0"},
+            {"ts": "2026-09-22T09:01:00", "op": "read", "ms": 1, "out_bytes": 1,
+             "exit": 0, "ver": "3.0.0"},
+        ]
+        ver_legacy = [
+            {"ts": "2026-09-21T09:04:00", "op": "read", "tool": "Read",
+             "note_bytes": 10, "eligible": True},
+        ] + [
+            {"ts": "2026-09-22T09:0%d:00" % (2 + i), "op": "read", "tool": "Read",
+             "note_bytes": 10, "eligible": True}
+            for i in range(5)
+        ]
+        with open(metrics_path, "w") as f:
+            for r in ver_rows:
+                f.write(json.dumps(r) + "\n")
+        with open(legacy_path, "w") as f:
+            for r in ver_legacy:
+                f.write(json.dumps(r) + "\n")
+
+        ver_crit_out = run_report("--since 2026-09-21 --until 2026-09-23 --criteria",
+                                  metrics_path, legacy_path)
+        check("note-touching adoption uses only the ver>=3.1.0 cohort",
+              "note-touching adoption | baseline 80–99% | "
+              "target ≥ 85% every active day | 50% |" in ver_crit_out
+              and "29%" not in ver_crit_out,
+              ver_crit_out)
+
     print(("ALL PASS (pilot report: %d)" % checks_run) if not fails
           else "FAILURES: " + ", ".join(fails))
     return 1 if fails else 0

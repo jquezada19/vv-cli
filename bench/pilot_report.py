@@ -239,13 +239,21 @@ def print_sel_census(rows):
     print("\nselector census: " + ", ".join(f"sel {k}: {n}" for k, n in counts.most_common()))
 
 
-def per_day_eligible_adoption_min(rows, legacy):
+def per_day_eligible_adoption_min(rows, legacy, restrict_days=None):
     """min over active days of (vv rows / (vv rows + eligible legacy rows)),
-    as a percentage -- None if there is no day with any eligible activity."""
+    as a percentage -- None if there is no day with any eligible activity.
+
+    `restrict_days`, when given, limits the days considered to that set --
+    the caller uses this to keep the legacy side scoped to the same date
+    window as a `rows` cohort that has already been filtered (e.g. by
+    `ver`), so a legacy-only day with no matching vv activity can't drag the
+    min down (or a vv-only day inflate it) outside that window."""
     vv_by_day = collections.Counter(r["ts"][:10] for r in rows)
     legacy_by_day = collections.Counter(
         r["ts"][:10] for r in legacy if is_eligible_legacy(r))
     days = set(vv_by_day) | set(legacy_by_day)
+    if restrict_days is not None:
+        days &= restrict_days
     pcts = []
     for d in days:
         tot = vv_by_day.get(d, 0) + legacy_by_day.get(d, 0)
@@ -275,7 +283,11 @@ def print_criteria(rows, legacy):
     sel_summary = ", ".join(f"{k}:{sel_counts.get(k, 0)}"
                             for k in ("flag", "sha8", "prefix"))
 
-    note_touch = per_day_eligible_adoption_min(rows, legacy)
+    # Same ver>=3.1.0 cohort as every other row in this table: a pre-3.1.0 vv
+    # row must not pad the numerator, and a day with no ver>=3.1.0 vv traffic
+    # must not be pulled in by legacy volume alone.
+    measured_days = {r["ts"][:10] for r in measured}
+    note_touch = per_day_eligible_adoption_min(measured, legacy, restrict_days=measured_days)
     note_touch_s = f"{note_touch:.0f}%" if note_touch is not None else "n/a"
 
     print("\n| Metric | Baseline | Target | Measured |")
@@ -375,25 +387,27 @@ def main():
 
     # Adoption: the denominator. Legacy ops are the same vault work done the old
     # way; a low share is a finding about the pilot, not a failure of the week.
+    # The headline is the ELIGIBLE figure -- counting every legacy row here
+    # was what over-logging inflated, before the hook started stamping
+    # `eligible: true`. The pre-eligibility figure (every row the legacy hook
+    # ever logged, regardless of whether it was genuinely vv-shaped work) is
+    # kept as a secondary line for continuity with history/dashboards that
+    # read the raw denominator.
     if legacy:
         lk = collections.Counter(r.get("op", "?") for r in legacy)
-        tot = len(rows) + len(legacy)
-        print(f"adoption: vv handled {len(rows)} of {tot} logged vault ops "
-              f"({100 * len(rows) / tot:.0f}%) · legacy {len(legacy)} — "
+        eligible_legacy = [r for r in legacy if is_eligible_legacy(r)]
+        elig_tot = len(rows) + len(eligible_legacy)
+        elig_pct = f"{100 * len(rows) / elig_tot:.0f}%" if elig_tot else "n/a"
+        print(f"adoption: vv handled {len(rows)} of {elig_tot} eligible vault ops "
+              f"({elig_pct}) · raw legacy rows: {len(legacy)} — "
               + ", ".join(f"{k}:{n}" for k, n in lk.most_common()))
         lb = sum(r.get("note_bytes", 0) for r in legacy)
         if lb:
             print(f"legacy note bytes touched: {lb:,} B "
                   f"(whole-file for reads; touched-note size otherwise)")
-        # Corrected adoption: the old line above counts every legacy row, which
-        # over-logging inflated (fixed at the hook -- new rows carry
-        # `eligible: true`). This one counts only the vault work that was
-        # actually vv-shaped, so it survives the hook's history.
-        eligible_legacy = [r for r in legacy if is_eligible_legacy(r)]
-        elig_tot = len(rows) + len(eligible_legacy)
-        elig_pct = f"{100 * len(rows) / elig_tot:.0f}%" if elig_tot else "n/a"
-        print(f"eligible adoption: vv handled {len(rows)} of {elig_tot} eligible "
-              f"vault ops ({elig_pct}) · raw legacy rows: {len(legacy)}")
+        tot = len(rows) + len(legacy)
+        print(f"raw adoption (all logged legacy rows): {len(rows)} of {tot} "
+              f"({100 * len(rows) / tot:.0f}%)")
     else:
         print("adoption: no legacy-route ops logged — either vv took everything, "
               "or the legacy logger is not running (verify before concluding)")

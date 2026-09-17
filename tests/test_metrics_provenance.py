@@ -51,7 +51,13 @@ def check_report_preserves_legacy_denominator(check):
              "ms": 2, "out_bytes": 10}
         ]
         legacy_rows = [
-            {"ts": "2026-08-27T12:00:01", "op": "read", "note_bytes": 100},
+            # eligible under the schema-1 fallback (note_bytes>0, tool is one
+            # of the vv-shaped ones) -- exercises the eligible row, not just
+            # the ineligible one below.
+            {"ts": "2026-08-27T12:00:01", "op": "read", "note_bytes": 100,
+             "tool": "Read"},
+            # no `tool`/`eligible` -- ineligible, stays out of the adoption
+            # numerator but still counts in "raw legacy rows".
             {"ts": "2026-08-27T12:00:02", "op": "edit", "note_bytes": 200},
         ]
         for name, records in (("vv.jsonl", vv_rows), ("vv-legacy.jsonl", legacy_rows)):
@@ -79,7 +85,8 @@ def check_report_preserves_legacy_denominator(check):
         check("pilot report preserves the real legacy adoption cohort",
               report.returncode == 0 and
               adoption.startswith(
-                  "adoption: vv handled 1 of 3 logged vault ops (33%) · legacy 2 — ") and
+                  "adoption: vv handled 1 of 2 eligible vault ops (50%) · "
+                  "raw legacy rows: 2 — ") and
               legacy_mix == {"read:1", "edit:1"},
               adoption_info)
         check("pilot report keeps the pre-provenance burst diagnostic-only",
