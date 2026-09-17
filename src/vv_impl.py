@@ -3068,7 +3068,7 @@ def _check_arity(cmd, fn, args):
         nxt = ARITY_NEXT[cmd](args) if cmd in ARITY_NEXT else _next_from_table(cmd, args)
         die(f"usage: {cmd} takes {want} positional args, got {len(args)}{_arity_hint(cmd, args)}", nxt=nxt)
 
-VERSION_FALLBACK = "3.0.0"  # used only when VERSION is absent (bare-file deploys)
+VERSION_FALLBACK = "3.1.0"  # used only when VERSION is absent (bare-file deploys)
 
 def _version():
     try:
