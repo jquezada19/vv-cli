@@ -2962,6 +2962,15 @@ def main():
         sugg = [alias] if alias else suggest_names(a[0], [c + ".md" for c in CMDS], n=1)  # same tiered ranking notes get
         hint = f" (did you mean: {sugg[0]})" if sugg else ""
         die(f"usage: unknown command {a[0]}{hint}", nxt="run vv --help for the command list")
+    # Per-command help, ahead of _check_arity: a `--help`/`-h` request must
+    # never need real operands to answer (previously reached the arity check
+    # first and answered "usage: read takes 2 positional args, got 1").
+    if a[1:2] and a[1] in ("--help", "-h"):
+        for c in COMMAND_TABLE:
+            if c["name"] == a[0]:
+                out(f"vv {c['name']} {c['args']}".rstrip() + f"\n  {c['summary']}")
+                _log(_out_total)
+                sys.exit(0)
     _check_arity(a[0], fn, a[1:])
     fn(*a[1:])
     _log(_out_total)
