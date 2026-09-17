@@ -6,7 +6,13 @@ the public API is the **CLI surface**: command names, flag names, output shape,
 and exit codes. A change that makes existing output unparseable, or that
 changes an exit code, is a major change.
 
-## [Unreleased]
+An input that was refused (exit 1) and now succeeds (exit 0) is an addition,
+not an exit-code change, and is MINOR. A documented non-zero exit that moves to
+a different non-zero exit, or a success that becomes a refusal, is MAJOR.
+
+## [3.0.0] — 2026-09-16
+
+MAJOR because three refused-tail forms of move/rename/trash moved 0 → 1 and one moved 3 → 1 (see Changed).
 
 Affordance sweep of the five days after 2.0.1 (457 telemetry rows,
 2026-09-03 → 2026-09-07, as counted when the sweep was written on
