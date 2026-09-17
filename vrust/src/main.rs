@@ -687,6 +687,19 @@ fn main() {
             args.drain(i..=i + 1);
         }
     }
+    // `<cmd> --help` is python's surface for every command (it prints that
+    // command's COMMAND_TABLE line), and the arity rule alone does not reach
+    // it: a native arm that answers at THIS arity answers the help request
+    // instead. `search --help` scored the literal string `--help` against the
+    // corpus and printed hits; `tags --help` printed the tag table; `props
+    // --help` counted notes carrying a property named `--help`. Hand off
+    // before a handler is chosen, so the rule holds for every command the
+    // native entry grows later.
+    if args.get(1).map(String::as_str) == Some("--help")
+        || args.get(1).map(String::as_str) == Some("-h")
+    {
+        exec_python(&orig);
+    }
     if let Some(cmd) = args.first().map(String::as_str) {
         let handler: Option<fn(&str, &[String], &std::path::Path) -> readpath::Outcome> = match cmd
         {

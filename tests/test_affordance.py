@@ -223,8 +223,15 @@ def section_a(eng, tag):
             "usage: --apply given twice", "vv trash C")
     refused(eng, tag, "2k a short flag is a flag, not a folder", ["move", "A", "-h", "--apply"],
             "usage: move takes NOTE FOLDER, got flag '-h' where FOLDER was expected (a name starting with '-' is spelled ./-h)", "vv move NOTE FOLDER")
+    # 2k2 pinned the interpolator's flag predicate for a lone `-h`: it never
+    # filled NOTE with the literal token. Since Task 6 (per-command --help/-h,
+    # intercepted before arity), a lone `-h` after the command name is the
+    # help alias itself, exit 0 with the synopsis — a stronger guarantee than
+    # "not a value" covering the same case.
     r = eng.run("move", "-h")
-    check(f"{tag}2k2 the interpolator uses the same flag predicate (no `vv move -h FOLDER`)", next_of(r.stderr) == "vv move NOTE FOLDER", r.stderr)
+    check(f"{tag}2k2 a lone -h is the per-command help alias, not a FOLDER value",
+          r.returncode == 0 and r.stdout == "vv move NOTE FOLDER [--apply [SHA8]]\n  link-aware journaled move; dry-run by default\n",
+          (r.stdout, r.stderr))
     refused(eng, tag, "2k' …and in the tail", ["move", "A", "Dest", "-n"],
             "usage: move takes NOTE FOLDER [--apply [SHA8]], got unknown flag '-n'", "vv move A Dest")
     refused(eng, tag, "2k3 …for rename", ["rename", "A", "A2", "-n"],
@@ -315,7 +322,7 @@ def section_b(eng, tag):
     cases = [
         (["append"],                       "usage: append takes 2 positional args, got 0",  "vv append NOTE TEXT"),
         (["append", "A"],                  "usage: append takes 2 positional args, got 1",  "vv append A TEXT"),
-        (["append", "A", "hello", "world"], "usage: append takes 2 positional args, got 3 (TEXT is one argument; quote it)", "vv append A 'hello world'"),
+        (["append", "A", "hello", "world"], "usage: append takes 2 positional args, got 3 (TEXT is one argument; quote it; a section append is appendsec)", "vv append A 'hello world'"),
         (["append", "A", "--section", "X", "hi"], "usage: append takes 2 positional args, got 4 (append has no --section; append inside a section is appendsec)", "vv appendsec A SEC TEXT"),
         (["prepend", "A", "--section", "X", "y"], "usage: prepend takes 2 positional args, got 4", "vv prepend A TEXT"),
         (["set", "A", "status"],           "usage: set takes 3 positional args, got 2",     "vv set A status VALUE"),

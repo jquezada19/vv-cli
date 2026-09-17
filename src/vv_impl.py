@@ -428,6 +428,17 @@ def sec_text(lines, s):
 def sha8(t):
     return hashlib.sha256(t.encode()).hexdigest()[:8]
 
+def _sec_hint(sid):
+    """The title a SEC operand is asking for: trimmed, and with a `#Heading` /
+    `##Heading` spelling reduced to the heading text. One definition for the
+    matcher and for the `ambiguous:` message it produces, which quote the same
+    string and drifted apart while each stripped its own copy."""
+    want = (sid or "").strip()
+    if want.startswith("#"):
+        want = want.lstrip("#").strip()
+    return want
+
+
 def find_sec(lines, secs, sid, ref):
     """Resolve a section by id, and forgive the four ways agents actually ask.
 
@@ -442,24 +453,36 @@ def find_sec(lines, secs, sid, ref):
     is UNAMBIGUOUS, because duplicate headings are common in these notes and
     silently picking the first would be worse than refusing.
     """
-    for s in secs:
-        if s["id"] == sid:
-            return s
-    want = (sid or "").strip()
-    if want.startswith("#"):
-        want = want.lstrip("#").strip()          # `#Heading` / `##Heading`
-    if want.lower() in ("(preamble)", "preamble"):
-        for s in secs:
-            if s["title"] == "(preamble)" or s["id"] == "H0":
-                return s
-    matches = [s for s in secs if s["title"].strip().lower() == want.lower()]
-    if len(matches) == 1:
-        return matches[0]
+    sec, matches = _find_sec_or_none(lines, secs, sid)
+    if sec is not None:
+        return sec
     if len(matches) > 1:
+        want = _sec_hint(sid)
         ids = ", ".join(m["id"] for m in matches)
         die(f"ambiguous: {len(matches)} sections are titled {want!r} ({ids})",
             nxt=f"vv outline {_q(ref)}")
     die(f"not-found: no section {sid}", nxt=f"vv outline {_q(ref)}")
+
+def _find_sec_or_none(lines, secs, sid):
+    """The non-dying half of find_sec's matching: an id, the `(preamble)`
+    alias, or a title match, without ever calling die(). Returns
+    (sec, matches) — sec is the resolved section when the id/preamble alias
+    hit or exactly one title matched, else None; matches is the title-match
+    list (empty unless a title lookup ran and found at least one hit), so a
+    caller can tell "not found" (both empty) from "ambiguous" (matches has 2+)
+    without re-deriving the title search itself."""
+    for s in secs:
+        if s["id"] == sid:
+            return s, []
+    want = _sec_hint(sid)
+    if want.lower() in ("(preamble)", "preamble"):
+        for s in secs:
+            if s["title"] == "(preamble)" or s["id"] == "H0":
+                return s, []
+    matches = [s for s in secs if s["title"].strip().lower() == want.lower()]
+    if len(matches) == 1:
+        return matches[0], matches
+    return None, matches
 
 def split_fm(text):
     fm, body, _tail, _bom = split_fm_full(text)
@@ -626,9 +649,10 @@ def cmd_resolve(ref):
 def cmd_patch(ref, sid, expect):
     _dirty_gate()
     fp = resolve(ref)
+    _sig = file_sig(fp)
     lines, secs = parse(read_raw(fp))
     s = find_sec(lines, secs, sid, ref)
-    if sid == "H0" and s["end"] > 0 and lines and lines[0].rstrip("\r") == "---":
+    if s["id"] == "H0" and s["end"] > 0 and lines and lines[0].rstrip("\r") == "---":
         die("refused: H0 contains frontmatter", nxt="vv set/unset (patch would rewrite YAML as body)")
     cur = sec_text(lines, s)
     if sha8(cur) != expect:
@@ -638,13 +662,24 @@ def cmd_patch(ref, sid, expect):
     if body.endswith("\n"):
         body = body[:-1]   # strip the one newline the caller's shell/`read` framing adds
     body_lines = [] if (body == "" and s["end"] == s["start"]) else body.split("\n")
-    atomic_write(fp, splice(lines, s["start"], s["end"], body_lines))
+    atomic_write(fp, splice(lines, s["start"], s["end"], body_lines), expect_sig=_sig)
     out(f"patched {sid} in {rel(fp)} ({len(cur.encode('utf-8'))}B -> {len(body.encode('utf-8'))}B)")
 
-def cmd_appendsec(ref, sid, text):
+def cmd_appendsec(ref, sid, text, *, _expect_sig=None):
+    """_expect_sig: a signature a CALLER already captured, for a dispatch that
+    read the note before delegating here (`append NOTE SEC TEXT`). This
+    Keyword-ONLY: `_check_arity` reads the arity off the code object, so a
+    positional parameter here would advertise `appendsec takes 3-4 positional
+    args` and let a fourth operand from the command line land in it.
+
+    This function re-reads the note, so its own `file_sig` would be taken after any
+    write that landed in the caller's window — and an id resolved before that
+    write names a different section after it, because ids number every heading
+    in document order. Threading the caller's signature through makes the
+    resolve and the write one guarded snapshot: same bytes, or `stale:`."""
     _dirty_gate()
     fp = resolve(ref)
-    _sig = file_sig(fp)
+    _sig = file_sig(fp) if _expect_sig is None else _expect_sig
     lines, secs = parse(read_raw(fp))
     s = find_sec(lines, secs, sid, ref)
     ins = s["end"]
@@ -653,7 +688,42 @@ def cmd_appendsec(ref, sid, text):
     atomic_write(fp, splice(lines, ins, ins, [text]), expect_sig=_sig)
     out(f"appended to {sid} in {rel(fp)}")
 
-def cmd_append(ref, text):
+def cmd_append(ref, *rest):
+    global _op
+    if len(rest) == 2:
+        # a 3rd operand is the section-append the agent meant, not a typo:
+        # dispatch to appendsec when SEC resolves (uniquely or ambiguously —
+        # ambiguous still delegates so appendsec's own `ambiguous:` refusal
+        # fires, rather than duplicating it here)
+        sid, text = rest
+        fp = resolve(ref)
+        # captured BEFORE the read this resolution is based on, and handed to
+        # the delegated write: appendsec re-reads the note, and a heading
+        # inserted in between renumbers the ids, so the id resolved here would
+        # address a different section by the time it is written. One snapshot
+        # guards both reads — the delegated write refuses `stale:` rather than
+        # appending to whatever now carries that id.
+        _sig = file_sig(fp)
+        lines, secs = parse(read_raw(fp))
+        sec, matches = _find_sec_or_none(lines, secs, sid)
+        if sec is not None:
+            _op = "appendsec"   # _op is read at argv time; the delegated write is an appendsec, and the log/metrics row should say so
+            # the canonical id, not the caller's SEC spelling: `appended to H1`
+            # is unambiguous even when the caller typed a title
+            return cmd_appendsec(ref, sec["id"], text, _expect_sig=_sig)
+        if matches:
+            # ambiguous — delegate the ORIGINAL sid so appendsec's own
+            # find_sec() re-derives the same title match and refuses
+            # `ambiguous:` with it, rather than this call picking a winner
+            _op = "appendsec"
+            return cmd_appendsec(ref, sid, text, _expect_sig=_sig)
+        die("usage: append takes 2 positional args, got 3 "
+            "(TEXT is one argument; quote it; a section append is appendsec)",
+            nxt=_next_from_table("append", [ref, sid, text]))
+    if len(rest) != 1:
+        die(f"usage: append takes 2 positional args, got {1 + len(rest)}",
+            nxt=_next_from_table("append", [ref, *rest]))
+    text, = rest
     _dirty_gate()
     fp = resolve(ref)
     _sig = file_sig(fp)
@@ -1274,15 +1344,21 @@ def cmd_search(*args):
 def cmd_daily_append(text):
     _dirty_gate()
     import datetime, glob
-    today = datetime.date.today().isoformat()
+    # VV_TODAY is a test-only override — real callers always hit date.today();
+    # nothing but the suite ever sets it.
+    today = os.environ.get("VV_TODAY") or datetime.date.today().isoformat()
     sd = os.path.join(VAULT, "Standups")
     if os.path.isdir(sd) and not os.access(sd, os.R_OK):
         # glob swallows EACCES and would report a false absence — and the
         # next step would create a duplicate of a note that exists
         die("refused: cannot prove today's standup is absent — unreadable: Standups", nxt="vv doctor")
-    hits = glob.glob(os.path.join(sd, f"*{today}*.md"))
+    hits = sorted(glob.glob(os.path.join(sd, f"*{today}*.md")))
     if not hits:
-        die(f"not-found: no standup note for {today} under Standups/", nxt="create it, then re-run")
+        die(f"not-found: no standup note for {today} under Standups/",
+            nxt=f"vv new {_q(f'Standups/Standup {today}')} --template 'Daily Standup'")
+    if len(hits) > 1:
+        die(f"ambiguous: {len(hits)} standup notes for {today}", nxt=f"vv search {today} --files")
+    fp = hits[0]
     # Three defects lived in this one line (Codex review 2026-08-26), and this is
     # the most-used writer in the tool:
     #   1. no CAS -- the "every writer is guarded" claim skipped daily-append;
@@ -1291,12 +1367,34 @@ def cmd_daily_append(text):
     #   3. a non-UTF-8 note raised a traceback instead of the documented exit 5.
     # read_raw + file_sig fixes all three by using the same path as every other
     # writer, which is the actual lesson.
-    _sig = file_sig(hits[0])
-    cur = read_raw(hits[0])
+    _sig = file_sig(fp)
+    cur = read_raw(fp)
     eol = eol_of(cur)
-    sep = "" if cur.endswith(("\n", "\r\n")) else eol
-    atomic_write(hits[0], cur + sep + text + eol, expect_sig=_sig)
-    out(f"appended to {rel(hits[0])}")
+    lines, secs = parse(cur)
+    # "Today" as a whole word or immediately followed by "(" — never a false
+    # hit on e.g. "Today's Focus" as a differently-shaped heading, and never
+    # a level-3+ heading nested under something else entirely.
+    todays = [s for s in secs if s["level"] == 2 and re.match(r"(?i)today(\s*\(|$)", s["title"].strip())]
+    if len(todays) > 1:
+        die(f"ambiguous: {len(todays)} Today sections ({', '.join(s['id'] for s in todays)})",
+            nxt=f"vv outline {_q(rel(fp))}")
+    if todays:
+        s = todays[0]
+        # the Today block runs to the next heading of level <= 2 (its own
+        # H3 sub-bullets stay inside it), not the next heading of any level
+        nxt = next((t["start"] for t in secs if t["start"] > s["start"] and 0 < t["level"] <= 2), len(lines))
+        ins = nxt
+        while ins > s["start"] and lines[ins - 1].strip() == "":
+            ins -= 1
+        atomic_write(fp, splice(lines, ins, ins, [text]), expect_sig=_sig)
+        # sid/title come from the note under our own heading regex, not from
+        # caller input, so this is printed raw like appendsec's `sid` — there
+        # is no stdout escaper in this codebase (die()'s _esc is stderr-only).
+        out(f"appended to {s['id']} ({s['title']}) in {rel(fp)}")
+        return
+    sep = "" if cur.endswith(("\n", "\r\n")) or not cur else eol
+    atomic_write(fp, cur + sep + text + eol, expect_sig=_sig)
+    out(f"appended to {rel(fp)} (no Today section — appended at end)")
 
 # ================= v1.5: show / deadends / impact / rename / move / lint / doctor =================
 
@@ -2783,6 +2881,16 @@ CMD_ALIASES = {"journal": "doctor"}
 def _check_arity(cmd, fn, args):
     """Positional-arg validation at the boundary, so an INTERNAL TypeError is a
     defect (traceback), never mislabeled as user error (review 2026-08-26)."""
+    # append takes *rest so it can accept a conditional 3rd operand (a SEC
+    # that resolves dispatches to appendsec) without a TypeError — the code
+    # object alone can't express "2 or 3", so the boundary check is hand-written
+    # here and the reported arity stays 2, since 3 is a conditional acceptance
+    # cmd_append itself adjudicates, not a second official arity.
+    if cmd == "append":
+        if len(args) not in (2, 3):
+            nxt = ARITY_NEXT[cmd](args) if cmd in ARITY_NEXT else _next_from_table(cmd, args)
+            die(f"usage: append takes 2 positional args, got {len(args)}{_arity_hint(cmd, args)}", nxt=nxt)
+        return
     # read arity off the code object directly: importing inspect costs ~4.4 ms
     # on EVERY command for the same three facts (Codex perf review 2026-08-27)
     code = fn.__code__
@@ -2865,7 +2973,7 @@ COMMAND_TABLE = [
     {"name": "set",          "args": "NOTE KEY VALUE",          "summary": "frontmatter field flip, body untouched"},
     {"name": "unset",        "args": "NOTE KEY",                "summary": "remove a frontmatter field"},
     {"name": "new",          "args": "PATH [--template T] [--key v ...]", "summary": "create from a vault template"},
-    {"name": "daily-append", "args": "TEXT",                    "summary": "append to today's daily note"},
+    {"name": "daily-append", "args": "TEXT",                    "summary": "append inside today's standup Today section"},
     {"name": "rename",       "args": "NOTE NEWNAME [--apply [SHA8]]", "summary": "link-aware journaled rename; dry-run by default"},
     {"name": "move",         "args": "NOTE FOLDER [--apply [SHA8]]",  "summary": "link-aware journaled move; dry-run by default"},
     {"name": "trash",        "args": "NOTE [--apply [SHA8]]",   "summary": "journaled removal to .trash/; reports links that will break"},
@@ -2966,6 +3074,15 @@ def main():
         sugg = [alias] if alias else suggest_names(a[0], [c + ".md" for c in CMDS], n=1)  # same tiered ranking notes get
         hint = f" (did you mean: {sugg[0]})" if sugg else ""
         die(f"usage: unknown command {a[0]}{hint}", nxt="run vv --help for the command list")
+    # Per-command help, ahead of _check_arity: a `--help`/`-h` request must
+    # never need real operands to answer (previously reached the arity check
+    # first and answered "usage: read takes 2 positional args, got 1").
+    if a[1:2] and a[1] in ("--help", "-h"):
+        for c in COMMAND_TABLE:
+            if c["name"] == a[0]:
+                out(f"vv {c['name']} {c['args']}".rstrip() + f"\n  {c['summary']}")
+                _log(_out_total)
+                sys.exit(0)
     _check_arity(a[0], fn, a[1:])
     fn(*a[1:])
     _log(_out_total)
