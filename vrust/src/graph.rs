@@ -486,7 +486,7 @@ fn cmd_backlinks(ref_: &str, vault: &Path, t0: Instant) -> Outcome {
     let mut buf = String::new();
     readpath::push_limited(&mut buf, &sorted, sorted.len(), "backlinks");
     let n = readpath::emit(&buf);
-    readpath::log_metrics("backlinks", t0, n, cf);
+    readpath::log_metrics("backlinks", t0, n, cf, None);
     Outcome::Done(0)
 }
 
@@ -511,7 +511,7 @@ fn cmd_links(ref_: &str, vault: &Path, t0: Instant) -> Outcome {
     let mut buf = String::new();
     readpath::push_limited(&mut buf, &seen, seen.len(), "links");
     let n = readpath::emit(&buf);
-    readpath::log_metrics("links", t0, n, cf);
+    readpath::log_metrics("links", t0, n, cf, None);
     Outcome::Done(0)
 }
 
@@ -653,7 +653,7 @@ fn cmd_orphans(folder: &str, vault: &Path, t0: Instant) -> Outcome {
     }
     readpath::push_limited(&mut buf, &entries, entries.len(), "orphans");
     let bytes = readpath::emit(&buf);
-    readpath::log_metrics("orphans", t0, bytes, 0);
+    readpath::log_metrics("orphans", t0, bytes, 0, None);
     Outcome::Done(0)
 }
 
@@ -687,6 +687,6 @@ fn cmd_deadends(vault: &Path, t0: Instant) -> Outcome {
     }
     readpath::push_limited(&mut buf, &entries, entries.len(), "deadends");
     let bytes = readpath::emit(&buf);
-    readpath::log_metrics("deadends", t0, bytes, 0);
+    readpath::log_metrics("deadends", t0, bytes, 0, None);
     Outcome::Done(0)
 }

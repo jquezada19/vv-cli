@@ -427,7 +427,7 @@ fn cmd_set(vault: &Path, args: &[String]) -> Outcome {
     }
     let out = format!("set {}={} in {}\n", key, value, rel_of(vault, &fp));
     let n = readpath::emit(&out);
-    readpath::log_metrics("set", t0, n, cf);
+    readpath::log_metrics("set", t0, n, cf, None);
     Outcome::Done(0)
 }
 
@@ -487,7 +487,7 @@ fn cmd_unset(vault: &Path, args: &[String]) -> Outcome {
     }
     let out = format!("unset {} in {}\n", key, rel_of(vault, &fp));
     let n = readpath::emit(&out);
-    readpath::log_metrics("unset", t0, n, cf);
+    readpath::log_metrics("unset", t0, n, cf, None);
     Outcome::Done(0)
 }
 
@@ -525,7 +525,7 @@ fn cmd_append(vault: &Path, args: &[String]) -> Outcome {
     }
     let out = format!("appended to {}\n", rel_of(vault, &fp));
     let n = readpath::emit(&out);
-    readpath::log_metrics("append", t0, n, cf);
+    readpath::log_metrics("append", t0, n, cf, None);
     Outcome::Done(0)
 }
 
@@ -566,7 +566,7 @@ fn cmd_appendsec(vault: &Path, args: &[String]) -> Outcome {
     }
     let out = format!("appended to {} in {}\n", sid, rel_of(vault, &fp));
     let n = readpath::emit(&out);
-    readpath::log_metrics("appendsec", t0, n, cf);
+    readpath::log_metrics("appendsec", t0, n, cf, None);
     Outcome::Done(0)
 }
 
@@ -677,7 +677,7 @@ fn cmd_patch(vault: &Path, args: &[String]) -> Outcome {
         cur.len(), // UTF-8 bytes, matching python's encode() count
         body.len()
     ));
-    crate::readpath::log_metrics("patch", t0, n, cf);
+    crate::readpath::log_metrics("patch", t0, n, cf, None);
     Outcome::Done(0)
 }
 

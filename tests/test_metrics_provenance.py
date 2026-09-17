@@ -24,8 +24,16 @@ import json, os, shutil, subprocess, sys, tempfile
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 VR = os.path.join(REPO, "vrust/target/release/vrust")
 VV = os.path.join(REPO, "src/vv.py")
+VERSION_FILE_CONTENT = open(os.path.join(REPO, "VERSION")).read().strip()
 sys.path.insert(0, os.path.join(REPO, "bench"))
 import pilot_report as pr
+
+
+class _Engine:
+    """Names an engine for last_row_after; native picks the vrust binary."""
+    def __init__(self, name, native):
+        self.name = name
+        self.native = native
 
 
 def check_report_preserves_legacy_denominator(check):
@@ -127,6 +135,15 @@ def main():
         if not os.path.exists(log): return []
         return [json.loads(l) for l in open(log) if l.strip()]
 
+    def last_row_after(eng, *args):
+        # Metrics are already enabled here: run() drops VV_NO_METRICS and
+        # VV_JOURNAL_ROOT for every call and points HOME at this temp sink.
+        run(list(args), native=eng.native)
+        return rows()[-1]
+
+    rust = _Engine("native", True)
+    py = _Engine("python", False)
+
     # --- unmarked usage carries no label ------------------------------------
     run(["outline", "A.md"]); run(["read", "A.md"], native=False)
     r = rows()
@@ -206,6 +223,15 @@ def main():
     check("epoch splits old from new for reporting",
           all(r["ts"] < pr.PROVENANCE_SINCE for r in unm_old) and
           all(r["ts"] >= pr.PROVENANCE_SINCE for r in unm_new))
+
+    # --- every row carries provenance: version, engine, bare op -------------
+    for eng in (rust, py):
+        row = last_row_after(eng, "outline", "A.md")
+        check(f"{eng.name}: row carries ver", row.get("ver") == VERSION_FILE_CONTENT, row)
+        check(f"{eng.name}: row carries engine", row.get("engine") in ("native", "python"), row)
+        check(f"{eng.name}: op is the bare command", row.get("op") == "outline", row)
+    row = last_row_after(py, "board", "Link")      # the leaked-argv shape seen in the sink
+    check("python: op never carries operands (invariant pin)", row.get("op") == "board", row)
 
     shutil.rmtree(vault, ignore_errors=True); shutil.rmtree(home, ignore_errors=True)
     print(("ALL PASS (metrics provenance: %d)" % checks_run) if not fails

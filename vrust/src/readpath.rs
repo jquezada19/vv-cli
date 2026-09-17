@@ -314,7 +314,7 @@ pub fn resolve(vault: &Path, ref_: &str) -> Option<PathBuf> {
 }
 
 // ---------- metrics (mirror _log in vv_impl.py) ----------
-pub fn log_metrics(op: &str, t0: std::time::Instant, out_bytes: usize, cf: u64) {
+pub fn log_metrics(op: &str, t0: std::time::Instant, out_bytes: usize, cf: u64, sel: Option<&str>) {
     if std::env::var_os("VV_JOURNAL_ROOT").is_some() || std::env::var_os("VV_NO_METRICS").is_some()
     {
         return;
@@ -347,9 +347,13 @@ pub fn log_metrics(op: &str, t0: std::time::Instant, out_bytes: usize, cf: u64) 
     } else {
         format!(", \"src\": \"{}\"", src)
     };
+    let sel_field = match sel {
+        Some(s) => format!(", \"sel\": \"{}\"", s),
+        None => String::new(),
+    };
     let rec = format!(
-        "{{\"ts\": \"{}\", \"op\": \"{}\", \"ms\": {}, \"out_bytes\": {}, \"exit\": 0, \"cf_bytes\": {}, \"engine\": \"native\"{}}}\n",
-        ts, op, ms, out_bytes, cf, src_field);
+        "{{\"ts\": \"{}\", \"op\": \"{}\", \"ms\": {}, \"out_bytes\": {}, \"exit\": 0, \"cf_bytes\": {}, \"engine\": \"native\", \"ver\": \"{}\"{}{}}}\n",
+        ts, op, ms, out_bytes, cf, env!("CARGO_PKG_VERSION"), src_field, sel_field);
     use std::io::Write;
     if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(path) {
         let _ = f.write_all(rec.as_bytes());
@@ -398,7 +402,7 @@ pub fn run(cmd: &str, args: &[String], vault: &Path) -> Outcome {
             let cf = fs::metadata(&fp).map(|m| m.len()).unwrap_or(0);
             let rel = fp.strip_prefix(vault).unwrap_or(&fp);
             let n = emit(&format!("{}\n", rel.display()));
-            log_metrics("resolve", t0, n, cf);
+            log_metrics("resolve", t0, n, cf, None);
             Outcome::Done(0)
         }
         "head" if args.len() == 1 => {
@@ -422,7 +426,7 @@ pub fn run(cmd: &str, args: &[String], vault: &Path) -> Outcome {
                 Some(f) => emit(&format!("{}\n", f)),
                 None => emit("(no frontmatter)\n"),
             };
-            log_metrics("head", t0, n, cf);
+            log_metrics("head", t0, n, cf, None);
             Outcome::Done(0)
         }
         "outline" if args.len() == 1 => {
@@ -461,7 +465,7 @@ pub fn run(cmd: &str, args: &[String], vault: &Path) -> Outcome {
                 ));
             }
             let n = emit(&buf);
-            log_metrics("outline", t0, n, cf);
+            log_metrics("outline", t0, n, cf, None);
             Outcome::Done(0)
         }
         "read" if args.len() == 2 => {
@@ -485,7 +489,7 @@ pub fn run(cmd: &str, args: &[String], vault: &Path) -> Outcome {
             };
             let t = sec_text(&lines, s);
             let n = emit(&format!("{}\n--sha8:{}\n", t, sha8(&t)));
-            log_metrics("read", t0, n, cf);
+            log_metrics("read", t0, n, cf, None);
             Outcome::Done(0)
         }
         _ => Outcome::Fallback,

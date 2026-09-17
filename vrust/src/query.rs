@@ -210,7 +210,7 @@ fn cmd_board(args: &[String], vault: &Path, t0: Instant) -> Outcome {
         .collect();
     readpath::push_limited(&mut buf, &entries, rows.len(), "notes");
     let n = readpath::emit(&buf);
-    readpath::log_metrics("board", t0, n, 0);
+    readpath::log_metrics("board", t0, n, 0, None);
     Outcome::Done(0)
 }
 
@@ -315,7 +315,7 @@ fn cmd_tags(args: &[String], vault: &Path, t0: Instant) -> Outcome {
         .collect();
     readpath::push_limited(&mut buf, &entries, c.len(), "tags");
     let n = readpath::emit(&buf);
-    readpath::log_metrics("tags", t0, n, 0);
+    readpath::log_metrics("tags", t0, n, 0, None);
     Outcome::Done(0)
 }
 
@@ -372,7 +372,7 @@ fn cmd_props(args: &[String], vault: &Path, t0: Instant) -> Outcome {
         &format!("notes with {}", key),
     );
     let n = readpath::emit(&buf);
-    readpath::log_metrics("props", t0, n, 0);
+    readpath::log_metrics("props", t0, n, 0, None);
     Outcome::Done(0)
 }
 
@@ -475,6 +475,6 @@ fn cmd_show(args: &[String], vault: &Path, t0: Instant) -> Outcome {
         return Outcome::Fallback; // python: die not-found
     }
     let n = readpath::emit(&out_buf);
-    readpath::log_metrics("show", t0, n, cf);
+    readpath::log_metrics("show", t0, n, cf, None);
     Outcome::Done(0)
 }
