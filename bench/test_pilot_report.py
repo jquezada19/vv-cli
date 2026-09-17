@@ -138,6 +138,50 @@ def main():
               and "29%" not in ver_crit_out,
               ver_crit_out)
 
+    # A whitespace-only `op` used to crash on split()[0] (empty list, no
+    # index 0); it must instead group under "?" like any other op the report
+    # can't otherwise name.
+    with tempfile.TemporaryDirectory(prefix="vv-pilot-report-blankop-") as tmp:
+        metrics_path = os.path.join(tmp, "vv.jsonl")
+        legacy_path = os.path.join(tmp, "vv-legacy.jsonl")
+        blank_rows = [
+            {"ts": "2026-09-26T10:00:00", "op": " ", "ms": 1, "out_bytes": 1, "exit": 0},
+        ]
+        with open(metrics_path, "w") as f:
+            for r in blank_rows:
+                f.write(json.dumps(r) + "\n")
+        open(legacy_path, "w").close()
+
+        blank_proc = run_report_full("--since 2026-09-26 --until 2026-09-27",
+                                     metrics_path, legacy_path)
+        check("whitespace-only op does not crash", blank_proc.returncode == 0,
+              blank_proc.stderr)
+        check("whitespace-only op groups under ?", "?:1" in blank_proc.stdout,
+              blank_proc.stdout)
+
+    # daily-append Today-landing criteria row: two exit-0 rows with a `sel`,
+    # one `today` and one `eof`, must read as 50% -- isolated in its own
+    # window so it can't be diluted by the headline fixture's own op mix.
+    with tempfile.TemporaryDirectory(prefix="vv-pilot-report-daily-") as tmp:
+        metrics_path = os.path.join(tmp, "vv.jsonl")
+        legacy_path = os.path.join(tmp, "vv-legacy.jsonl")
+        daily_rows = [
+            {"ts": "2026-09-24T10:00:00", "op": "daily-append", "ms": 3, "out_bytes": 10,
+             "exit": 0, "ver": "3.1.0", "engine": "python", "sel": "today"},
+            {"ts": "2026-09-24T10:00:01", "op": "daily-append", "ms": 3, "out_bytes": 10,
+             "exit": 0, "ver": "3.1.0", "engine": "python", "sel": "eof"},
+        ]
+        with open(metrics_path, "w") as f:
+            for r in daily_rows:
+                f.write(json.dumps(r) + "\n")
+        open(legacy_path, "w").close()
+
+        daily_crit_out = run_report("--since 2026-09-24 --until 2026-09-25 --criteria",
+                                    metrics_path, legacy_path)
+        check("daily-append landing rate measured from sel rows",
+              "daily-append Today landings | baseline n/a | target 100% | 50% |"
+              in daily_crit_out, daily_crit_out)
+
     # Regression pin: an all-synthetic vv window (every row carries `src`)
     # with an empty legacy sink must still trip the synthetic-only abort
     # (exit 2) instead of falling through to the silent "no vault ops

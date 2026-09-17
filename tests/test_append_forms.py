@@ -226,6 +226,31 @@ for eng in engines:
     check("the refused delegation writes nothing",
           body == "# R\n\n## Intruder\n\ni\n\n## Alpha\n\na\n\n## Beta\n\nb\n", body)
 
+# --- 3-operand append checks the dirty gate before resolving NOTE/SEC ------
+# _dirty_gate() used to run only inside the delegated cmd_appendsec (or not
+# at all, for an unresolvable NOTE/SEC on the 3-operand path), so a pending
+# journal was masked by whatever resolve() or find_sec() refused first
+# instead of the dirty: refusal every other writer gives. Fixture is the
+# same shape tests/test_write_parity.py uses to pin a pending journal: a
+# directory under the vault's journal-id, no manifest needed to trip the
+# gate.
+import hashlib as _hashlib
+
+for eng in engines:
+    vid = _hashlib.sha256(os.path.realpath(eng.vault).encode()).hexdigest()[:12]
+    pending = os.path.join(eng.journals, vid, "somejournal")
+    os.makedirs(pending, exist_ok=True)
+    # NOTE itself doesn't even resolve here (no "NoSuchNote.md" in the
+    # fixture), so a resolve-before-gate ordering would answer not-found:
+    # instead of dirty: -- this is the case the reordering fixes.
+    r = eng.run("append", "NoSuchNote", "Sec", "- x")
+    check(f"{eng.name}: pending journal refuses dirty before NOTE resolves",
+          r.returncode == 4 and r.stderr.startswith("dirty:"), (r.returncode, r.stderr))
+    r = eng.run("append", "A", "Alpha", "- x")
+    check(f"{eng.name}: pending journal refuses dirty even when NOTE+SEC resolve",
+          r.returncode == 4 and r.stderr.startswith("dirty:"), (r.returncode, r.stderr))
+    shutil.rmtree(os.path.join(eng.journals, vid), ignore_errors=True)
+
 # --- Task 8: daily-append lands at the end of the Today section ------------
 # cmd_daily_append used to append unconditionally at EOF, which lands inside
 # whatever section happens to be last (usually "Blockers / Needs") instead of
@@ -289,6 +314,43 @@ for eng in engines:
             "ambiguous: 2 Today sections (H2, H3)",
             "vv outline 'Standups/Standup 2026-09-25.md'",
             env={"VV_TODAY": "2026-09-25"})
+
+# --- Task 8 telemetry: daily-append records its landing (today/eof) -------
+# Engine.run's env dict always sets VV_JOURNAL_ROOT and VV_NO_METRICS as
+# explicit kwargs, so an override of either through its `env=` param collides
+# (dict() raises on a duplicate keyword) -- this drives the entries directly,
+# the same "metrics enabled, temp HOME sink" pattern
+# tests/test_metrics_provenance.py uses.
+import json as _json
+
+def _metrics_rows(home):
+    log = os.path.join(home, ".claude/metrics/vv.jsonl")
+    if not os.path.exists(log):
+        return []
+    return [_json.loads(l) for l in open(log) if l.strip()]
+
+for eng in engines:
+    mhome = mkdtemp(f"vv-appendforms-{eng.name}-metricshome-")
+    os.makedirs(os.path.join(mhome, ".claude/metrics"))
+    entry = [VRUST] if eng.name == "rust" else [sys.executable, VV]
+
+    def run_metered(*args, today):
+        env = dict(os.environ, VV_VAULT=eng.vault, VV_INDEX_ROOT=eng.index,
+                   HOME=mhome, VV_TODAY=today, **eng.env)
+        env.pop("VV_NO_METRICS", None)
+        env.pop("VV_JOURNAL_ROOT", None)
+        subprocess.run([*entry, *args], capture_output=True, text=True, env=env,
+                       input="", timeout=60)
+
+    run_metered("daily-append", "- t3", today="2026-09-20")
+    row = _metrics_rows(mhome)[-1]
+    check(f"{eng.name}: daily-append Today landing logs op+sel",
+          row.get("op") == "daily-append" and row.get("sel") == "today", row)
+
+    run_metered("daily-append", "- z2", today="2026-09-21")
+    row = _metrics_rows(mhome)[-1]
+    check(f"{eng.name}: daily-append EOF fallback logs op+sel",
+          row.get("op") == "daily-append" and row.get("sel") == "eof", row)
 
 print(f"\n{len(fails)} failures" if fails else "\nALL PASS")
 sys.exit(1 if fails else 0)

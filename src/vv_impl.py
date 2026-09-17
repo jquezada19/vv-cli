@@ -41,9 +41,10 @@ SKIP_DIRS = {".git", ".obsidian", ".claude", ".trash", "graphify-out"}
 _t0 = time.perf_counter()
 _op = sys.argv[1] if len(sys.argv) > 1 else "?"
 _sel = None  # selector kind ("id"|"preamble"|"title"|"sha8"|"prefix"), set by find_sec on a hit;
-             # "flag" when read's --section/--hash spelling drove it, and "bare"
-             # when `read NOTE` asked for the whole note, so the sink shows the
-             # SPELLING and not only the tier that answered
+             # "flag" when read's --section/--hash spelling drove it, "bare"
+             # when `read NOTE` asked for the whole note, and "today"|"eof" for
+             # daily-append's landing spot, so the sink shows the SPELLING and
+             # not only the tier that answered
 
 _cf_bytes = 0  # counterfactual: what a whole-file read of the touched notes would cost
 
@@ -561,14 +562,6 @@ def _ends_at_break(title, want):
     n = len(want.lower())
     return t[n:n + 1] in ("", " ", "(")
 
-def _find_sec_or_none(lines, secs, sid):
-    """find_sec's matching as (sec, matches), for the `append NOTE SEC TEXT`
-    dispatch: it needs "resolved" / "ambiguous" / "no such section" and not the
-    tier that decided. Ambiguity is delegated, not re-worded here -- the write
-    it delegates to re-resolves and emits the one canonical refusal."""
-    sec, _kind, matches = _match_sec(lines, secs, sid)
-    return sec, matches
-
 def split_fm(text):
     fm, body, _tail, _bom = split_fm_full(text)
     return fm, body
@@ -839,6 +832,13 @@ def cmd_appendsec(ref, sid, text, *, _expect_sig=None):
 
 def cmd_append(ref, *rest):
     global _op
+    # Ahead of both branches below: the 3-operand path used to resolve(ref)
+    # and delegate to cmd_appendsec (whose own _dirty_gate() runs only after
+    # a successful resolve) before this ran, so an unresolvable NOTE or SEC
+    # reported `not-found:`/`ambiguous:` instead of `dirty:` even with a
+    # pending journal blocking every write. A pending journal is exit 4
+    # regardless of whether NOTE or SEC would otherwise resolve.
+    _dirty_gate()
     if len(rest) == 2:
         # a 3rd operand is the section-append the agent meant, not a typo:
         # dispatch to appendsec when SEC resolves (uniquely or ambiguously —
@@ -854,7 +854,7 @@ def cmd_append(ref, *rest):
         # appending to whatever now carries that id.
         _sig = file_sig(fp)
         lines, secs = parse(read_raw(fp))
-        sec, matches = _find_sec_or_none(lines, secs, sid)
+        sec, _kind, matches = _match_sec(lines, secs, sid)
         if sec is not None:
             _op = "appendsec"   # _op is read at argv time; the delegated write is an appendsec, and the log/metrics row should say so
             # the canonical id, not the caller's SEC spelling: `appended to H1`
@@ -869,11 +869,11 @@ def cmd_append(ref, *rest):
         die("usage: append takes 2 positional args, got 3 "
             "(TEXT is one argument; quote it; a section append is appendsec)",
             nxt=_next_from_table("append", [ref, sid, text]))
-    if len(rest) != 1:
-        die(f"usage: append takes 2 positional args, got {1 + len(rest)}",
-            nxt=_next_from_table("append", [ref, *rest]))
+    # len(rest) is 1 here: _check_arity validates append's operand count to
+    # (2, 3) at both dispatch sites (main()'s direct call, and batch's, which
+    # excludes append entirely via _BATCH_READS) before cmd_append ever runs,
+    # and the len(rest) == 2 branch above always returns or dies.
     text, = rest
-    _dirty_gate()
     fp = resolve(ref)
     _sig = file_sig(fp)
     cur = read_raw(fp)
@@ -1491,6 +1491,7 @@ def cmd_search(*args):
 
 
 def cmd_daily_append(text):
+    global _sel
     _dirty_gate()
     import datetime, glob
     # VV_TODAY is a test-only override — real callers always hit date.today();
@@ -1539,10 +1540,12 @@ def cmd_daily_append(text):
         # sid/title come from the note under our own heading regex, not from
         # caller input, so this is printed raw like appendsec's `sid` — there
         # is no stdout escaper in this codebase (die()'s _esc is stderr-only).
+        _sel = "today"
         out(f"appended to {s['id']} ({s['title']}) in {rel(fp)}")
         return
     sep = "" if cur.endswith(("\n", "\r\n")) or not cur else eol
     atomic_write(fp, cur + sep + text + eol, expect_sig=_sig)
+    _sel = "eof"
     out(f"appended to {rel(fp)} (no Today section — appended at end)")
 
 # ================= v1.5: show / deadends / impact / rename / move / lint / doctor =================
@@ -3068,7 +3071,7 @@ def _check_arity(cmd, fn, args):
         nxt = ARITY_NEXT[cmd](args) if cmd in ARITY_NEXT else _next_from_table(cmd, args)
         die(f"usage: {cmd} takes {want} positional args, got {len(args)}{_arity_hint(cmd, args)}", nxt=nxt)
 
-VERSION_FALLBACK = "3.0.0"  # used only when VERSION is absent (bare-file deploys)
+VERSION_FALLBACK = "3.1.0"  # used only when VERSION is absent (bare-file deploys)
 
 def _version():
     try:
@@ -3127,7 +3130,12 @@ COMMAND_TABLE = [
     {"name": "resolve",      "args": "NAME",                    "summary": "name to vault-relative path"},
     {"name": "search",       "args": "TERMS [--k N] [--w CHARS] [--files]", "summary": "ranked full-text; --files prints paths only"},
     {"name": "patch",        "args": "NOTE SEC SHA8 <stdin",    "summary": "replace one section, compare-and-swap on its sha8"},
-    {"name": "append",       "args": "NOTE TEXT",               "summary": "append at end of note (CAS-guarded)"},
+    # args stays "NOTE TEXT", not "NOTE [SEC] TEXT": _table_operands stops at
+    # the first "[" token, so an optional SEC group there would drop TEXT
+    # from the operand list and break the next: hint _next_from_table builds
+    # for a 2-operand arity miss (pinned by tests/test_affordance.py) — the
+    # 3-operand form is documented in the summary instead.
+    {"name": "append",       "args": "NOTE TEXT",               "summary": "append at end of note, or inside SEC when given (CAS-guarded) -- 3-operand form: NOTE SEC TEXT"},
     {"name": "appendsec",    "args": "NOTE SEC TEXT",           "summary": "append inside a section (CAS-guarded)"},
     {"name": "prepend",      "args": "NOTE TEXT",               "summary": "insert after frontmatter (CAS-guarded)"},
     {"name": "set",          "args": "NOTE KEY VALUE",          "summary": "frontmatter field flip, body untouched"},
@@ -3227,6 +3235,8 @@ def main():
         sys.stderr.write(USAGE_LINE + "\n"); sys.exit(1)
     _op = a[0]   # real command, even when --vault preceded it
     if a[0] in ("--help", "-h", "help"):
+        # a NOTE literally named "--help" is unreachable through this spelling
+        # (it always prints global help); address it as "./--help" instead.
         print(__doc__.rstrip()); sys.exit(0)
     fn = CMDS.get(a[0])
     if not fn:

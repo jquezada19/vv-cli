@@ -10,6 +10,53 @@ An input that was refused (exit 1) and now succeeds (exit 0) is an addition,
 not an exit-code change, and is MINOR. A documented non-zero exit that moves to
 a different non-zero exit, or a success that becomes a refusal, is MAJOR.
 
+## [3.1.0] — 2026-09-17
+
+MINOR: every behaviour change below turns a refused input into a success, or
+adds a field; no documented exit code moves. Measured motivation: two weeks of
+agent usage (2026-09-02 → 2026-09-16) in which `read` failed 36% of the time on
+selector shapes the tool did not accept, `append` was used as a section append,
+`daily-append` landed in the wrong section, and per-command `--help` hit the
+arity check. The earlier "copy-runnable `next:` hint" fix was measured as a
+no-op on recovery; these changes remove the error classes instead.
+
+### Added
+- Section selectors, both engines, one order: `Hn` id → `(preamble)` →
+  leading `#`s stripped → unique exact title → content sha8 (the outline's
+  fifth column; identical sections refuse `ambiguous:`; a miss is
+  `not-found:`) → unique title prefix (≥ 3 chars, word-boundary hits
+  preferred). Applies to `read`, `appendsec`, `patch`.
+- `read NOTE --section SEC` / `--section=SEC` / `--hash SHA8` / `--hash=SHA8`;
+  bare `read NOTE` is the budgeted `show NOTE`.
+- `vv <cmd> --help` / `-h` prints that command's synopsis and summary (exit 0)
+  in both entries, before any native handler.
+- `append NOTE SEC TEXT` (three operands) appends inside SEC when it resolves,
+  on one guarded snapshot; an unresolvable SEC keeps the quoting usage error.
+- `daily-append` inserts at the end of the unique `## Today…` H2 block and
+  reports `appended to Hn (Today (…)) in <note>`; EOF with an explicit
+  `(no Today section — appended at end)` when absent; `ambiguous:` on two
+  Today headings or two dated notes; `not-found:` with a runnable `vv new`.
+- Metrics rows carry `ver`, `engine` and, on a section resolution, `sel`
+  (`id` · `preamble` · `title` · `sha8` · `prefix` · `flag` · `bare`); native
+  `search` logs one row per user invocation with emitted bytes.
+- `bench/pilot_report.py`: adoption over eligible vault-note ops (raw count
+  secondary), friction/protocol error split, per-version blocks, selector
+  census, `--criteria` for the pre-registered success table.
+- `daily-append` metrics rows carry `sel: today | eof`, naming which landing
+  kind the append used; the `--criteria` table's Today-landing row is
+  measured from it instead of printing `n/a`.
+
+### Fixed
+- `patch` takes a whole-file signature before reading and refuses `stale:`
+  on a concurrent edit (both engines); the `(preamble)` alias can no longer
+  bypass the frontmatter refusal.
+- The 3-operand `append` usage hint no longer drops a TEXT that starts with
+  a dash (`- item`).
+- Prefix word boundaries are computed on case-folded text, so a fold that
+  changes length cannot pick one of two ambiguous headings.
+- `bench/pilot_report.py` no longer crashes on a whitespace-only `op` field;
+  it groups under `?` like any other op the report can't otherwise name.
+
 ## [3.0.0] — 2026-09-16
 
 MAJOR because three refused-tail forms of move/rename/trash moved 0 → 1 and one moved 3 → 1 (see Changed).
