@@ -623,6 +623,10 @@ fn cmd_patch(vault: &Path, args: &[String]) -> Outcome {
         None => return Outcome::Fallback,
     };
     let cf = fs::metadata(&fp).map(|m| m.len()).unwrap_or(0);
+    let sig = match file_sig(&fp) {
+        Some(s) => s,
+        None => return Outcome::Fallback,
+    };
     let bytes = match fs::read(&fp) {
         Ok(b) => b,
         Err(_) => return Outcome::Fallback,
@@ -636,7 +640,7 @@ fn cmd_patch(vault: &Path, args: &[String]) -> Outcome {
         Some(s) => s,
         None => return Outcome::Fallback,
     };
-    if sid == "H0" && s.end > 0 && !lines.is_empty() && lines[0].trim_end_matches('\r') == "---" {
+    if s.id == "H0" && s.end > 0 && !lines.is_empty() && lines[0].trim_end_matches('\r') == "---" {
         return Outcome::Fallback; // python's "refused: H0 contains frontmatter" text
     }
     let cur = crate::readpath::sec_text(&lines, s);
@@ -662,7 +666,7 @@ fn cmd_patch(vault: &Path, args: &[String]) -> Outcome {
         body.split('\n').map(|x| x.to_string()).collect()
     };
     let new_text = splice(&lines, s.start, s.end, &body_lines);
-    if !atomic_write(&fp, &new_text, None) {
+    if !atomic_write(&fp, &new_text, Some(sig)) {
         return exec_python_with_stdin(vault, args, &raw);
     }
     let rel = fp

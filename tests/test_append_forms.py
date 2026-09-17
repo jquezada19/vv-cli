@@ -206,5 +206,29 @@ for eng in engines:
     got = eng.read_bytes("Standups/Standup 2026-09-23.md")
     check(f"{eng.name}: CRLF kept", got == want, got)
 
+    # Deferred from Task 9's review: no standup note at all for the date —
+    # not-found, no write, and the next step's path operand goes through
+    # _q(...) like every other writer's next step (an ISO date has no
+    # spaces/control chars, so the quoted form is byte-identical to the
+    # hand-written literal this replaced).
+    refused(eng, "", "daily-append with no standup note for the date refuses",
+            ["daily-append", "x"],
+            "not-found: no standup note for 2026-09-24 under Standups/",
+            "vv new 'Standups/Standup 2026-09-24' --template 'Daily Standup'",
+            env={"VV_TODAY": "2026-09-24"})
+
+    # Deferred from Task 9's review: one standup note, but two headings both
+    # matching the "Today" regex (level 2 -- the regex only looks at H2s) —
+    # ambiguous, no write. Ids number every heading in document order, so
+    # with no heading between them the ids are H2 and H3 here, not "two
+    # Today ids" in the abstract.
+    eng.write("Standups/Standup 2026-09-25.md",
+              "# S\n\n## Today (First)\n\n- a\n\n## Today (Second)\n\n- b\n")
+    refused(eng, "", "two Today H2s in one standup refuse ambiguous",
+            ["daily-append", "x"],
+            "ambiguous: 2 Today sections (H2, H3)",
+            "vv outline 'Standups/Standup 2026-09-25.md'",
+            env={"VV_TODAY": "2026-09-25"})
+
 print(f"\n{len(fails)} failures" if fails else "\nALL PASS")
 sys.exit(1 if fails else 0)

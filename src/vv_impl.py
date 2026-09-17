@@ -638,9 +638,10 @@ def cmd_resolve(ref):
 def cmd_patch(ref, sid, expect):
     _dirty_gate()
     fp = resolve(ref)
+    _sig = file_sig(fp)
     lines, secs = parse(read_raw(fp))
     s = find_sec(lines, secs, sid, ref)
-    if sid == "H0" and s["end"] > 0 and lines and lines[0].rstrip("\r") == "---":
+    if s["id"] == "H0" and s["end"] > 0 and lines and lines[0].rstrip("\r") == "---":
         die("refused: H0 contains frontmatter", nxt="vv set/unset (patch would rewrite YAML as body)")
     cur = sec_text(lines, s)
     if sha8(cur) != expect:
@@ -650,7 +651,7 @@ def cmd_patch(ref, sid, expect):
     if body.endswith("\n"):
         body = body[:-1]   # strip the one newline the caller's shell/`read` framing adds
     body_lines = [] if (body == "" and s["end"] == s["start"]) else body.split("\n")
-    atomic_write(fp, splice(lines, s["start"], s["end"], body_lines))
+    atomic_write(fp, splice(lines, s["start"], s["end"], body_lines), expect_sig=_sig)
     out(f"patched {sid} in {rel(fp)} ({len(cur.encode('utf-8'))}B -> {len(body.encode('utf-8'))}B)")
 
 def cmd_appendsec(ref, sid, text):
@@ -1325,7 +1326,7 @@ def cmd_daily_append(text):
     hits = sorted(glob.glob(os.path.join(sd, f"*{today}*.md")))
     if not hits:
         die(f"not-found: no standup note for {today} under Standups/",
-            nxt=f"vv new 'Standups/Standup {today}' --template 'Daily Standup'")
+            nxt=f"vv new {_q(f'Standups/Standup {today}')} --template 'Daily Standup'")
     if len(hits) > 1:
         die(f"ambiguous: {len(hits)} standup notes for {today}", nxt=f"vv search {today} --files")
     fp = hits[0]
