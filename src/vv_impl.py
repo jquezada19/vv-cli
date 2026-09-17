@@ -39,7 +39,7 @@ SKIP_DIRS = {".git", ".obsidian", ".claude", ".trash", "graphify-out"}
 
 _t0 = time.perf_counter()
 _op = sys.argv[1] if len(sys.argv) > 1 else "?"
-_sel = None  # selector kind ("id"|"preamble"|"title"|"prefix"|"sha8"|"flag"), set by find_sec/cmd_read
+_sel = None  # selector kind ("id"|"preamble"|"title"|"sha8"|"prefix"), set by find_sec on a hit
 
 _cf_bytes = 0  # counterfactual: what a whole-file read of the touched notes would cost
 
@@ -2503,10 +2503,12 @@ def _relocate_tail(cmd, operands, tail):
     positionals silently, so `vv move A B C D Dest --apply` used note B as the
     destination (four stray folders at the vault root once, exit 0), and
     a non-hex token after --apply degraded to an UNBOUND apply — the typo'd
-    plan id was ignored and the write went ahead. A flag in an operand slot
-    (`vv move A --apply`, `vv move --apply A Dest`) is refused for the same
-    reason: it would resolve `--apply` as a note or plan a move into a folder
-    named `--apply`. Returns (apply, plan_id_or_None)."""
+    plan id was ignored and the write went ahead. A FLAG token in an operand
+    slot (`vv move A --apply`, `vv move --apply A Dest`) is refused for the
+    same reason: it would resolve `--apply` as a note or plan a move into a
+    folder named `--apply` -- flag token meaning `-`-led with no whitespace in
+    it, so a dash-led name carrying a space is an operand, not a refusal.
+    Returns (apply, plan_id_or_None)."""
     names = _table_operands(cmd)
     synopsis = f"{cmd} takes {' '.join(names)}"
     template = _next_from_table(cmd, [])            # placeholders: the operands are suspect

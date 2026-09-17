@@ -70,7 +70,7 @@ class Engine:
             with open(p, "w") as f:
                 f.write(body)
 
-    def run(self, *args, metrics=False, env=None):
+    def run(self, *args, metrics=False, env=None, stdin=""):
         e = dict(os.environ, VV_VAULT=self.vault, VV_NO_METRICS="1", VV_INDEX_ROOT=self.index,
                  VV_JOURNAL_ROOT=self.journals, **self.env, **(env or {}))
         if metrics:
@@ -83,7 +83,7 @@ class Engine:
         # stdin is ALWAYS a closed pipe: an inherited open stdin would block the
         # suite forever.
         return subprocess.run([*entry, *args], capture_output=True, text=True, env=e,
-                              input="", timeout=60)
+                              input=stdin, timeout=60)
 
     def snapshot(self):
         snap = {}
@@ -111,10 +111,10 @@ class Engine:
         with open(log) as f:
             return [json.loads(l) for l in f if l.strip()]
 
-    def last_row_after(self, *args):
-        self.run(*args, metrics=True)
-        r = self.rows()
-        return r[-1] if r else {}
+    def last_row_after(self, *args, stdin=""):
+        r = self.run(*args, metrics=True, stdin=stdin)
+        rows = self.rows()
+        return (rows[-1] if rows else {}), r
 
 
 def next_of(stderr):
@@ -219,10 +219,37 @@ for eng in engines:
           (r.returncode, r.stderr[:120], eng.read("N.md")[:120]))
 
     # --- the selector kind reaches the metrics row --------------------------
+    # `engine` is asserted beside every `sel`: the native entry falls back to
+    # python on anything it does not handle, and a fallback still produces a
+    # correct row -- so a `sel` check alone would stay green if the native
+    # success path regressed into Outcome::Fallback, which is precisely the
+    # half of this change that lives in rust.
+    want_engine = "native" if eng.name == "rust" else "python"
+
+    def sel_row(label, want_sel, *args, stdin=""):
+        row, r = eng.last_row_after(*args, stdin=stdin)
+        check(f"{eng.name}: {label} sel={want_sel}", row.get("sel") == want_sel,
+              (row, r.returncode, r.stderr[:120]))
+        check(f"{eng.name}: {label} sel={want_sel} ran on {want_engine}",
+              row.get("engine") == want_engine, (row, r.returncode, r.stderr[:120]))
+        return row
+
     for tok, kind in ((today["sha8"], "sha8"), ("Today", "prefix"),
                       (today["id"], "id"), ("Tomorrow", "title")):
-        row = eng.last_row_after("read", "N", tok)
-        check(f"{eng.name}: sel={kind}", row.get("sel") == kind, row)
+        sel_row("read", kind, "read", "N", tok)
+
+    # the writers log their selector too, and they are separate native arms
+    sel_row("appendsec", "prefix", "appendsec", "N", "Tomor", "- q")
+    # patch's SEC is the selector; its THIRD operand is the CAS sha8. Feeding
+    # the section's own content sha8 as the selector exercises the sha8 tier on
+    # the write path -- off a FRESH outline, because the appendsec above moved
+    # every hash it touched.
+    fresh = outline_rows(eng)
+    todo_now = fresh["Todo list"][0]
+    sel_row("patch", "sha8", "patch", "N", todo_now["sha8"], todo_now["sha8"],
+            stdin="- patched\n")
+    check(f"{eng.name}: the patch actually landed", "- patched\n" in eng.read("N.md"),
+          eng.read("N.md")[:200])
 
     # --- an unresolvable SEC keeps the whole TEXT in the next step ----------
     # `- via append` starts with a dash; treating that as a FLAG dropped it out
