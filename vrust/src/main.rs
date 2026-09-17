@@ -211,6 +211,7 @@ fn score_one(
 }
 
 fn cmd_search(args: &[String], orig: &[String]) -> ! {
+    let t0 = std::time::Instant::now();
     // global --limit acts as --k unless --k is explicit (parity with python)
     let mut k = readpath::LIMIT.get().copied().unwrap_or(5);
     let mut w = 500usize;
@@ -305,6 +306,7 @@ fn cmd_search(args: &[String], orig: &[String]) -> ! {
         }
     }
     println!("({} of {} matches)", shown, hits.len());
+    readpath::log_metrics("search", t0, shown, 0, None);
     exit(0);
 }
 

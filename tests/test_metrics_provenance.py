@@ -232,13 +232,22 @@ def main():
           all(r["ts"] >= pr.PROVENANCE_SINCE for r in unm_new))
 
     # --- every row carries provenance: version, engine, bare op -------------
+    # outline on an existing note is native end-to-end for the rust entry (no
+    # python fallback), so the engine field can be pinned exactly rather than
+    # left as a membership check.
     for eng in (rust, py):
         row = last_row_after(eng, "outline", "A.md")
         check(f"{eng.name}: row carries ver", row.get("ver") == VERSION_FILE_CONTENT, row)
-        check(f"{eng.name}: row carries engine", row.get("engine") in ("native", "python"), row)
+        expected_engine = "native" if eng is rust else "python"
+        check(f"{eng.name}: row carries engine", row.get("engine") == expected_engine, row)
         check(f"{eng.name}: op is the bare command", row.get("op") == "outline", row)
     row = last_row_after(py, "board", "Link")      # the leaked-argv shape seen in the sink
     check("python: op never carries operands (invariant pin)", row.get("op") == "board", row)
+
+    # --- native search's hit path logs its own row (was silent) -------------
+    row = last_row_after(rust, "search", "body")   # "body" is present in A.md
+    check("native search logs a row",
+          row.get("op") == "search" and row.get("engine") == "native", row)
 
     shutil.rmtree(vault, ignore_errors=True); shutil.rmtree(home, ignore_errors=True)
     print(("ALL PASS (metrics provenance: %d)" % checks_run) if not fails
