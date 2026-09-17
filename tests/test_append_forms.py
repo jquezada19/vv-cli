@@ -39,17 +39,8 @@ def _cleanup():
 atexit.register(_cleanup)
 
 fails = []
-# Task 11 (unique-PREFIX section matching) hasn't landed: `_find_sec_or_none`
-# still only matches an id, the `(preamble)` alias, or an EXACT title, so
-# "Beta" does not yet resolve against a section titled "Beta (Two)". This
-# case is written now, against the shape Task 11 will also dispatch through,
-# and marked pending rather than deferred — Task 11 removes it from this set.
-EXPECTED_PENDING = {"unique prefix SEC resolves (Task 11 semantics)"}
 
 def check(name, cond, detail=""):
-    if any(p in name for p in EXPECTED_PENDING):
-        print(f"pending {name}")
-        return
     print(("PASS " if cond else "FAIL ") + name + (f"  [{str(detail)[:200]}]" if detail and not cond else ""))
     if not cond:
         fails.append(name)
@@ -150,7 +141,7 @@ for eng in engines:
     check(f"{eng.name}: reports as appendsec", r.stdout.strip() == "appended to H2 in A.md", r.stdout)
 
     r = eng.run("append", "A", "Beta", "- x")
-    check(f"{eng.name}: unique prefix SEC resolves (Task 11 semantics)", r.returncode == 0, r.stderr)
+    check(f"{eng.name}: unique prefix SEC resolves", r.returncode == 0, r.stderr)
 
     refused(eng, "", "unresolvable SEC keeps the quoting usage error", ["append", "B", "hello", "world"],
             "usage: append takes 2 positional args, got 3 (TEXT is one argument; quote it; a section append is appendsec)",

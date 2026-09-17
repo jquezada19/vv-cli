@@ -90,6 +90,7 @@ run "read-out follow-ups" python3 tests/test_readout_followups.py
 run "ondisk identity"    python3 tests/test_ondisk_identity.py
 run "affordance sweep"   python3 tests/test_affordance.py
 run "append forms"       python3 tests/test_append_forms.py
+run "selectors"          python3 tests/test_selectors.py
 run "patch guards"       python3 tests/test_patch_guards.py
 run "per-command help"   python3 tests/test_help.py
 run "engine parity"      python3 tests/test_engine_parity.py

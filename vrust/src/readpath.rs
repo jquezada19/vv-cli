@@ -228,12 +228,39 @@ pub fn sec_text(lines: &[&str], s: &Sec) -> String {
     lines[s.start..s.end].join("\n")
 }
 
-// find_sec happy path: id, #Heading, (preamble), unambiguous title. Anything
-// else (miss OR ambiguity) -> None -> python fallback for the canonical error.
-pub fn find_sec<'a>(secs: &'a [Sec], sid: &str) -> Option<&'a Sec> {
-    for s in secs {
-        if s.id == sid {
-            return Some(s);
+// find_sec: one total order, mirroring vv_impl.py's _match_sec —
+// id -> (preamble) -> exact title -> content sha8 -> unique title prefix.
+// Ok carries the SECTION and the TIER that answered (the metrics row's
+// selector). Any miss — nothing matched, or a tier matched more than once —
+// returns Err and the caller falls back so python emits the one canonical
+// refusal, which is the only place the two reasons are told apart.
+pub struct Miss;
+
+// Below this a prefix selects almost anything, so it is never tried.
+const PREFIX_MIN: usize = 3;
+
+pub fn find_sec<'a>(
+    lines: &[&str],
+    secs: &'a [Sec],
+    sid: &str,
+) -> Result<(&'a Sec, &'static str), Miss> {
+    find_sec_opts(lines, secs, sid, false)
+}
+
+// `hash_only` collapses the order to the sha8 tier alone, for `read --hash X`:
+// the caller is saying the token is CONTENT, so a section whose TITLE is 8 hex
+// characters must not intercept a hash taken from the outline's 5th column.
+pub fn find_sec_opts<'a>(
+    lines: &[&str],
+    secs: &'a [Sec],
+    sid: &str,
+    hash_only: bool,
+) -> Result<(&'a Sec, &'static str), Miss> {
+    if !hash_only {
+        for s in secs {
+            if s.id == sid {
+                return Ok((s, "id"));
+            }
         }
     }
     let mut want = sid.trim().to_string();
@@ -241,19 +268,108 @@ pub fn find_sec<'a>(secs: &'a [Sec], sid: &str) -> Option<&'a Sec> {
         want = want.trim_start_matches('#').trim().to_string();
     }
     let wl = want.to_lowercase();
-    if wl == "(preamble)" || wl == "preamble" {
-        return secs
+    if !hash_only {
+        if wl == "(preamble)" || wl == "preamble" {
+            return secs
+                .iter()
+                .find(|s| s.title == "(preamble)" || s.id == "H0")
+                .map(|s| (s, "preamble"))
+                .ok_or(Miss);
+        }
+        let matches: Vec<&Sec> = secs
             .iter()
-            .find(|s| s.title == "(preamble)" || s.id == "H0");
+            .filter(|s| s.title.trim().to_lowercase() == wl)
+            .collect();
+        if !matches.is_empty() {
+            return only(&matches, "title");
+        }
     }
-    let matches: Vec<&Sec> = secs
-        .iter()
-        .filter(|s| s.title.trim().to_lowercase() == wl)
-        .collect();
-    if matches.len() == 1 {
-        Some(matches[0])
+    // sha8 sits BELOW exact title: a heading that happens to be 8 hex
+    // characters is what someone typing those 8 characters means.
+    if want.len() == 8 && want.chars().all(|c| c.is_ascii_hexdigit()) {
+        let hits: Vec<&Sec> = secs
+            .iter()
+            .filter(|s| sha8(&sec_text(lines, s)) == wl)
+            .collect();
+        if !hits.is_empty() {
+            return only(&hits, "sha8");
+        }
+    }
+    let n = want.chars().count();
+    if !hash_only && n >= PREFIX_MIN {
+        let hits: Vec<&Sec> = secs
+            .iter()
+            .filter(|s| s.title.trim().to_lowercase().starts_with(&wl))
+            .collect();
+        if !hits.is_empty() {
+            // a token that ends at a word break outranks one stopping
+            // mid-word, so `Today` reaches `Today (Tuesday)` past `Today's
+            // plan`; when the break singles out nobody, every prefix hit
+            // counts, so the refusal names what the caller is choosing between
+            let whole: Vec<&Sec> = hits
+                .iter()
+                .copied()
+                .filter(|s| ends_at_break(s.title.trim(), &want))
+                .collect();
+            if whole.len() == 1 {
+                return Ok((whole[0], "prefix"));
+            }
+            return only(&hits, "prefix");
+        }
+    }
+    Err(Miss)
+}
+
+// read's flag-spelled SEC operand as (selector, hash_only), mirroring
+// _peel_read_flags in vv_impl.py -- but only its ACCEPTING half: every
+// refusal (an unknown flag, a missing or non-hex value, two selectors) is
+// None here, so python emits the one canonical usage text.
+fn peel_read(args: &[String]) -> Option<(String, bool)> {
+    let (name, val) = match args.len() {
+        2 => {
+            let (n, v) = args[1].split_once('=')?;
+            (n.to_string(), v.to_string())
+        }
+        3 => (args[1].clone(), args[2].clone()),
+        _ => return None,
+    };
+    if val.is_empty() {
+        return None;
+    }
+    let hash_only = match name.as_str() {
+        "--section" => false,
+        "--hash" => true,
+        _ => return None,
+    };
+    if hash_only && !(val.len() == 8 && val.chars().all(|c| c.is_ascii_hexdigit())) {
+        return None;
+    }
+    Some((val, hash_only))
+}
+
+fn only<'a>(hits: &[&'a Sec], kind: &'static str) -> Result<(&'a Sec, &'static str), Miss> {
+    if hits.len() == 1 {
+        Ok((hits[0], kind))
     } else {
-        None
+        Err(Miss)
+    }
+}
+
+// True when `want` stops at the end of `title` or at a word break in it. `(` is
+// a break because the parenthetical is what a caller leaves off.
+//
+// Measured on the FOLDED text, using the folded selector's char count: the tier
+// above matched case-insensitively, and a case fold can change a string's
+// length (a dotted capital I folds to two characters). An offset taken from the
+// original title at the raw selector's length then points at the wrong
+// character, and two headings that fold to the same text stop being ambiguous —
+// one of them wins by an accident of encoding, on the resolver that feeds the
+// write path.
+fn ends_at_break(title: &str, want: &str) -> bool {
+    let n = want.to_lowercase().chars().count();
+    match title.to_lowercase().chars().nth(n) {
+        None => true,
+        Some(c) => c == ' ' || c == '(',
     }
 }
 
@@ -468,7 +584,21 @@ pub fn run(cmd: &str, args: &[String], vault: &Path) -> Outcome {
             log_metrics("outline", t0, n, cf, None);
             Outcome::Done(0)
         }
-        "read" if args.len() == 2 => {
+        // A bare `read NOTE` (len 1) is python's `show`, so it is not matched
+        // here and falls through to Fallback with everything else unhandled.
+        // `show` HAS a native arm, so this is a deliberate parity exception
+        // rather than an unimplemented one: the budget line and the
+        // continuation token are output this delegation keeps under a single
+        // author, instead of two engines each wording it.
+        "read" if args.len() == 2 || args.len() == 3 => {
+            let (sid, hash_only, flagged) = if args.len() == 2 && !args[1].starts_with("--") {
+                (args[1].clone(), false, false)
+            } else {
+                match peel_read(args) {
+                    Some((v, h)) => (v, h, true),
+                    None => return Outcome::Fallback, // python words the refusal
+                }
+            };
             let fp = match resolve(vault, &args[0]) {
                 Some(f) => f,
                 None => return Outcome::Fallback,
@@ -483,13 +613,17 @@ pub fn run(cmd: &str, args: &[String], vault: &Path) -> Outcome {
                 Err(_) => return Outcome::Fallback,
             };
             let (lines, secs) = parse(&text);
-            let s = match find_sec(&secs, &args[1]) {
-                Some(s) => s,
-                None => return Outcome::Fallback,
+            let (s, tier) = match find_sec_opts(&lines, &secs, &sid, hash_only) {
+                Ok(v) => v,
+                Err(_) => return Outcome::Fallback,
             };
+            // A flag-spelled selector is its own kind in the sink (mirroring
+            // _sel = "flag"): the question it answers is which SPELLING
+            // callers reach for, which the tier would hide.
+            let kind = if flagged { "flag" } else { tier };
             let t = sec_text(&lines, s);
             let n = emit(&format!("{}\n--sha8:{}\n", t, sha8(&t)));
-            log_metrics("read", t0, n, cf, None);
+            log_metrics("read", t0, n, cf, Some(kind));
             Outcome::Done(0)
         }
         _ => Outcome::Fallback,

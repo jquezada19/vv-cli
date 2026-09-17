@@ -90,7 +90,7 @@ and it does not change link resolution (`[[24995]]` stays unresolved).
 | command | what it does |
 |---|---|
 | `outline NOTE` | section map: id · level · title · size · sha8 anchor |
-| `read NOTE SEC` | one section — by outline id, or by heading title / `#Heading` / `(preamble)`; an ambiguous title refuses and names the ids |
+| `read NOTE [SEC \| --section SEC \| --hash SHA8]` | one section — by outline id, heading title / `#Heading` / `(preamble)`, unique title prefix or content sha8; `--hash` reads the token as content only; an ambiguous selector refuses and names the ids. A bare `read NOTE` is a budgeted `show` |
 | `show NOTE [--max-bytes N] [--from SEC]` | budgeted read with a continuation token; `--max-bytes` is a **hard ceiling in UTF-8 bytes**, and a single oversized section is truncated-and-marked rather than emitted whole |
 | `head NOTE` · `resolve NAME` | frontmatter only · name → path |
 | `search TERMS [--k N] [--w C]` | ranked full-text: a note **named** for the query outranks mere mentions; a `dir/` term filters by path. Unquoted args are AND-ed terms; a **quoted arg is one phrase** — a zero-hit phrase whose words do co-occur prints a retry-unquoted hint instead of silence |

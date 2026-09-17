@@ -552,9 +552,9 @@ fn cmd_appendsec(vault: &Path, args: &[String]) -> Outcome {
         None => return Outcome::Fallback,
     };
     let (lines, secs) = readpath::parse(&text);
-    let s = match readpath::find_sec(&secs, sid) {
-        Some(s) => s,
-        None => return Outcome::Fallback,
+    let (s, kind) = match readpath::find_sec(&lines, &secs, sid) {
+        Ok(v) => v,
+        Err(_) => return Outcome::Fallback,
     };
     let mut ins = s.end;
     while ins > s.start && lines[ins - 1].trim().is_empty() {
@@ -566,7 +566,7 @@ fn cmd_appendsec(vault: &Path, args: &[String]) -> Outcome {
     }
     let out = format!("appended to {} in {}\n", sid, rel_of(vault, &fp));
     let n = readpath::emit(&out);
-    readpath::log_metrics("appendsec", t0, n, cf, None);
+    readpath::log_metrics("appendsec", t0, n, cf, Some(kind));
     Outcome::Done(0)
 }
 
@@ -636,9 +636,9 @@ fn cmd_patch(vault: &Path, args: &[String]) -> Outcome {
         Err(_) => return Outcome::Fallback,
     };
     let (lines, secs) = crate::readpath::parse(&text);
-    let s = match crate::readpath::find_sec(&secs, sid) {
-        Some(s) => s,
-        None => return Outcome::Fallback,
+    let (s, kind) = match crate::readpath::find_sec(&lines, &secs, sid) {
+        Ok(v) => v,
+        Err(_) => return Outcome::Fallback,
     };
     if s.id == "H0" && s.end > 0 && !lines.is_empty() && lines[0].trim_end_matches('\r') == "---" {
         return Outcome::Fallback; // python's "refused: H0 contains frontmatter" text
@@ -681,7 +681,7 @@ fn cmd_patch(vault: &Path, args: &[String]) -> Outcome {
         cur.len(), // UTF-8 bytes, matching python's encode() count
         body.len()
     ));
-    crate::readpath::log_metrics("patch", t0, n, cf, None);
+    crate::readpath::log_metrics("patch", t0, n, cf, Some(kind));
     Outcome::Done(0)
 }
 

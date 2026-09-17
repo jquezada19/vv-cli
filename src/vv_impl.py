@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """vv — fast, terse, agent-friendly CLI for Obsidian vaults.
 
-Read:    outline NOTE · read NOTE SEC · head NOTE · show NOTE [--max-bytes N] [--from SEC]
+Read:    outline NOTE · read NOTE [SEC | --section SEC | --hash SHA8] · head NOTE
+         show NOTE [--max-bytes N] [--from SEC]
          resolve NAME · search TERMS [--k N] [--w CHARS] [--files]
 Write:   patch NOTE SEC SHA8 <stdin · appendsec NOTE SEC TEXT · append NOTE TEXT · prepend NOTE TEXT
          set NOTE KEY VALUE · unset NOTE KEY · new PATH [--template T] [--k v ...]
@@ -39,7 +40,10 @@ SKIP_DIRS = {".git", ".obsidian", ".claude", ".trash", "graphify-out"}
 
 _t0 = time.perf_counter()
 _op = sys.argv[1] if len(sys.argv) > 1 else "?"
-_sel = None  # selector kind ("id"|"preamble"|"title"|"prefix"|"sha8"|"flag"), set by find_sec/cmd_read
+_sel = None  # selector kind ("id"|"preamble"|"title"|"sha8"|"prefix"), set by find_sec on a hit;
+             # "flag" when read's --section/--hash spelling drove it, and "bare"
+             # when `read NOTE` asked for the whole note, so the sink shows the
+             # SPELLING and not only the tier that answered
 
 _cf_bytes = 0  # counterfactual: what a whole-file read of the touched notes would cost
 
@@ -341,8 +345,13 @@ def _q(s, placeholder="NOTE"):
 def _is_flag(tok):
     """`-h` is a flag spelling too: one predicate for the relocate tail, the
     operand slots, and the next-step interpolator, so they cannot disagree.
-    A note whose name starts with `-` is spelled `./-name`."""
-    return tok.startswith("-") and len(tok) > 1
+    A note whose name starts with `-` is spelled `./-name`.
+
+    Whitespace disqualifies a token: no flag contains a space, but a markdown
+    bullet does -- and `append NOTE SEC "- text"` read its own TEXT as a flag,
+    which dropped it out of the suggested next step entirely. A `next:` line
+    that quietly asks for something the caller did not is worse than no hint."""
+    return tok.startswith("-") and len(tok) > 1 and not any(c.isspace() for c in tok)
 
 def suggest_names(want, paths, n=3):
     """Suggestions for a failed name lookup, tiered like rustdoc search:
@@ -439,50 +448,126 @@ def _sec_hint(sid):
     return want
 
 
-def find_sec(lines, secs, sid, ref):
-    """Resolve a section by id, and forgive the four ways agents actually ask.
+def find_sec(lines, secs, sid, ref, hash_only=False):
+    """Resolve a section by id, and forgive the ways agents actually ask.
 
     A replay of 50 real sessions (2026-08-26) found section addressing was
     guessed wrong four distinct ways -- `--section H9`, `Note#Heading`, the
     heading TITLE instead of the id, and the outline's display label
     `(preamble)`. Every one was correctly refused, which is the tool being right
     and unhelpful at the same time: four different wrong guesses is an
-    affordance problem, not four careless callers.
+    affordance problem, not four careless callers. Two more showed up in the
+    weeks after: the outline's own content sha8 handed back as an address (the
+    outline PRINTS it, so it reads like one) and a partial heading, typed when
+    the real heading carries a parenthetical the caller did not memorise.
 
-    Ids stay canonical and win outright; a title match is accepted only when it
-    is UNAMBIGUOUS, because duplicate headings are common in these notes and
-    silently picking the first would be worse than refusing.
+    Ids stay canonical and win outright; every other tier is accepted only when
+    it is UNAMBIGUOUS, because duplicate headings are common in these notes and
+    silently picking the first would be worse than refusing -- the resolver
+    feeds the WRITE path, where the wrong section is a corrupted note.
     """
-    sec, matches = _find_sec_or_none(lines, secs, sid)
+    global _sel
+    sec, kind, matches = _match_sec(lines, secs, sid, hash_only=hash_only)
     if sec is not None:
+        _sel = kind
         return sec
-    if len(matches) > 1:
+    if matches:
         want = _sec_hint(sid)
         ids = ", ".join(m["id"] for m in matches)
-        die(f"ambiguous: {len(matches)} sections are titled {want!r} ({ids})",
-            nxt=f"vv outline {_q(ref)}")
+        if kind == "sha8":
+            msg = f"{len(matches)} sections have content sha8 {want.lower()} ({ids})"
+        elif kind == "prefix":
+            msg = f"{len(matches)} sections match {want!r} ({ids})"
+        else:
+            msg = f"{len(matches)} sections are titled {want!r} ({ids})"
+        die(f"ambiguous: {msg}", nxt=f"vv outline {_q(ref)}")
     die(f"not-found: no section {sid}", nxt=f"vv outline {_q(ref)}")
 
-def _find_sec_or_none(lines, secs, sid):
-    """The non-dying half of find_sec's matching: an id, the `(preamble)`
-    alias, or a title match, without ever calling die(). Returns
-    (sec, matches) — sec is the resolved section when the id/preamble alias
-    hit or exactly one title matched, else None; matches is the title-match
-    list (empty unless a title lookup ran and found at least one hit), so a
-    caller can tell "not found" (both empty) from "ambiguous" (matches has 2+)
-    without re-deriving the title search itself."""
-    for s in secs:
-        if s["id"] == sid:
-            return s, []
+# A content sha8 is exactly what `vv outline` prints in its 5th column.
+_SHA8_TOKEN = re.compile(r"[0-9a-fA-F]{8}")
+# Below this a prefix selects almost anything, so it is never tried: a token
+# that short falls through to `not-found:` rather than to a lottery.
+_PREFIX_MIN = 3
+
+def _match_sec(lines, secs, sid, hash_only=False):
+    """The non-dying half of find_sec's matching, in one total order:
+    id -> `(preamble)` alias -> exact title -> content sha8 -> unique prefix.
+
+    Returns (sec, kind, matches). `sec` is the resolved section, or None.
+    `kind` names the TIER that answered -- "id", "preamble", "title", "sha8" or
+    "prefix" -- and is what find_sec records as the metrics row's selector, so
+    the sink shows which spelling agents actually use. On a miss `sec` is None
+    and `matches` holds the tier's hits: empty means nothing matched anywhere,
+    and two or more means that tier was ambiguous, with `kind` naming it so the
+    refusal can be worded for that tier without re-deriving the search.
+
+    sha8 sits BELOW exact title deliberately: a heading that happens to be 8 hex
+    characters is what someone typing those 8 characters means.
+
+    `hash_only` collapses the order to the sha8 tier alone: `read --hash X`
+    says the token is CONTENT, so the tiers that read it as a name are not the
+    caller's meaning -- a section titled with 8 hex characters must not
+    intercept a hash the caller took from the outline's 5th column.
+    """
     want = _sec_hint(sid)
-    if want.lower() in ("(preamble)", "preamble"):
+    if not hash_only:
         for s in secs:
-            if s["title"] == "(preamble)" or s["id"] == "H0":
-                return s, []
-    matches = [s for s in secs if s["title"].strip().lower() == want.lower()]
-    if len(matches) == 1:
-        return matches[0], matches
-    return None, matches
+            if s["id"] == sid:
+                return s, "id", []
+        if want.lower() in ("(preamble)", "preamble"):
+            for s in secs:
+                if s["title"] == "(preamble)" or s["id"] == "H0":
+                    return s, "preamble", []
+        matches = [s for s in secs if s["title"].strip().lower() == want.lower()]
+        if matches:
+            return (matches[0] if len(matches) == 1 else None), "title", matches
+    if _SHA8_TOKEN.fullmatch(want):
+        tok = want.lower()
+        hits = [s for s in secs if sha8(sec_text(lines, s)) == tok]
+        if hits:
+            return (hits[0] if len(hits) == 1 else None), "sha8", hits
+    if not hash_only and len(want) >= _PREFIX_MIN:
+        hits = [s for s in secs if s["title"].strip().lower().startswith(want.lower())]
+        if hits:
+            # A caller who typed a whole word meant a whole word: among the
+            # prefix hits, those where the token ENDS at a word break outrank
+            # the ones that stop mid-word, so `Today` reaches `Today (Tuesday)`
+            # even beside a `Today's plan`. `(` counts as a break because the
+            # parenthetical is exactly what a caller leaves off. When the break
+            # does not single one out, the refusal names every prefix hit --
+            # narrowing the report to the break would hide the sections the
+            # caller is actually choosing between.
+            whole = [s for s in hits if _ends_at_break(s["title"].strip(), want)]
+            if len(whole) == 1:
+                return whole[0], "prefix", whole
+            return (hits[0] if len(hits) == 1 else None), "prefix", hits
+    return None, None, []
+
+def _ends_at_break(title, want):
+    """True when `want` stops at the end of `title` or at a word break in it.
+
+    Measured on the FOLDED text, using the folded selector's length: the tier
+    above matched case-insensitively, and a case fold can change the length of
+    a string (a dotted capital I folds to two characters). Taking the offset
+    from the original title at the raw selector's length then points at the
+    wrong character, and two headings that fold to the same text stop being
+    ambiguous -- one of them wins by an accident of encoding, on the resolver
+    that feeds the write path.
+
+    Sliced, not indexed: the native engine's `chars().nth(n)` is total, and an
+    IndexError here where it returns None would be a parity break on exactly
+    the inputs nobody tests."""
+    t = title.lower()
+    n = len(want.lower())
+    return t[n:n + 1] in ("", " ", "(")
+
+def _find_sec_or_none(lines, secs, sid):
+    """find_sec's matching as (sec, matches), for the `append NOTE SEC TEXT`
+    dispatch: it needs "resolved" / "ambiguous" / "no such section" and not the
+    tier that decided. Ambiguity is delegated, not re-worded here -- the write
+    it delegates to re-resolves and emits the one canonical refusal."""
+    sec, _kind, matches = _match_sec(lines, secs, sid)
+    return sec, matches
 
 def split_fm(text):
     fm, body, _tail, _bom = split_fm_full(text)
@@ -633,9 +718,73 @@ def cmd_outline(ref):
         # expected-vectors now do).
         out(f"{s['id']}\t{'#'*s['level'] or '-'}\t{s['title']}\t{len(t.encode('utf-8'))}B\t{sha8(t)}")
 
-def cmd_read(ref, sid):
+def _peel_read_flags(rest, ref):
+    """read's optional tail as (sid, forced_hash).
+
+    The SEC operand has three spellings -- positional, `--section X` and
+    `--hash X` (each also in its `=` form) -- because the flag spellings are
+    what callers reach for when the operand order is not in front of them, and
+    refusing them on arity taught nothing. Exactly ONE selector may be given:
+    two of them is a caller who means two different sections, and picking
+    either would be a guess.
+
+    `--hash` additionally asserts the token is a CONTENT hash, which is why it
+    returns a flag rather than just a value: it turns off the tiers that would
+    read those 8 characters as a name."""
+    nxt = f"vv outline {_q(ref)}"
+    sid, forced = None, False
+    rest = list(rest)
+    i = 0
+    while i < len(rest):
+        tok = rest[i]
+        if tok.startswith("--"):
+            name, eq, val = tok.partition("=")
+            if name not in ("--section", "--hash"):
+                die(f"usage: read has no {name}", nxt=nxt)
+            want_hash = name == "--hash"
+            bad_value = ("usage: --hash takes an 8-hex sha8" if want_hash
+                         else "usage: --section takes a value")
+            if not eq:
+                if i + 1 >= len(rest):
+                    die(bad_value, nxt=nxt)
+                i += 1
+                val = rest[i]
+            if not val:
+                die(bad_value, nxt=nxt)
+            if want_hash and not _SHA8_TOKEN.fullmatch(val):
+                die("usage: --hash takes an 8-hex sha8", nxt=nxt)
+            if sid is not None:
+                die("usage: read takes one section selector", nxt=nxt)
+            sid, forced = val, want_hash
+        else:
+            if sid is not None:
+                die("usage: read takes one section selector", nxt=nxt)
+            sid = tok
+        i += 1
+    return sid, forced
+
+def cmd_read(ref, *rest):
+    global _sel
+    sid, forced_hash = _peel_read_flags(rest, ref)
+    if sid is None:
+        # A bare note name is not a usage error: asking the read command for a
+        # whole note means `show`, budget and continuation token included.
+        #
+        # The row keeps `op: read` and gains a selector kind of its own.
+        # `cmd_append` relabels `_op` when it delegates because the DELEGATE is
+        # the operation that happened -- an appendsec writes a section, and the
+        # log has to name the write it performed. Nothing is written here: the
+        # affordance being measured is which spelling callers reach for, so the
+        # caller's own spelling is the answer, and `bare` lets the report count
+        # the whole-note class apart from the section selectors.
+        _sel = "bare"
+        return cmd_show(ref)
     lines, secs = parse(read_raw(resolve(ref)))
-    s = find_sec(lines, secs, sid, ref)
+    s = find_sec(lines, secs, sid, ref, hash_only=forced_hash)
+    if any(t.startswith("--") for t in rest):
+        # The sink's question is which SPELLING callers use, so a flag-driven
+        # hit is its own selector kind rather than the tier that answered it.
+        _sel = "flag"
     out(sec_text(lines, s))
     out(f"--sha8:{sha8(sec_text(lines, s))}")
 
@@ -2439,10 +2588,12 @@ def _relocate_tail(cmd, operands, tail):
     positionals silently, so `vv move A B C D Dest --apply` used note B as the
     destination (four stray folders at the vault root once, exit 0), and
     a non-hex token after --apply degraded to an UNBOUND apply — the typo'd
-    plan id was ignored and the write went ahead. A flag in an operand slot
-    (`vv move A --apply`, `vv move --apply A Dest`) is refused for the same
-    reason: it would resolve `--apply` as a note or plan a move into a folder
-    named `--apply`. Returns (apply, plan_id_or_None)."""
+    plan id was ignored and the write went ahead. A FLAG token in an operand
+    slot (`vv move A --apply`, `vv move --apply A Dest`) is refused for the
+    same reason: it would resolve `--apply` as a note or plan a move into a
+    folder named `--apply` -- flag token meaning `-`-led with no whitespace in
+    it, so a dash-led name carrying a space is an operand, not a refusal.
+    Returns (apply, plan_id_or_None)."""
     names = _table_operands(cmd)
     synopsis = f"{cmd} takes {' '.join(names)}"
     template = _next_from_table(cmd, [])            # placeholders: the operands are suspect
@@ -2891,6 +3042,15 @@ def _check_arity(cmd, fn, args):
             nxt = ARITY_NEXT[cmd](args) if cmd in ARITY_NEXT else _next_from_table(cmd, args)
             die(f"usage: append takes 2 positional args, got {len(args)}{_arity_hint(cmd, args)}", nxt=nxt)
         return
+    # read's *rest carries the optional SEC in its three spellings (positional,
+    # --section, --hash), so the code object cannot express the ceiling either:
+    # varargs alone would advertise "1+" while the tail is adjudicated by
+    # _peel_read_flags, which refuses a second selector by name, not by count.
+    if cmd == "read":
+        if not 1 <= len(args) <= 3:
+            die(f"usage: read takes 1-3 positional args, got {len(args)}{_arity_hint(cmd, args)}",
+                nxt=ARITY_NEXT[cmd](args))
+        return
     # read arity off the code object directly: importing inspect costs ~4.4 ms
     # on EVERY command for the same three facts (Codex perf review 2026-08-27)
     code = fn.__code__
@@ -2961,7 +3121,7 @@ def _list_out(rows, total, noun, cmd=None, fmt=None):
 # describe a command the dispatcher lacks nor miss one it has.
 COMMAND_TABLE = [
     {"name": "outline",      "args": "NOTE",                    "summary": "section map: id, level, title, bytes, sha8 anchor"},
-    {"name": "read",         "args": "NOTE SEC",                "summary": "one section, by outline id or heading title"},
+    {"name": "read",         "args": "NOTE [SEC | --section SEC | --hash SHA8]", "summary": "one section by id, title, prefix or content sha8; bare NOTE is a budgeted show"},
     {"name": "show",         "args": "NOTE [--max-bytes N] [--from SEC]", "summary": "budgeted read with a continuation token"},
     {"name": "head",         "args": "NOTE",                    "summary": "frontmatter only"},
     {"name": "resolve",      "args": "NAME",                    "summary": "name to vault-relative path"},

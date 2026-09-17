@@ -21,7 +21,9 @@ R3  `journal` is not a command; one (double-logged) attempt in the week. The typ
     edit-distance only, so `doctor` was never suggested. Alias table.
 R4  `read NOTE` with no section pointed at the generic no-args usage line;
     the honest next step is `vv outline NOTE` — a RUNNABLE command, per the
-    `next:` contract. Arity misses (no note, or no section — the sink cannot
+    `next:` contract. A bare `read NOTE` is no longer a refusal at all (it is
+    a budgeted `show`), so the interpolated hint is pinned on the arity
+    ceiling, which is where a read arity miss can still land. Arity misses (no note, or no section — the sink cannot
     tell them apart) were 9 of 228 read calls at the read-out moment (8 of
     226 before that day's probing), over the register's interactive rows.
 R5  shadow harness: a legacy one-liner that FAILS is a harness error, never a
@@ -131,9 +133,11 @@ def root_checks(tag, runner):
     r = runner("outlien", "x")
     check(f"{tag}3c edit-distance hint unchanged (control)", "(did you mean: outline)" in r.stderr, r.stderr)
     r = runner("read", NOTE)
-    check(f"{tag}4a read NOTE alone is a usage error (control)", r.returncode == 1 and r.stderr.startswith("usage: read takes 2 positional args, got 1"), r.stderr)
-    check(f"{tag}4b next step is the runnable outline command for THIS note",
-          r.stderr.rstrip().endswith("— next: vv outline 'Sandbox/vvreadout/Readout Note.md'"), r.stderr)
+    check(f"{tag}4a read NOTE alone now reads the whole note (it is a budgeted show)",
+          r.returncode == 0 and "alpha" in r.stdout and "beta" in r.stdout, (r.returncode, r.stderr[:160]))
+    r = runner("read", NOTE, "First", "x", "y")
+    check(f"{tag}4b past the ceiling the next step is the runnable outline command for THIS note",
+          r.returncode == 1 and r.stderr.rstrip().endswith("— next: vv outline 'Sandbox/vvreadout/Readout Note.md'"), r.stderr)
     r = runner("read")
     check(f"{tag}4d with no note the next step keeps the placeholder (control: placeholder pre-existed)",
           r.stderr.rstrip().endswith("— next: vv outline NOTE"), r.stderr)
@@ -147,7 +151,7 @@ try:
     with open(os.path.join(SB, "Closed Note.md"), "w") as f:
         f.write("---\ntype: test\nstatus: done\n---\n# Closed Note\n\nbody\n")
     affordance_checks("R", lambda *a: vv(*a, env={"VV_ENGINE": "python"}))
-    r = vv("batch", env={"VV_ENGINE": "python"}, stdin=json.dumps({"cmd": "read", "args": [NOTE]}) + "\n")
+    r = vv("batch", env={"VV_ENGINE": "python"}, stdin=json.dumps({"cmd": "read", "args": [NOTE, "First", "x", "y"]}) + "\n")
     check("R4e batch read arity miss carries the same interpolated next-step",
           f"vv outline '{NOTE}'" in r.stdout + r.stderr, (r.stdout + r.stderr)[:300])
     # The INDEXED python arm — the one that returned zero rows for "." (with

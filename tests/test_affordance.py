@@ -334,8 +334,12 @@ def section_b(eng, tag):
         (["appendsec", "A"],               "usage: appendsec takes 3 positional args, got 1", "vv appendsec A SEC TEXT"),
         (["daily-append"],                 "usage: daily-append takes 1 positional args, got 0", "vv daily-append TEXT"),
         (["rename", "A"],                  "usage: rename takes 2 positional args, got 1",  "vv rename A NEWNAME"),
-        (["read", "A"],                    "usage: read takes 2 positional args, got 1",    "vv outline A"),   # control: pre-existing special case (labelled below)
-        (["read", "Work Items/24995 - Some title.md"], "usage: read takes 2 positional args, got 1", "vv outline 'Work Items/24995 - Some title.md'"),  # control
+        # `read A` alone is no longer an arity miss (it is a budgeted show), so
+        # the ceiling is what carries the outline hint now — with the caller's
+        # own note interpolated into it, which is the property under test.
+        (["read", "A", "H1", "x", "y"],    "usage: read takes 1-3 positional args, got 4",  "vv outline A"),
+        (["read", "Work Items/24995 - Some title.md", "H1", "x", "y"], "usage: read takes 1-3 positional args, got 4", "vv outline 'Work Items/24995 - Some title.md'"),
+        (["read", "A", "H1", "H2"],        "usage: read takes one section selector",        "vv outline A"),
         (["read", "A", "NoSuchSec"],        "not-found: no section NoSuchSec",              "vv outline A"),
         (["read", "Dup", "Same"],           "ambiguous: 2 sections are titled 'Same'",      "vv outline Dup"),
         (["props", "status", "Work", "Items"], "usage: props takes 1-2 positional args, got 3", "vv props status"),       # no join into KEY
@@ -347,11 +351,11 @@ def section_b(eng, tag):
         r = eng.run(*args)
         label = " ".join(args)
         # a parenthetical hint is new, and so is the relocate wording (base said "2+")
-        new_text = "(" in prefix or args[0] in ("move", "rename", "trash")
+        new_text = "(" in prefix or args[0] in ("move", "rename", "trash") or (args[0] == "read" and prefix.startswith("usage"))
         check(f"{tag}1 `{label}` message" + ("" if new_text else " (control: error text pre-existed)"),
               r.returncode == 1 and r.stderr.startswith(prefix), f"rc={r.returncode} {r.stderr}")
         # read's ARITY hint pre-existed (control); read's SECTION-miss next is new (it names the note)
-        next_ctl = args[0] == "read" and prefix.startswith("usage")
+        next_ctl = False   # read's outline hint pre-existed, but its usage wording did not
         check(f"{tag}1 `{label}` next" + (" (control: read's outline hint pre-existed)" if next_ctl else ""), next_of(r.stderr) == nxt, r.stderr)
         check(f"{tag}1 `{label}` no traceback (invariant pin)", "Traceback" not in r.stderr, r.stderr)
     r = eng.run("prepend", "A", "--section", "X", "y")
