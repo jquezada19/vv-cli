@@ -43,6 +43,12 @@ CASES = [
      b"# A\r\nx\r\nY"),
     ("patch-crlf-no-trailing-nl-grow", b"# A\r\nx\r\ny", ["patch", "H1", "SHA8"], b"# A\nx\ny\nz\n",
      b"# A\r\nx\r\ny\r\nz"),
+    ("patch-crlf-no-trailing-nl-shrink", b"# A\r\nx\r\ny", ["patch", "H1", "SHA8"], b"# A\nx\n",
+     b"# A\r\nx"),
+    ("patch-lone-cr-final-noop", b"# A\r\nx\r", ["patch", "H1", "SHA8"], b"# A\nx\n",
+     b"# A\r\nx\r"),
+    ("appendsec-multiline-into-crlf", b"# A\r\nx\r\n# B\ny\n", ["appendsec", "H1", "a\nb"], None,
+     b"# A\r\nx\r\na\r\nb\r\n# B\ny\n"),
     # --- append (EOF): separator and terminator come from the LAST terminated line ---
     ("append-eof-mixed-last-crlf", MIXED, ["append", "tail"], None,
      MIXED + b"tail\r\n"),
@@ -50,6 +56,8 @@ CASES = [
      b"# A\r\nx\r\n# B\ny\ntail\n"),
     ("lone-cr-eof", b"# A\nx\r", ["append", "tail"], None,
      b"# A\nx\r\ntail\n"),
+    ("append-eof-multiline-crlf-payload", b"# A\r\nx\n", ["append", "a\r\nb"], None,
+     b"# A\r\nx\na\nb\n"),
     # --- patch: unchanged head/tail keep their bytes; the changed line keeps the original line's terminator ---
     ("patch-mixed-middle",
      b"# One\r\nalpha\r\nbeta\ngamma\r\n", ["patch", "H1", "SHA8"], b"# One\nalpha\nBETA\ngamma\n",
@@ -75,6 +83,8 @@ CASES = [
      b"---\r\na: 1\r\n---\r\n# A\nx\n"),
     ("unset-last-key-mixed-fm-b", b"---\r\na: 1\nb: 2\r\n---\r\n# A\nx\n", ["unset", "b"], None,
      b"---\r\na: 1\n---\r\n# A\nx\n"),
+    ("unset-not-last-key-content-cr", b"---\nb: 2\na: 1\r\r\n---\n# A\nx\n", ["unset", "b"], None,
+     b"---\na: 1\r\r\n---\n# A\nx\n"),
     # --- prepend: inserted line takes the terminator of the closing --- line (or the first line without fm) ---
     ("prepend-after-crlf-fm", b"---\r\ntype: note\r\n---\r\n# A\nx\n", ["prepend", "top"], None,
      b"---\r\ntype: note\r\n---\r\ntop\r\n# A\nx\n"),

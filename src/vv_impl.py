@@ -752,8 +752,14 @@ def splice(lines, start, end, new_lines):
     if middle and first == len(lines) and lines and lines[-1] != "" and not merged[first - 1].endswith("\r") \
             and _insert_cr(lines, len(lines) - 1):
         merged[first - 1] += "\r"                # the old unterminated final line is no longer last: terminate it
-    if cr and middle and not tail and end >= len(lines) and merged[-1].endswith("\r"):
-        merged[-1] = merged[-1][:-1]             # the final element is unterminated; we must not invent a \r there
+    if end >= len(lines) and not ended_with_newline and s == 0 and (middle or p < len(old)) \
+            and merged and merged[-1].endswith("\r"):
+        # The span reaches an unterminated EOF and no original tail is kept, so the final
+        # element is now either a middle line (its \r was added above) or a kept line that
+        # was terminated in the original (its \r was that terminator). Either way it is
+        # unterminated now and must not end in \r. When nothing changed, the final element
+        # is the original final line and its \r is content, so it is left alone.
+        merged[-1] = merged[-1][:-1]
     return "\n".join(merged)
 
 # ---------- commands ----------
@@ -885,7 +891,8 @@ def cmd_appendsec(ref, sid, text, *, _expect_sig=None):
     ins = s["end"]
     while ins > s["start"] and lines[ins - 1].strip() == "":
         ins -= 1
-    atomic_write(fp, splice(lines, ins, ins, [text]), expect_sig=_sig)
+    # the payload's own line breaks are normalised: each of its lines takes the chosen terminator
+    atomic_write(fp, splice(lines, ins, ins, text.replace("\r\n", "\n").split("\n")), expect_sig=_sig)
     out(f"appended to {sid} in {rel(fp)}")
 
 def cmd_append(ref, *rest):
@@ -936,6 +943,7 @@ def cmd_append(ref, *rest):
     _sig = file_sig(fp)
     cur = read_raw(fp)
     eol = _last_eol(cur)
+    text = text.replace("\r\n", "\n").replace("\n", eol)   # the payload's own line breaks take the chosen terminator
     atomic_write(fp, cur + ("" if cur.endswith("\n") or not cur else eol) + text + eol, expect_sig=_sig)
     out(f"appended to {rel(fp)}")
 
@@ -1063,12 +1071,14 @@ def cmd_unset(ref, key):
     kept = [l for l in fm_lines if not pat.match(l)]
     if kept == fm_lines:
         die(f"not-found: no key {key} in {rel(fp)}")
-    if kept and kept[-1].endswith("\r"):
-        if fm_lines[-1].startswith(f"{key}:"):
-            eol2 = "\r\n"                        # the removed last line's terminator becomes the new last line's own
-        kept[-1] = kept[-1][:-1]                 # the new last fm line is followed by eol2, not by its own terminator
-    elif kept and fm_lines[-1].startswith(f"{key}:"):
-        eol2 = "\n"
+    if kept and fm_lines[-1].startswith(f"{key}:"):
+        # the removed line was the last fm line: the new last line's own terminator becomes
+        # eol2. Otherwise the kept lines and eol2 are exactly as read.
+        if kept[-1].endswith("\r"):
+            eol2 = "\r\n"
+            kept[-1] = kept[-1][:-1]
+        else:
+            eol2 = "\n"
     atomic_write(fp, _fm_join(bom, eol1, kept, eol2, tail, body), expect_sig=_sig)
     out(f"unset {key} in {rel(fp)}")
 
@@ -1608,7 +1618,7 @@ def cmd_daily_append(text):
         ins = nxt
         while ins > s["start"] and lines[ins - 1].strip() == "":
             ins -= 1
-        atomic_write(fp, splice(lines, ins, ins, [text]), expect_sig=_sig)
+        atomic_write(fp, splice(lines, ins, ins, text.replace("\r\n", "\n").split("\n")), expect_sig=_sig)
         # sid/title come from the note under our own heading regex, not from
         # caller input, so this is printed raw like appendsec's `sid` — there
         # is no stdout escaper in this codebase (die()'s _esc is stderr-only).
@@ -1616,6 +1626,7 @@ def cmd_daily_append(text):
         out(f"appended to {s['id']} ({s['title']}) in {rel(fp)}")
         return
     sep = "" if cur.endswith(("\n", "\r\n")) or not cur else eol
+    text = text.replace("\r\n", "\n").replace("\n", eol)   # the payload's own line breaks take the chosen terminator
     atomic_write(fp, cur + sep + text + eol, expect_sig=_sig)
     _sel = "eof"
     out(f"appended to {rel(fp)} (no Today section — appended at end)")

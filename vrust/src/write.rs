@@ -421,10 +421,14 @@ fn splice(lines: &[&str], start: usize, end: usize, new_lines: &[String]) -> Str
     {
         merged[first - 1].push('\r'); // the old unterminated final line is no longer last
     }
-    if cr && !middle_empty && tail_empty && end >= lines.len() {
+    // The span reaches an unterminated EOF and no original tail is kept: the final element
+    // is a middle line (its \r was added above) or a kept line that was terminated in the
+    // original (its \r was that terminator), and it is unterminated now. When nothing
+    // changed it is the original final line and its \r is content.
+    if end >= lines.len() && !ended_with_newline && tail_empty && (!middle_empty || p < old.len()) {
         if let Some(last) = merged.last_mut() {
             if last.ends_with('\r') {
-                last.pop(); // the final element is unterminated; never invent a \r there
+                last.pop();
             }
         }
     }
@@ -564,13 +568,15 @@ fn cmd_unset(vault: &Path, args: &[String]) -> Outcome {
     }
     let removed_last = p.fm_lines.last().is_some_and(|l| l.starts_with(&prefix));
     p.fm_lines = kept;
-    if let Some(last) = p.fm_lines.last_mut() {
-        let cr = last.ends_with('\r');
-        if removed_last {
+    // only when the removed line was the last fm line does the new last line's own
+    // terminator become eol2; otherwise kept lines and eol2 are exactly as read
+    if removed_last {
+        if let Some(last) = p.fm_lines.last_mut() {
+            let cr = last.ends_with('\r');
             p.eol2 = if cr { "\r\n" } else { "\n" }.to_string();
-        }
-        if cr {
-            last.pop(); // followed by eol2, not by its own terminator
+            if cr {
+                last.pop();
+            }
         }
     }
     let new_content = fm_join(&p);
@@ -611,7 +617,9 @@ fn cmd_append(vault: &Path, args: &[String]) -> Outcome {
     } else {
         eol
     };
-    let new_content = format!("{}{}{}{}", cur, sep, text_arg, eol);
+    // the payload's own line breaks take the chosen terminator
+    let payload = text_arg.replace("\r\n", "\n").replace('\n', eol);
+    let new_content = format!("{}{}{}{}", cur, sep, payload, eol);
     if !atomic_write(&fp, &new_content, Some(sig)) {
         return Outcome::Fallback;
     }
@@ -652,7 +660,13 @@ fn cmd_appendsec(vault: &Path, args: &[String]) -> Outcome {
     while ins > s.start && lines[ins - 1].trim().is_empty() {
         ins -= 1;
     }
-    let new_content = splice(&lines, ins, ins, std::slice::from_ref(text_arg));
+    // the payload's own line breaks are normalised: each of its lines takes the chosen terminator
+    let payload: Vec<String> = text_arg
+        .replace("\r\n", "\n")
+        .split('\n')
+        .map(str::to_string)
+        .collect();
+    let new_content = splice(&lines, ins, ins, &payload);
     if !atomic_write(&fp, &new_content, Some(sig)) {
         return Outcome::Fallback;
     }
