@@ -98,7 +98,7 @@ note_bytes("Shapes/mixed.md",
 note_bytes("Shapes/mixed-section.md", b"# One\r\nalpha\r\nbeta\ngamma\r\n# Two\nx\n")
 note_bytes("Shapes/all-crlf.md", b"---\r\ntype: note\r\n---\r\n# A\r\nx\r\n")
 note_bytes("Shapes/no-trailing-nl-crlf.md", b"# A\r\nx\r\n## B\r\ny")
-note_bytes("Shapes/bom-crlf.md", "﻿".encode("utf-8") + b"---\r\ntype: note\r\n---\r\n# A\r\nx\r\n")
+note_bytes("Shapes/bom-crlf.md", b"\xef\xbb\xbf" + b"---\r\ntype: note\r\n---\r\n# A\r\nx\r\n")
 note_bytes("Shapes/lone-cr.md", b"# A\nline with a lone \r in it\nx\n")
 note_bytes("Shapes/fm-lf-body-crlf.md", b"---\ntype: note\n---\n# A\r\nx\r\n")
 

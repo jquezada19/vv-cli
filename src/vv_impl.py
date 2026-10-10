@@ -1064,7 +1064,11 @@ def cmd_unset(ref, key):
     if kept == fm_lines:
         die(f"not-found: no key {key} in {rel(fp)}")
     if kept and kept[-1].endswith("\r"):
+        if fm_lines[-1].startswith(f"{key}:"):
+            eol2 = "\r\n"                        # the removed last line's terminator becomes the new last line's own
         kept[-1] = kept[-1][:-1]                 # the new last fm line is followed by eol2, not by its own terminator
+    elif kept and fm_lines[-1].startswith(f"{key}:"):
+        eol2 = "\n"
     atomic_write(fp, _fm_join(bom, eol1, kept, eol2, tail, body), expect_sig=_sig)
     out(f"unset {key} in {rel(fp)}")
 
@@ -2345,7 +2349,7 @@ def cmd_prepend(ref, text):
         eol = tail if tail in ("\n", "\r\n") else _last_eol(cur)   # the closing --- line's own terminator
         ins = text.replace("\r\n", "\n").replace("\n", eol) + eol
         head_len = len(cur) - len(body)
-        new = cur[:head_len] + ins + body
+        new = cur[:head_len] + ("" if tail else eol) + ins + body
     atomic_write(fp, new, expect_sig=_sig)
     out(f"prepended to {rel(fp)}")
 

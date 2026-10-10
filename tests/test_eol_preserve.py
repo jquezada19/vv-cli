@@ -71,12 +71,21 @@ CASES = [
      b"---\r\ntype: note\r\n---\r\n# A\nx\n"),
     ("set-no-fm-crlf-body", b"# A\r\nx\r\n", ["set", "type", "note"], None,
      b"---\r\ntype: note\r\n---\r\n# A\r\nx\r\n"),
+    ("unset-last-key-mixed-fm-a", b"---\r\na: 1\r\nb: 2\n---\r\n# A\nx\n", ["unset", "b"], None,
+     b"---\r\na: 1\r\n---\r\n# A\nx\n"),
+    ("unset-last-key-mixed-fm-b", b"---\r\na: 1\nb: 2\r\n---\r\n# A\nx\n", ["unset", "b"], None,
+     b"---\r\na: 1\n---\r\n# A\nx\n"),
     # --- prepend: inserted line takes the terminator of the closing --- line (or the first line without fm) ---
     ("prepend-after-crlf-fm", b"---\r\ntype: note\r\n---\r\n# A\nx\n", ["prepend", "top"], None,
      b"---\r\ntype: note\r\n---\r\ntop\r\n# A\nx\n"),
     ("prepend-no-fm-lf", b"# A\nx\r\n", ["prepend", "top"], None,
      b"top\n# A\nx\r\n"),
+    ("prepend-fm-closing-at-eof", b"---\na: 1\n---", ["prepend", "top"], None,
+     b"---\na: 1\n---\ntop\n"),
 ]
+
+# first argv words the native binary serves itself; anything else may fall back to python
+NATIVE_SERVED = {"set", "unset", "append", "appendsec", "patch"}
 
 
 def sha8_of(engine, vault, note, sid):
@@ -90,7 +99,14 @@ def sha8_of(engine, vault, note, sid):
     raise AssertionError(f"no {sid} in outline: {r.stdout!r} {r.stderr!r}")
 
 
-def run_case(engine, name, fixture, argv, stdin, expected):
+def run_case(engine, name, fixture, argv, stdin, expected, env_extra=None):
+    try:
+        return _run_case(engine, name, fixture, argv, stdin, expected, env_extra or {})
+    except AssertionError as e:
+        return False, f"harness: {e}"
+
+
+def _run_case(engine, name, fixture, argv, stdin, expected, env_extra):
     vault = tempfile.mkdtemp(prefix="vv-eol-")
     try:
         os.makedirs(os.path.join(vault, "Standups"))
@@ -102,7 +118,7 @@ def run_case(engine, name, fixture, argv, stdin, expected):
             argv[2] = sha8_of(engine, vault, note, argv[1])
         cmd = engine + [argv[0], note] + argv[1:]
         r = subprocess.run(cmd, input=stdin, capture_output=True,
-                           env=dict(os.environ, VV_VAULT=vault, VV_NO_METRICS="1"))
+                           env=dict(os.environ, VV_VAULT=vault, VV_NO_METRICS="1", **env_extra))
         with open(os.path.join(vault, note), "rb") as f:
             got = f.read()
         ok = r.returncode == 0 and got == expected
@@ -118,10 +134,15 @@ def main():
         engines.append(("native", VR))
     else:
         print("SKIP native: vrust binary not built")
-    for eng_name, eng in engines:
+    runs = [(en, e, {}, None) for en, e in engines]
+    if len(engines) > 1:
+        runs.append(("native-only", VR, {"VV_PY_ENTRY": "/nonexistent/vv.py"}, NATIVE_SERVED))
+    for eng_name, eng, env_extra, only in runs:
         for name, fixture, argv, stdin, expected in CASES:
+            if only is not None and argv[0] not in only:
+                continue
             n += 1
-            ok, info = run_case(eng, name, fixture, argv, stdin, expected)
+            ok, info = run_case(eng, name, fixture, argv, stdin, expected, env_extra)
             print(("PASS " if ok else "FAIL ") + f"{eng_name}: {name}" + ("" if ok else f"\n   {info}"))
             if not ok:
                 fails.append(f"{eng_name}: {name}")

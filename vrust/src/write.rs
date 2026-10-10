@@ -562,9 +562,14 @@ fn cmd_unset(vault: &Path, args: &[String]) -> Outcome {
     if kept.len() == p.fm_lines.len() {
         return Outcome::Fallback; // python: die "no key"
     }
+    let removed_last = p.fm_lines.last().is_some_and(|l| l.starts_with(&prefix));
     p.fm_lines = kept;
     if let Some(last) = p.fm_lines.last_mut() {
-        if last.ends_with('\r') {
+        let cr = last.ends_with('\r');
+        if removed_last {
+            p.eol2 = if cr { "\r\n" } else { "\n" }.to_string();
+        }
+        if cr {
             last.pop(); // followed by eol2, not by its own terminator
         }
     }
