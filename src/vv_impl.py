@@ -1254,10 +1254,10 @@ def cmd_board(folder, *filters):
     it = iter(filters)
     for f in it:
         if f.startswith("--"):
-            key, eq, val = f[2:].partition("=")
+            key, eq, val = f.lstrip("-").partition("=")
             if not eq:
                 val = next(it, None)
-                if val is None:
+                if val is None or val.startswith("--"):
                     die(f"usage: board filter {_q(f, 'KEY')} needs a value",
                         nxt=f"vv board {_q(folder, 'FOLDER')} {_q(key + '=VALUE', 'KEY=VALUE')}")
             if key in GLOBAL_FLAGS or not key:

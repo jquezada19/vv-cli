@@ -396,6 +396,12 @@ def section_b(eng, tag):
     r = eng.run("board", "Work Items", "--status")
     check(f"{tag}6 board --status without a value is a usage refusal",
           r.returncode == 1 and r.stderr.startswith("usage:") and "next: vv board" in r.stderr, (r.returncode, r.stdout, r.stderr))
+    r = eng.run("board", "Work Items", "--status", "--type")
+    check(f"{tag}6 board refuses a flag consumed as another flag's value",
+          r.returncode == 1 and r.stderr.startswith("usage:") and "next: vv board" in r.stderr, (r.returncode, r.stdout, r.stderr))
+    r = eng.run("board", "Work Items", "---status=open")
+    check(f"{tag}6 board folds extra leading dashes into the key",
+          r.returncode == 0 and "24995" in r.stdout and "(0 notes)" not in r.stdout, (r.returncode, r.stdout, r.stderr))
     r = eng.run("board", "Work Items", "--limit=5")
     check(f"{tag}6 board refuses a global flag as a filter key",
           r.returncode == 1 and r.stderr.startswith("usage:"), (r.returncode, r.stdout, r.stderr))
