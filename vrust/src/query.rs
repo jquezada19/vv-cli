@@ -159,6 +159,9 @@ fn cmd_board(args: &[String], vault: &Path, t0: Instant) -> Outcome {
     let folder = &args[0];
     let mut filters: Vec<(String, String)> = Vec::new();
     for f in &args[1..] {
+        if f.starts_with("--") {
+            return Outcome::Fallback; // python owns the flag-shaped aliases and their refusals
+        }
         match f.find('=') {
             Some(i) => filters.push((f[..i].to_string(), f[i + 1..].to_string())),
             None => return Outcome::Fallback, // python owns the usage error for a non-KEY=VALUE filter
