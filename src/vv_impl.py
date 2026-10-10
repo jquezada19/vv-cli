@@ -1249,7 +1249,6 @@ def cmd_board(folder, *filters):
     # vv's — capture exit codes unpiped.)
     # `--KEY=VALUE` and `--KEY VALUE` are the same filter as `KEY=VALUE`; a flag
     # spelling must never become a literal "--KEY" key that matches nothing.
-    GLOBAL_FLAGS = ("jsonl", "limit", "vault")
     norm = []
     it = iter(filters)
     for f in it:
@@ -1260,9 +1259,9 @@ def cmd_board(folder, *filters):
                 if val is None or val.startswith("--"):
                     die(f"usage: board filter {_q(f, 'KEY')} needs a value",
                         nxt=f"vv board {_q(folder, 'FOLDER')} {_q(key + '=VALUE', 'KEY=VALUE')}")
-            if key in GLOBAL_FLAGS or not key:
-                die(f"usage: board filters are KEY=VALUE, got {_q(f, 'KEY')}",
-                    nxt=f"vv board {_q(folder, 'FOLDER')} KEY=VALUE")
+                if not key:
+                    die(f"usage: board filters are KEY=VALUE, got {_q(f, 'KEY')}",
+                        nxt=f"vv board {_q(folder, 'FOLDER')} KEY=VALUE")
             norm.append(f"{key}={val}")
         else:
             norm.append(f)

@@ -403,8 +403,11 @@ def section_b(eng, tag):
     check(f"{tag}6 board folds extra leading dashes into the key",
           r.returncode == 0 and "24995" in r.stdout and "(0 notes)" not in r.stdout, (r.returncode, r.stdout, r.stderr))
     r = eng.run("board", "Work Items", "--limit=5")
-    check(f"{tag}6 board refuses a global flag as a filter key",
-          r.returncode == 1 and r.stderr.startswith("usage:"), (r.returncode, r.stdout, r.stderr))
+    check(f"{tag}6 board --limit=5 folds to the plain filter limit=5 (no fixture has it: 0 notes, exit 0, as on main)",
+          r.returncode == 0 and "(0 notes)" in r.stdout, (r.returncode, r.stdout, r.stderr))
+    r = eng.run("board", "Work Items", "--=x")
+    check(f"{tag}6 board --=x folds to the empty-key filter =x (0 notes, exit 0, as on main)",
+          r.returncode == 0 and "(0 notes)" in r.stdout, (r.returncode, r.stdout, r.stderr))
 
 def section_c(eng, tag):
     """C — id-prefix resolution."""
