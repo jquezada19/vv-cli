@@ -36,6 +36,12 @@ CASES = [
     # --- no trailing newline: the unterminated final line gains its neighbour's terminator, nothing else moves ---
     ("appendsec-no-trailing-nl", b"# A\r\nx\r\n## B\ny", ["appendsec", "H2", "z"], None,
      b"# A\r\nx\r\n## B\ny\nz"),
+    ("appendsec-crlf-no-trailing-nl-last", b"# A\r\nx\r\n## B\r\ny", ["appendsec", "H2", "z"], None,
+     b"# A\r\nx\r\n## B\r\ny\r\nz"),
+    ("patch-crlf-no-trailing-nl-last-line", b"# A\r\nx\r\ny", ["patch", "H1", "SHA8"], b"# A\nx\nY\n",
+     b"# A\r\nx\r\nY"),
+    ("patch-crlf-no-trailing-nl-grow", b"# A\r\nx\r\ny", ["patch", "H1", "SHA8"], b"# A\nx\ny\nz\n",
+     b"# A\r\nx\r\ny\r\nz"),
     # --- append (EOF): separator and terminator come from the LAST terminated line ---
     ("append-eof-mixed-last-crlf", MIXED, ["append", "tail"], None,
      MIXED + b"tail\r\n"),

@@ -741,12 +741,16 @@ def splice(lines, start, end, new_lines):
     head = old[:p]
     tail = old[len(old) - s:] if s else []
     middle = body[p:len(body) - s]
-    if p < len(old_c) - s:
-        cr = _elem_cr(lines, start + p)          # first changed original line
+    first = start + p
+    if p < len(old_c) - s and first < len(lines) - 1:
+        cr = _elem_cr(lines, first)              # first changed original line, itself terminated
     else:
-        cr = _insert_cr(lines, start + p)        # pure insertion
+        # pure insertion, or the change starts at the unterminated final line: neighbour rule
+        cr = _insert_cr(lines, first)
     middle = [m + "\r" if cr else m for m in middle]
     merged = list(lines[:start]) + head + middle + tail + list(lines[end:])
+    if middle and first == len(lines) and lines[-1] != "" and _insert_cr(lines, len(lines) - 1):
+        merged[first - 1] += "\r"                # the old unterminated final line is no longer last: terminate it
     if merged and merged[-1].endswith("\r") and not (lines and lines[-1].endswith("\r")):
         merged[-1] = merged[-1][:-1]             # the final element is unterminated; we must not invent a \r there
     return "\n".join(merged)
