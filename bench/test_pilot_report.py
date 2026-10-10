@@ -212,6 +212,28 @@ def main():
         check("abort does not fall through to the silent no-ops message",
               "no vault ops logged" not in proc.stdout, proc.stdout)
 
+    # dark denominator: vv rows on a day with NO legacy rows of any kind -> n/a, never 100%
+    dark_vv = [{"ts": "2026-10-05T10:00:00", "op": "read", "ms": 3, "out_bytes": 10,
+                "exit": 0, "ver": "3.1.0", "engine": "native"},
+               {"ts": "2026-10-06T10:00:00", "op": "read", "ms": 3, "out_bytes": 10,
+                "exit": 0, "ver": "3.1.0", "engine": "native"}]
+    dark_legacy = [{"ts": "2026-10-06T09:00:00", "route": "legacy", "op": "alive",
+                    "eligible": False, "schema": 2}]
+    with tempfile.TemporaryDirectory(prefix="vv-pilot-report-dark-") as tmp:
+        mp, lp = os.path.join(tmp, "vv.jsonl"), os.path.join(tmp, "legacy.jsonl")
+        with open(mp, "w") as f:
+            f.write("\n".join(json.dumps(r) for r in dark_vv) + "\n")
+        with open(lp, "w") as f:
+            f.write("\n".join(json.dumps(r) for r in dark_legacy) + "\n")
+        out = run_report("--since 2026-10-05 --until 2026-10-07 --criteria", mp, lp)
+        dark_line = next((l for l in out.splitlines() if "denominator dark" in l), "")
+        check("dark day is reported n/a, not 100%",
+              "n/a (denominator dark" in out and "2026-10-05" in dark_line, out)
+        check("heartbeat-only day counts as covered, not dark",
+              bool(dark_line) and "2026-10-06" not in dark_line, out)
+        check("sha8 is retired with the written reason",
+              "sha8: retired" in out and "FAILED at 0" in out, out)
+
     print(("ALL PASS (pilot report: %d)" % checks_run) if not fails
           else "FAILURES: " + ", ".join(fails))
     return 1 if fails else 0

@@ -10,7 +10,7 @@ Answers the pilot questions from real day-to-day usage (not bench fixtures):
 Two sinks:
   ~/.claude/metrics/vv.jsonl         -- vv's own ops (self-logged)
   ~/.claude/metrics/vv-legacy.jsonl  -- vault ops that took the OLD route,
-                                        captured by the vv-pilot-legacy-logger
+                                        captured by the vv-legacy-logger
                                         hook. Without it the adoption number has
                                         a numerator and no denominator.
 
@@ -240,8 +240,11 @@ def print_sel_census(rows):
 
 
 def per_day_eligible_adoption_min(rows, legacy, restrict_days=None):
-    """min over active days of (vv rows / (vv rows + eligible legacy rows)),
-    as a percentage -- None if there is no day with any eligible activity.
+    """(min over covered active days of vv/(vv+eligible legacy) as a percentage,
+    list of DARK days). A day is dark when vv has rows but the legacy sink has
+    no row of any kind -- not even the hook's heartbeat -- so the denominator was
+    not being observed. Dark days are excluded from the min and reported, never
+    counted as 100%. None for the min if no covered day had eligible activity.
 
     `restrict_days`, when given, limits the days considered to that set --
     the caller uses this to keep the legacy side scoped to the same date
@@ -249,17 +252,21 @@ def per_day_eligible_adoption_min(rows, legacy, restrict_days=None):
     `ver`), so a legacy-only day with no matching vv activity can't drag the
     min down (or a vv-only day inflate it) outside that window."""
     vv_by_day = collections.Counter(r["ts"][:10] for r in rows)
+    legacy_any = collections.Counter(r["ts"][:10] for r in legacy)
     legacy_by_day = collections.Counter(
         r["ts"][:10] for r in legacy if is_eligible_legacy(r))
     days = set(vv_by_day) | set(legacy_by_day)
     if restrict_days is not None:
         days &= restrict_days
-    pcts = []
-    for d in days:
+    pcts, dark = [], []
+    for d in sorted(days):
+        if vv_by_day.get(d, 0) and not legacy_any.get(d, 0):
+            dark.append(d)
+            continue
         tot = vv_by_day.get(d, 0) + legacy_by_day.get(d, 0)
         if tot:
             pcts.append(100 * vv_by_day.get(d, 0) / tot)
-    return min(pcts) if pcts else None
+    return (min(pcts) if pcts else None), dark
 
 
 def print_criteria(rows, legacy):
@@ -287,8 +294,11 @@ def print_criteria(rows, legacy):
     # row must not pad the numerator, and a day with no ver>=3.1.0 vv traffic
     # must not be pulled in by legacy volume alone.
     measured_days = {r["ts"][:10] for r in measured}
-    note_touch = per_day_eligible_adoption_min(measured, legacy, restrict_days=measured_days)
-    note_touch_s = f"{note_touch:.0f}%" if note_touch is not None else "n/a"
+    note_touch, dark = per_day_eligible_adoption_min(measured, legacy, restrict_days=measured_days)
+    if dark:
+        note_touch_s = f"n/a (denominator dark {len(dark)} day(s): {', '.join(dark)}) — FAIL"
+    else:
+        note_touch_s = "n/a" if note_touch is None else f"{note_touch:.0f}%"
 
     da_rows = [r for r in measured
                if r["op"] == "daily-append" and r.get("exit", 0) == 0 and r.get("sel")]
@@ -302,7 +312,10 @@ def print_criteria(rows, legacy):
     print(f"| set not-found rows | baseline 15 | target 0 | {set_nf} |")
     print(f"| daily-append Today landings | baseline n/a | target 100% | {da_landing} |")
     print(f"| note-touching adoption | baseline 80–99% | target ≥ 85% every active day | {note_touch_s} |")
-    print(f"| read selector kinds (sel) | baseline unmeasured | target flag, sha8, prefix each > 0 | {sel_summary} |")
+    print(f"| read selector kinds (sel) | baseline unmeasured | target flag, prefix each > 0 (sha8: retired) | {sel_summary} |")
+    print("sha8 criterion: FAILED at 0 in the 3.1 window; retired for 3.2 — sha8 is the CAS token "
+          "patch consumes, not a navigation selector; agents address sections by flag and prefix. "
+          "The selector stays; the count stays informational.")
 
 
 def main():
