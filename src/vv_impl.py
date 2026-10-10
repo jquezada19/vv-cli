@@ -749,9 +749,10 @@ def splice(lines, start, end, new_lines):
         cr = _insert_cr(lines, first)
     middle = [m + "\r" if cr else m for m in middle]
     merged = list(lines[:start]) + head + middle + tail + list(lines[end:])
-    if middle and first == len(lines) and lines[-1] != "" and _insert_cr(lines, len(lines) - 1):
+    if middle and first == len(lines) and lines and lines[-1] != "" and not merged[first - 1].endswith("\r") \
+            and _insert_cr(lines, len(lines) - 1):
         merged[first - 1] += "\r"                # the old unterminated final line is no longer last: terminate it
-    if merged and merged[-1].endswith("\r") and not (lines and lines[-1].endswith("\r")):
+    if cr and middle and not tail and end >= len(lines) and merged[-1].endswith("\r"):
         merged[-1] = merged[-1][:-1]             # the final element is unterminated; we must not invent a \r there
     return "\n".join(merged)
 

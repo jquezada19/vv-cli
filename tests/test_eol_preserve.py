@@ -38,6 +38,7 @@ CASES = [
      b"# A\r\nx\r\n## B\ny\nz"),
     ("appendsec-crlf-no-trailing-nl-last", b"# A\r\nx\r\n## B\r\ny", ["appendsec", "H2", "z"], None,
      b"# A\r\nx\r\n## B\r\ny\r\nz"),
+    ("appendsec-crlf-lone-cr-final", b"# A\r\nx\r", ["appendsec", "H1", "z"], None, b"# A\r\nx\r\nz"),
     ("patch-crlf-no-trailing-nl-last-line", b"# A\r\nx\r\ny", ["patch", "H1", "SHA8"], b"# A\nx\nY\n",
      b"# A\r\nx\r\nY"),
     ("patch-crlf-no-trailing-nl-grow", b"# A\r\nx\r\ny", ["patch", "H1", "SHA8"], b"# A\nx\ny\nz\n",
