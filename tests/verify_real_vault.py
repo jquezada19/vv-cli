@@ -109,7 +109,9 @@ real = list(vv.md_files())
 random.Random(11).shuffle(real)
 tmp = tempfile.mkdtemp(prefix="vv-verify-")
 def run(*a, stdin=None):
-    return subprocess.run([sys.executable, VV, *a], capture_output=True, text=True,
+    # Byte-exact I/O: text mode applies universal newlines, which turns a lone
+    # \r inside a note into \n and makes the harness patch different bytes.
+    return subprocess.run([sys.executable, VV, *a], capture_output=True,
                           input=stdin, env=dict(os.environ, VV_VAULT=tmp))
 bad_e2e, n_e2e = [], 0
 t0 = time.perf_counter()
@@ -121,13 +123,14 @@ for idx, src in enumerate(real[: args.sample]):
     r = run("outline", name)
     if r.returncode != 0:
         continue
-    for row in [l.split("\t") for l in r.stdout.strip().split("\n") if l]:
+    rows = [l.split("\t") for l in r.stdout.decode("utf-8", "replace").strip().split("\n") if l]
+    for row in rows:
         rr = run("read", name, row[0])
         if rr.returncode != 0:
             continue
-        body = rr.stdout[: rr.stdout.rfind("\n--sha8:")]
-        pr = run("patch", name, row[0], row[4], stdin=body + "\n")
-        if pr.returncode == 1 and "frontmatter" in pr.stderr:
+        body = rr.stdout[: rr.stdout.rfind(b"\n--sha8:")]
+        pr = run("patch", name, row[0], row[4], stdin=body + b"\n")
+        if pr.returncode == 1 and b"frontmatter" in pr.stderr:
             continue
         n_e2e += 1
         if open(target, newline="", encoding="utf-8", errors="replace").read() != original:

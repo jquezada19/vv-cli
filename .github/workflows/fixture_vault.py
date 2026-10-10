@@ -16,6 +16,11 @@ def note(rel, text):
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(text, encoding="utf-8")
 
+def note_bytes(rel, data):
+    p = root / rel
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_bytes(data)
+
 note("Hub.md", """---
 type: moc
 status: open
@@ -85,6 +90,17 @@ status: open
 
 # {{title}}
 """)
+
+# Line-ending shapes the real vault contains (pasted documents). The live-vault
+# round-trip and the write suites must see these in CI, not only on a laptop.
+note_bytes("Shapes/mixed.md",
+           b"---\r\ntype: note\r\n---\r\n# One\r\nalpha\r\nbeta\r\n# Two\nlf-a\nlf-b\n# Three\r\ngamma\r\n")
+note_bytes("Shapes/mixed-section.md", b"# One\r\nalpha\r\nbeta\ngamma\r\n# Two\nx\n")
+note_bytes("Shapes/all-crlf.md", b"---\r\ntype: note\r\n---\r\n# A\r\nx\r\n")
+note_bytes("Shapes/no-trailing-nl-crlf.md", b"# A\r\nx\r\n## B\r\ny")
+note_bytes("Shapes/bom-crlf.md", "﻿".encode("utf-8") + b"---\r\ntype: note\r\n---\r\n# A\r\nx\r\n")
+note_bytes("Shapes/lone-cr.md", b"# A\nline with a lone \r in it\nx\n")
+note_bytes("Shapes/fm-lf-body-crlf.md", b"---\ntype: note\n---\n# A\r\nx\r\n")
 
 print(f"fixture vault at {root}")
 for p in sorted(root.rglob("*.md")):
