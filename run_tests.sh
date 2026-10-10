@@ -97,6 +97,7 @@ run "engine parity"      python3 tests/test_engine_parity.py
 run "native read path"   python3 tests/test_native_readpath.py
 run "native graph"        python3 tests/test_graph_parity.py
 run "native write"        python3 tests/test_write_parity.py
+run "eol preserve"        python3 tests/test_eol_preserve.py
 run "native query"        python3 tests/test_query_parity.py
 run "full parity"         python3 tests/test_full_parity.py
 run "phase2 cache+patch"  python3 tests/test_phase2.py

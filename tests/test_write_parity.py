@@ -39,6 +39,9 @@ FIXTURES = {
     "append-target-crlf.md": "# Sec\r\nfirst\r\n## Sub\r\nsecond\r\n",
     "append-no-trailing-nl.md": "# Sec\nno newline at eof",
     "empty.md": "",
+    "mixed.md": "---\r\ntype: note\r\n---\r\n# One\r\nalpha\r\nbeta\r\n# Two\nlf-a\nlf-b\n# Three\r\ngamma\r\n",
+    "mixed-section.md": "# One\r\nalpha\r\nbeta\ngamma\r\n# Two\nx\n",
+    "fm-lf-body-crlf.md": "---\ntype: note\n---\n# A\r\nx\r\n",
 }
 
 # (cmd, args...) cases exercised against copies of the fixture vault.
@@ -116,6 +119,15 @@ CASES = [
     ("appendsec", ["append-target-crlf", "H1", "crlf sec text"]),
     # --- appendsec: missing section -> fallback ---
     ("appendsec", ["append-target", "H9", "text"]),
+    # --- mixed line endings: both engines must agree byte-for-byte ---
+    ("appendsec", ["mixed", "H2", "new"]),
+    ("appendsec", ["mixed", "H1", "new"]),
+    ("appendsec", ["mixed-section", "H1", "new"]),
+    ("append", ["mixed", "tail"]),
+    ("set", ["mixed", "status", "open"]),
+    ("set", ["mixed", "type", "todo"]),
+    ("unset", ["mixed", "type"]),
+    ("set", ["fm-lf-body-crlf", "status", "open"]),
 ]
 
 

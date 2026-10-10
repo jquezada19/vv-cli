@@ -635,8 +635,46 @@ def _read_lossy(fp):
             _walk_errors.append(r)
         return None
 
-def eol_of(text):
-    return "\r\n" if "\r\n" in text else "\n"
+def _elem_cr(lines, i):
+    """Does element i of a split("\\n") list end its line with CRLF? The final
+    element is unterminated by construction, so it never counts."""
+    return i < len(lines) - 1 and lines[i].endswith("\r")
+
+def _insert_cr(lines, at):
+    """Terminator style for lines inserted before index `at`: the nearest
+    terminated line above, else the nearest below, else LF."""
+    last_term = len(lines) - 1            # elements with index < last_term are terminated
+    above = min(at, last_term) - 1
+    if above >= 0:
+        return lines[above].endswith("\r")
+    if at < last_term:
+        return lines[at].endswith("\r")
+    return False
+
+def _last_eol(text):
+    """The terminator of the last terminated line in `text`, else LF."""
+    i = text.rfind("\n")
+    if i < 0:
+        return "\n"
+    return "\r\n" if i > 0 and text[i - 1] == "\r" else "\n"
+
+def _fm_parts(text):
+    """Frontmatter as terminator-carrying pieces, or None when there is none:
+    bom, eol1 (after the opening ---), fm_lines (split on \\n, elements keep
+    their \\r), eol2 (before the closing ---), tail (after the closing ---),
+    body. _fm_join(*parts) == text for any note that has frontmatter."""
+    fm, body, tail, bom = split_fm_full(text)
+    if fm is None:
+        return None
+    head = text[:len(text) - len(body)]          # bom + --- + eol1 + fm + eol2 + --- + tail
+    after_open = head[len(bom) + 3:]
+    eol1 = "\r\n" if after_open.startswith("\r\n") else "\n"
+    rest = after_open[len(eol1) + len(fm):]      # eol2 + --- + tail
+    eol2 = rest[:len(rest) - 3 - len(tail)]
+    return bom, eol1, fm.split("\n"), eol2, tail, body
+
+def _fm_join(bom, eol1, fm_lines, eol2, tail, body):
+    return bom + "---" + eol1 + "\n".join(fm_lines) + eol2 + "---" + tail + body
 
 def atomic_write(fp, content, expect_sig=None):
     # follow a symlink to its real target so we replace the file, not the link
@@ -676,26 +714,52 @@ def splice(lines, start, end, new_lines):
     """Replace lines[start:end] with `new_lines` (bare content, no line terminators)
     and return the file text.
 
-    Terminators are never invented or dropped: the file's EOL style is applied to the
-    inserted lines, and the file's EOF-newline property is preserved exactly as it was.
-    `lines` is a split on "\\n", so on a CRLF file every element except the last carries
-    a trailing "\\r" and a file ending in a newline has "" as its last element."""
-    crlf = eol_of("\n".join(lines)) == "\r\n"
+    Bytes outside the replaced span are copied. Inside it, lines that match the
+    old span's head or tail (compared without their \\r) keep their original
+    bytes; the changed middle takes the terminator of the first changed original
+    line, or of the nearest terminated neighbour when the span was empty. The
+    file's EOF-newline property is preserved exactly as it was. `lines` is a
+    split on "\\n", so a CRLF line carries a trailing "\\r" and a file ending in
+    a newline has "" as its last element."""
     ended_with_newline = bool(lines) and lines[-1] == ""
+    old = list(lines[start:end])
     body = [b.rstrip("\r") for b in new_lines]
     if end >= len(lines):
         # the replaced span reaches EOF: restore the file's original EOF-newline property
-        # only the terminator is normalized — interior blank lines are content and are kept
         if ended_with_newline:
             if not body or body[-1] != "":
                 body.append("")
         elif body and body[-1] == "":
             body.pop()
-    merged = list(lines[:start]) + body + list(lines[end:])
-    if crlf:
-        # every element except the final one is followed by a newline -> gets the \r
-        merged = [(m if m.endswith("\r") else m + "\r") if i < len(merged) - 1 else m.rstrip("\r")
-                  for i, m in enumerate(merged)]
+    old_c = [o.rstrip("\r") for o in old]
+    p = 0
+    while p < len(old_c) and p < len(body) and old_c[p] == body[p]:
+        p += 1
+    s = 0
+    while s < len(old_c) - p and s < len(body) - p and old_c[-1 - s] == body[-1 - s]:
+        s += 1
+    head = old[:p]
+    tail = old[len(old) - s:] if s else []
+    middle = body[p:len(body) - s]
+    first = start + p
+    if p < len(old_c) - s and first < len(lines) - 1:
+        cr = _elem_cr(lines, first)              # first changed original line, itself terminated
+    else:
+        # pure insertion, or the change starts at the unterminated final line: neighbour rule
+        cr = _insert_cr(lines, first)
+    middle = [m + "\r" if cr else m for m in middle]
+    merged = list(lines[:start]) + head + middle + tail + list(lines[end:])
+    if middle and first == len(lines) and lines and lines[-1] != "" and not merged[first - 1].endswith("\r") \
+            and _insert_cr(lines, len(lines) - 1):
+        merged[first - 1] += "\r"                # the old unterminated final line is no longer last: terminate it
+    if end >= len(lines) and not ended_with_newline and s == 0 and (middle or p < len(old)) \
+            and merged and merged[-1].endswith("\r"):
+        # The span reaches an unterminated EOF and no original tail is kept, so the final
+        # element is now either a middle line (its \r was added above) or a kept line that
+        # was terminated in the original (its \r was that terminator). Either way it is
+        # unterminated now and must not end in \r. When nothing changed, the final element
+        # is the original final line and its \r is content, so it is left alone.
+        merged[-1] = merged[-1][:-1]
     return "\n".join(merged)
 
 # ---------- commands ----------
@@ -827,7 +891,8 @@ def cmd_appendsec(ref, sid, text, *, _expect_sig=None):
     ins = s["end"]
     while ins > s["start"] and lines[ins - 1].strip() == "":
         ins -= 1
-    atomic_write(fp, splice(lines, ins, ins, [text]), expect_sig=_sig)
+    # the payload's own line breaks are normalised: each of its lines takes the chosen terminator
+    atomic_write(fp, splice(lines, ins, ins, text.replace("\r\n", "\n").split("\n")), expect_sig=_sig)
     out(f"appended to {sid} in {rel(fp)}")
 
 def cmd_append(ref, *rest):
@@ -877,7 +942,8 @@ def cmd_append(ref, *rest):
     fp = resolve(ref)
     _sig = file_sig(fp)
     cur = read_raw(fp)
-    eol = eol_of(cur)
+    eol = _last_eol(cur)
+    text = text.replace("\r\n", "\n").replace("\n", eol)   # the payload's own line breaks take the chosen terminator
     atomic_write(fp, cur + ("" if cur.endswith("\n") or not cur else eol) + text + eol, expect_sig=_sig)
     out(f"appended to {rel(fp)}")
 
@@ -968,21 +1034,26 @@ def cmd_set(ref, key, value):
     fp = resolve(ref)
     _sig = file_sig(fp)
     text = read_raw(fp)
-    fm, body, tail, bom = split_fm_full(text)
-    eol = eol_of(text)
-    if fm is None:
+    parts = _fm_parts(text)
+    if parts is None:
+        bom = BOM if text.startswith(BOM) else ""
+        first = text[len(bom):].split("\n", 1)[0]
+        eol = "\r\n" if first.endswith("\r") and "\n" in text[len(bom):] else "\n"
         atomic_write(fp, bom + f"---{eol}{key}: {value}{eol}---{eol}" + text[len(bom):], expect_sig=_sig)
     else:
-        fm_lines = fm.replace("\r\n", "\n").split("\n")
-        if block_scalar_key(fm_lines, key):
+        bom, eol1, fm_lines, eol2, tail, body = parts
+        if block_scalar_key([l.rstrip("\r") for l in fm_lines], key):
             die(f"refused: '{key}' has a multi-line/block value", nxt="edit the note directly (set would orphan continuation lines)")
         pat = re.compile(rf"^{re.escape(key)}:")
         hit = [i for i, l in enumerate(fm_lines) if pat.match(l)]
         if hit:
-            fm_lines[hit[0]] = f"{key}: {value}"
+            i = hit[0]
+            fm_lines[i] = f"{key}: {value}" + ("\r" if fm_lines[i].endswith("\r") else "")
         else:
+            # the old last fm line gains a terminator in the fm block's own style; the new key is the new last line
+            fm_lines[-1] += "\r" if eol2 == "\r\n" else ""
             fm_lines.append(f"{key}: {value}")
-        atomic_write(fp, bom + "---" + eol + eol.join(fm_lines) + eol + "---" + tail + body, expect_sig=_sig)
+        atomic_write(fp, _fm_join(bom, eol1, fm_lines, eol2, tail, body), expect_sig=_sig)
     out(f"set {key}={value} in {rel(fp)}")
 
 def cmd_unset(ref, key):
@@ -990,17 +1061,25 @@ def cmd_unset(ref, key):
     fp = resolve(ref)
     _sig = file_sig(fp)
     text = read_raw(fp)
-    fm, body, tail, bom = split_fm_full(text)
-    if fm is None:
+    parts = _fm_parts(text)
+    if parts is None:
         die(f"not-found: no frontmatter in {rel(fp)}")
-    eol = eol_of(text)
-    fm_lines = fm.replace("\r\n", "\n").split("\n")
-    if block_scalar_key(fm_lines, key):
+    bom, eol1, fm_lines, eol2, tail, body = parts
+    if block_scalar_key([l.rstrip("\r") for l in fm_lines], key):
         die(f"refused: '{key}' has a multi-line/block value", nxt="edit the note directly (unset would orphan continuation lines)")
-    kept = [l for l in fm_lines if not re.match(rf"^{re.escape(key)}:", l)]
+    pat = re.compile(rf"^{re.escape(key)}:")
+    kept = [l for l in fm_lines if not pat.match(l)]
     if kept == fm_lines:
         die(f"not-found: no key {key} in {rel(fp)}")
-    atomic_write(fp, bom + "---" + eol + eol.join(kept) + eol + "---" + tail + body, expect_sig=_sig)
+    if kept and fm_lines[-1].startswith(f"{key}:"):
+        # the removed line was the last fm line: the new last line's own terminator becomes
+        # eol2. Otherwise the kept lines and eol2 are exactly as read.
+        if kept[-1].endswith("\r"):
+            eol2 = "\r\n"
+            kept[-1] = kept[-1][:-1]
+        else:
+            eol2 = "\n"
+    atomic_write(fp, _fm_join(bom, eol1, kept, eol2, tail, body), expect_sig=_sig)
     out(f"unset {key} in {rel(fp)}")
 
 def cmd_new(*args):
@@ -1051,11 +1130,14 @@ def cmd_new(*args):
             missing.append((k, v))
     if missing and content.lstrip(BOM).startswith("---"):
         # template HAS frontmatter: insert the new keys into it rather than dropping them
-        fm, body, tail, bom = split_fm_full(content)
-        if fm is not None:
-            eolc = eol_of(content)
-            fm_lines = fm.replace("\r\n", "\n").split("\n") + [f"{k}: {v}" for k, v in missing]
-            content = bom + "---" + eolc + eolc.join(fm_lines) + eolc + "---" + tail + body
+        parts = _fm_parts(content)
+        if parts is not None:
+            bom, eol1, fm_lines, eol2, tail, body = parts
+            cr = "\r" if eol2 == "\r\n" else ""
+            fm_lines[-1] += cr
+            new_keys = [f"{k}: {v}" for k, v in missing]
+            fm_lines += [l + cr for l in new_keys[:-1]] + [new_keys[-1]]
+            content = _fm_join(bom, eol1, fm_lines, eol2, tail, body)
             missing = []
     kv = dict(missing) if missing else ({} if content.lstrip(BOM).startswith("---") else kv)
     if kv and not content.lstrip(BOM).startswith("---"):
@@ -1519,7 +1601,7 @@ def cmd_daily_append(text):
     # writer, which is the actual lesson.
     _sig = file_sig(fp)
     cur = read_raw(fp)
-    eol = eol_of(cur)
+    eol = _last_eol(cur)
     lines, secs = parse(cur)
     # "Today" as a whole word or immediately followed by "(" — never a false
     # hit on e.g. "Today's Focus" as a differently-shaped heading, and never
@@ -1536,7 +1618,7 @@ def cmd_daily_append(text):
         ins = nxt
         while ins > s["start"] and lines[ins - 1].strip() == "":
             ins -= 1
-        atomic_write(fp, splice(lines, ins, ins, [text]), expect_sig=_sig)
+        atomic_write(fp, splice(lines, ins, ins, text.replace("\r\n", "\n").split("\n")), expect_sig=_sig)
         # sid/title come from the note under our own heading regex, not from
         # caller input, so this is printed raw like appendsec's `sid` — there
         # is no stdout escaper in this codebase (die()'s _esc is stderr-only).
@@ -1544,6 +1626,7 @@ def cmd_daily_append(text):
         out(f"appended to {s['id']} ({s['title']}) in {rel(fp)}")
         return
     sep = "" if cur.endswith(("\n", "\r\n")) or not cur else eol
+    text = text.replace("\r\n", "\n").replace("\n", eol)   # the payload's own line breaks take the chosen terminator
     atomic_write(fp, cur + sep + text + eol, expect_sig=_sig)
     _sel = "eof"
     out(f"appended to {rel(fp)} (no Today section — appended at end)")
@@ -2267,14 +2350,17 @@ def cmd_prepend(ref, text):
     fp = resolve(ref)
     _sig = file_sig(fp)
     cur = read_raw(fp)
-    eol = eol_of(cur)
     fm, body, tail, bom = split_fm_full(cur)
-    ins = text.replace("\r\n", "\n").replace("\n", eol) + eol
     if fm is None:
+        first = cur[len(bom):].split("\n", 1)[0]
+        eol = "\r\n" if first.endswith("\r") and "\n" in cur[len(bom):] else "\n"
+        ins = text.replace("\r\n", "\n").replace("\n", eol) + eol
         new = bom + ins + cur[len(bom):]
     else:
+        eol = tail if tail in ("\n", "\r\n") else _last_eol(cur)   # the closing --- line's own terminator
+        ins = text.replace("\r\n", "\n").replace("\n", eol) + eol
         head_len = len(cur) - len(body)
-        new = cur[:head_len] + ins + body
+        new = cur[:head_len] + ("" if tail else eol) + ins + body
     atomic_write(fp, new, expect_sig=_sig)
     out(f"prepended to {rel(fp)}")
 
