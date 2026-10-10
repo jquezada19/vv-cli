@@ -386,6 +386,19 @@ def section_b(eng, tag):
     # B5: batch inherits the same interpolated next (the arity check is shared)
     r = eng.run("batch", stdin=json.dumps({"cmd": "backlinks", "args": []}) + "\n")
     check(f"{tag}5 batch arity miss carries the table-derived next", "vv backlinks NOTE" in r.stdout + r.stderr, (r.stdout + r.stderr)[:300])
+    # B6: board — flag-shaped filters are the same filter, never a silent empty match
+    for argv in (["board", "Work Items", "status=open"],
+                 ["board", "Work Items", "--status=open"],
+                 ["board", "Work Items", "--status", "open"]):
+        r = eng.run(*argv)
+        check(f"{tag}6 board accepts {argv[2:]}", r.returncode == 0 and "(0 notes)" not in r.stdout + r.stderr and "24995" in r.stdout,
+              (r.returncode, r.stdout, r.stderr))
+    r = eng.run("board", "Work Items", "--status")
+    check(f"{tag}6 board --status without a value is a usage refusal",
+          r.returncode == 1 and r.stderr.startswith("usage:") and "next: vv board" in r.stderr, (r.returncode, r.stdout, r.stderr))
+    r = eng.run("board", "Work Items", "--limit=5")
+    check(f"{tag}6 board refuses a global flag as a filter key",
+          r.returncode == 1 and r.stderr.startswith("usage:"), (r.returncode, r.stdout, r.stderr))
 
 def section_c(eng, tag):
     """C — id-prefix resolution."""

@@ -1247,11 +1247,30 @@ def cmd_board(folder, *filters):
     # Validate at the boundary, like arity. (An earlier version of this comment
     # claimed "exit 0"; that came from reading a pipe's exit status instead of
     # vv's — capture exit codes unpiped.)
-    bad = [f for f in filters if "=" not in f]
+    # `--KEY=VALUE` and `--KEY VALUE` are the same filter as `KEY=VALUE`; a flag
+    # spelling must never become a literal "--KEY" key that matches nothing.
+    GLOBAL_FLAGS = ("jsonl", "limit", "vault")
+    norm = []
+    it = iter(filters)
+    for f in it:
+        if f.startswith("--"):
+            key, eq, val = f[2:].partition("=")
+            if not eq:
+                val = next(it, None)
+                if val is None:
+                    die(f"usage: board filter {_q(f, 'KEY')} needs a value",
+                        nxt=f"vv board {_q(folder, 'FOLDER')} {_q(key + '=VALUE', 'KEY=VALUE')}")
+            if key in GLOBAL_FLAGS or not key:
+                die(f"usage: board filters are KEY=VALUE, got {_q(f, 'KEY')}",
+                    nxt=f"vv board {_q(folder, 'FOLDER')} KEY=VALUE")
+            norm.append(f"{key}={val}")
+        else:
+            norm.append(f)
+    bad = [f for f in norm if "=" not in f]
     if bad:
         die(f"usage: board filters are KEY=VALUE, got {_q(bad[0], 'KEY')}",
             nxt=f"vv board {_q(folder, 'FOLDER')} {_q(bad[0] + '=VALUE', 'KEY=VALUE')}")
-    want = dict(f.split("=", 1) for f in filters)
+    want = dict(f.split("=", 1) for f in norm)
     # `board .` / `board ""` returned ZERO rows on the indexed path while the
     # walk and the native engine returned every note — see _scope for the
     # rule that fixed it for every sibling.
