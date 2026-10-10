@@ -10,6 +10,50 @@ An input that was refused (exit 1) and now succeeds (exit 0) is an addition,
 not an exit-code change, and is MINOR. A documented non-zero exit that moves to
 a different non-zero exit, or a success that becomes a refusal, is MAJOR.
 
+## [3.2.0] — 2026-10-10
+
+MINOR: no documented exit code moves. Two refused inputs become accepted
+(`board --KEY VALUE`, `board --KEY=VALUE` where the key was being read
+literally) and one silently-wrong answer becomes right. Measured motivation:
+a one-line `appendsec` on a mixed CRLF/LF note rewrote every LF line to CRLF
+(438 lines for one insert); the live-vault round-trip suite was red on that
+note while CI stayed green because the fixture vault had no such note; the
+adoption report printed 100% for eight days after its denominator hook was
+retired.
+
+### Fixed
+- Writes preserve every byte outside the edited span, both engines. Inserted
+  lines take the terminator of the nearest terminated neighbour; `patch`
+  aligns the unchanged head and tail of a section so a read→patch round-trip
+  is a byte no-op on any mix; `set`/`unset`/`new` replace only the edited
+  frontmatter line; `append`/`daily-append`/`prepend` take the terminator of
+  the line they attach to, and a multi-line payload's own `\r\n`/`\n` are
+  normalised to that choice. All-LF and all-CRLF notes produce byte-identical
+  output to 3.1, with three deliberate exceptions, each pinned by an oracle
+  case: `prepend` on a note whose closing `---` is the last bytes writes
+  `---\ntop\n` instead of the corrupt `---top\n`; a payload ending in `\n`
+  appended to a section that reaches an unterminated EOF keeps the file
+  unterminated; `\r\n` inside a payload written to an LF note becomes `\n`.
+  `read` still prints CR-stripped text; the sha8 preimage is unchanged.
+- `board FOLDER --KEY=VALUE` no longer returns zero rows with exit 0 (the key
+  was taken literally, dashes included).
+
+### Added
+- `board FOLDER --KEY VALUE` and `--KEY=VALUE` as aliases of `KEY=VALUE`
+  (leading dashes fold into the key); a bare `--KEY` with no value, or whose
+  next token is itself a flag, is a usage refusal with a runnable `next:`.
+  A positional global-flag name as a key (`limit=5`) still filters on that
+  frontmatter key, as before.
+- `tests/test_eol_preserve.py`: a literal expected-bytes oracle (32 cases) run
+  through the Python entry, the native binary, and the native binary with the
+  Python fallback made impossible, so a native regression cannot pass by
+  delegating. Mixed-ending notes in the CI fixture vault and the write-parity
+  suite; the live-vault end-to-end harness moves to bytes I/O.
+- `bench/pilot_report.py`: a day with vv rows and no legacy row of any kind
+  prints `n/a (denominator dark …) — FAIL` and fails the adoption criterion;
+  the hook's daily heartbeat row counts as coverage, not as an op; the sha8
+  selector criterion is recorded as failed for 3.1 and retired for 3.2.
+
 ## [3.1.0] — 2026-09-17
 
 MINOR: every behaviour change below turns a refused input into a success, or
