@@ -4,7 +4,7 @@
 // tests. Ported line-for-line from src/vv_impl.py: cmd_set, cmd_unset,
 // cmd_append, cmd_appendsec, yaml_scalar (+ _YAML_LEAD, _is_wellformed_quoted,
 // _is_balanced_flow), split_fm_full, block_scalar_key, file_sig, atomic_write,
-// read_raw, eol_of, splice, and the _dirty_gate journal check.
+// read_raw, splice, and the _dirty_gate journal check.
 //
 // new / daily-append / patch are NOT implemented here (left as Fallback) —
 // per the task brief they are optional and only worth doing once set/unset/
@@ -45,7 +45,7 @@ fn has_pending_journal(vault: &Path) -> bool {
     }
 }
 
-// ---------- file_sig / atomic_write / read_raw / eol_of ----------
+// ---------- file_sig / atomic_write / read_raw ----------
 
 type Sig = (i64, u64);
 
@@ -60,12 +60,72 @@ fn read_raw(fp: &Path) -> Option<String> {
     String::from_utf8(bytes).ok() // strict UTF-8; anything else -> caller Fallback (python exit 5)
 }
 
-fn eol_of(text: &str) -> &'static str {
-    if text.contains("\r\n") {
+fn elem_cr(lines: &[&str], i: usize) -> bool {
+    // the final element is unterminated by construction, so it never counts
+    i + 1 < lines.len() && lines[i].ends_with('\r')
+}
+
+fn insert_cr(lines: &[&str], at: usize) -> bool {
+    // nearest terminated line above the insertion point, else below, else LF
+    let last_term = lines.len().saturating_sub(1);
+    let above = at.min(last_term);
+    if above > 0 {
+        return lines[above - 1].ends_with('\r');
+    }
+    if at < last_term {
+        return lines[at].ends_with('\r');
+    }
+    false
+}
+
+fn last_eol(text: &str) -> &'static str {
+    match text.rfind('\n') {
+        Some(i) if i > 0 && text.as_bytes()[i - 1] == b'\r' => "\r\n",
+        _ => "\n",
+    }
+}
+
+struct FmParts {
+    bom: String,
+    eol1: String,
+    fm_lines: Vec<String>,
+    eol2: String,
+    tail: String,
+    body: String,
+}
+
+fn fm_parts(text: &str) -> Option<FmParts> {
+    let (fm, body, tail, bom) = split_fm_full(text);
+    let fm = fm?;
+    let head = &text[..text.len() - body.len()];
+    let after_open = &head[bom.len() + 3..];
+    let eol1 = if after_open.starts_with("\r\n") {
         "\r\n"
     } else {
         "\n"
-    }
+    };
+    let rest = &after_open[eol1.len() + fm.len()..];
+    let eol2 = &rest[..rest.len() - 3 - tail.len()];
+    Some(FmParts {
+        bom,
+        eol1: eol1.to_string(),
+        fm_lines: fm.split('\n').map(|s| s.to_string()).collect(),
+        eol2: eol2.to_string(),
+        tail,
+        body,
+    })
+}
+
+fn fm_join(p: &FmParts) -> String {
+    format!(
+        "{}---{}{}{}---{}{}",
+        p.bom,
+        p.eol1,
+        p.fm_lines.join("\n"),
+        p.eol2,
+        p.tail,
+        p.body
+    )
 }
 
 /// Atomic write with optional CAS on the pre-read signature. Returns false on
@@ -306,9 +366,9 @@ fn yaml_scalar(v: &str) -> String {
 // ---------- splice (used by appendsec; patch would reuse it too) ----------
 
 fn splice(lines: &[&str], start: usize, end: usize, new_lines: &[String]) -> String {
-    let full_text = lines.join("\n");
-    let crlf = eol_of(&full_text) == "\r\n";
     let ended_with_newline = !lines.is_empty() && lines.last().unwrap().is_empty();
+    let end_c = end.min(lines.len());
+    let old: Vec<&str> = lines[start..end_c].to_vec();
     let mut body: Vec<String> = new_lines
         .iter()
         .map(|b| b.trim_end_matches('\r').to_string())
@@ -322,22 +382,49 @@ fn splice(lines: &[&str], start: usize, end: usize, new_lines: &[String]) -> Str
             body.pop();
         }
     }
-    let mut merged: Vec<String> =
-        Vec::with_capacity(start + body.len() + (lines.len() - end.min(lines.len())));
-    merged.extend(lines[..start].iter().map(|s| s.to_string()));
-    merged.extend(body);
-    merged.extend(lines[end.min(lines.len())..].iter().map(|s| s.to_string()));
-    if crlf {
-        let n = merged.len();
-        for (i, m) in merged.iter_mut().enumerate() {
-            if i < n - 1 {
-                if !m.ends_with('\r') {
-                    m.push('\r');
-                }
-            } else {
-                while m.ends_with('\r') {
-                    m.pop();
-                }
+    let old_c: Vec<&str> = old.iter().map(|o| o.trim_end_matches('\r')).collect();
+    let mut p = 0;
+    while p < old_c.len() && p < body.len() && old_c[p] == body[p] {
+        p += 1;
+    }
+    let mut s = 0;
+    while s < old_c.len() - p
+        && s < body.len() - p
+        && old_c[old_c.len() - 1 - s] == body[body.len() - 1 - s]
+    {
+        s += 1;
+    }
+    let first = start + p;
+    let cr = if p < old_c.len() - s && first + 1 < lines.len() {
+        elem_cr(lines, first)
+    } else {
+        insert_cr(lines, first)
+    };
+    let middle: Vec<String> = body[p..body.len() - s]
+        .iter()
+        .map(|m| if cr { format!("{}\r", m) } else { m.clone() })
+        .collect();
+    let mut merged: Vec<String> = Vec::with_capacity(lines.len() + body.len());
+    merged.extend(lines[..start].iter().map(|x| x.to_string()));
+    merged.extend(old[..p].iter().map(|x| x.to_string()));
+    let middle_empty = middle.is_empty();
+    merged.extend(middle);
+    let tail_empty = s == 0;
+    merged.extend(old[old.len() - s..].iter().map(|x| x.to_string()));
+    merged.extend(lines[end_c..].iter().map(|x| x.to_string()));
+    if !middle_empty
+        && first == lines.len()
+        && !lines.is_empty()
+        && !lines[lines.len() - 1].is_empty()
+        && !merged[first - 1].ends_with('\r')
+        && insert_cr(lines, lines.len() - 1)
+    {
+        merged[first - 1].push('\r'); // the old unterminated final line is no longer last
+    }
+    if cr && !middle_empty && tail_empty && end >= lines.len() {
+        if let Some(last) = merged.last_mut() {
+            if last.ends_with('\r') {
+                last.pop(); // the final element is unterminated; never invent a \r there
             }
         }
     }
@@ -378,48 +465,48 @@ fn cmd_set(vault: &Path, args: &[String]) -> Outcome {
         Some(t) => t,
         None => return Outcome::Fallback,
     };
-    let (fm, body, tail, bom) = split_fm_full(&text);
-    let eol = eol_of(&text);
-    let new_content = match fm {
+    let new_content = match fm_parts(&text) {
         None => {
+            let (_, _, _, bom) = split_fm_full(&text);
+            let rest = &text[bom.len()..];
+            let first = rest.split('\n').next().unwrap_or("");
+            let eol = if first.ends_with('\r') && rest.contains('\n') {
+                "\r\n"
+            } else {
+                "\n"
+            };
             format!(
                 "{}---{}{}: {}{}---{}{}",
-                bom,
-                eol,
-                key,
-                value,
-                eol,
-                eol,
-                &text[bom.len()..]
+                bom, eol, key, value, eol, eol, rest
             )
         }
-        Some(fm_s) => {
-            let fm_norm = fm_s.replace("\r\n", "\n");
-            let mut fm_lines: Vec<String> = fm_norm.split('\n').map(|s| s.to_string()).collect();
-            if block_scalar_key(&fm_lines, key) {
+        Some(mut p) => {
+            let stripped: Vec<String> = p
+                .fm_lines
+                .iter()
+                .map(|l| l.trim_end_matches('\r').to_string())
+                .collect();
+            if block_scalar_key(&stripped, key) {
                 return Outcome::Fallback; // python emits the canonical "refused" text
             }
             let prefix = format!("{}:", key);
-            let mut found = false;
-            for l in fm_lines.iter_mut() {
-                if l.starts_with(&prefix) {
-                    *l = format!("{}: {}", key, value);
-                    found = true;
-                    break;
+            match p.fm_lines.iter().position(|l| l.starts_with(&prefix)) {
+                Some(i) => {
+                    let cr = if p.fm_lines[i].ends_with('\r') {
+                        "\r"
+                    } else {
+                        ""
+                    };
+                    p.fm_lines[i] = format!("{}: {}{}", key, value, cr);
+                }
+                None => {
+                    if p.eol2 == "\r\n" {
+                        p.fm_lines.last_mut().unwrap().push('\r');
+                    }
+                    p.fm_lines.push(format!("{}: {}", key, value));
                 }
             }
-            if !found {
-                fm_lines.push(format!("{}: {}", key, value));
-            }
-            format!(
-                "{}---{}{}{}---{}{}",
-                bom,
-                eol,
-                fm_lines.join(eol),
-                eol,
-                tail,
-                body
-            )
+            fm_join(&p)
         }
     };
     if !atomic_write(&fp, &new_content, Some(sig)) {
@@ -453,35 +540,35 @@ fn cmd_unset(vault: &Path, args: &[String]) -> Outcome {
         Some(t) => t,
         None => return Outcome::Fallback,
     };
-    let (fm, body, tail, bom) = split_fm_full(&text);
-    let fm_s = match fm {
-        Some(f) => f,
+    let mut p = match fm_parts(&text) {
+        Some(p) => p,
         None => return Outcome::Fallback, // python: die "no frontmatter"
     };
-    let eol = eol_of(&text);
-    let fm_norm = fm_s.replace("\r\n", "\n");
-    let fm_lines: Vec<String> = fm_norm.split('\n').map(|s| s.to_string()).collect();
-    if block_scalar_key(&fm_lines, key) {
+    let stripped: Vec<String> = p
+        .fm_lines
+        .iter()
+        .map(|l| l.trim_end_matches('\r').to_string())
+        .collect();
+    if block_scalar_key(&stripped, key) {
         return Outcome::Fallback;
     }
     let prefix = format!("{}:", key);
-    let kept: Vec<&String> = fm_lines
+    let kept: Vec<String> = p
+        .fm_lines
         .iter()
         .filter(|l| !l.starts_with(&prefix))
+        .cloned()
         .collect();
-    if kept.len() == fm_lines.len() {
+    if kept.len() == p.fm_lines.len() {
         return Outcome::Fallback; // python: die "no key"
     }
-    let kept_owned: Vec<String> = kept.into_iter().cloned().collect();
-    let new_content = format!(
-        "{}---{}{}{}---{}{}",
-        bom,
-        eol,
-        kept_owned.join(eol),
-        eol,
-        tail,
-        body
-    );
+    p.fm_lines = kept;
+    if let Some(last) = p.fm_lines.last_mut() {
+        if last.ends_with('\r') {
+            last.pop(); // followed by eol2, not by its own terminator
+        }
+    }
+    let new_content = fm_join(&p);
     if !atomic_write(&fp, &new_content, Some(sig)) {
         return Outcome::Fallback;
     }
@@ -513,7 +600,7 @@ fn cmd_append(vault: &Path, args: &[String]) -> Outcome {
         Some(t) => t,
         None => return Outcome::Fallback,
     };
-    let eol = eol_of(&cur);
+    let eol = last_eol(&cur);
     let sep = if cur.ends_with('\n') || cur.is_empty() {
         ""
     } else {
