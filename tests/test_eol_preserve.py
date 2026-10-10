@@ -92,6 +92,8 @@ CASES = [
      b"top\n# A\nx\r\n"),
     ("prepend-fm-closing-at-eof", b"---\na: 1\n---", ["prepend", "top"], None,
      b"---\na: 1\n---\ntop\n"),
+    ("appendsec-trailing-nl-payload-eof", b"# A\nold\n# B\ny", ["appendsec", "H2", "x\n"], None, b"# A\nold\n# B\ny\nx"),
+    ("appendsec-crlf-payload-into-lf", b"# A\nold\n# B\ny\n", ["appendsec", "H2", "p\r\nq"], None, b"# A\nold\n# B\ny\np\nq\n"),
 ]
 
 # first argv words the native binary serves itself; anything else may fall back to python
