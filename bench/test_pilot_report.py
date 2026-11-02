@@ -178,8 +178,12 @@ def main():
 
         daily_crit_out = run_report("--since 2026-09-24 --until 2026-09-25 --criteria",
                                     metrics_path, legacy_path)
-        check("daily-append landing rate measured from sel rows",
-              "daily-append Today landings | baseline n/a | target 100% | 50% |"
+        # The target is registered for standups that HAVE a Today section; `eof`
+        # is daily-append's landing when none matched, so it is outside the
+        # denominator and reported beside it, never scored as a miss.
+        check("daily-append landing rate scored only on Today-shaped standups",
+              "| daily-append Today landings | baseline n/a | target 100% on standups with a Today section | "
+              "100% (1/1) · 1 eof: no Today section matched · 0 failed |"
               in daily_crit_out, daily_crit_out)
 
     # Regression pin: an all-synthetic vv window (every row carries `src`)
@@ -233,6 +237,72 @@ def main():
               bool(dark_line) and "2026-10-06" not in dark_line, out)
         check("sha8 is retired with the written reason",
               "sha8: retired" in out and "FAILED at 0" in out, out)
+
+    # Instrument defects found re-measuring the 3.2 criteria.
+    def write(tmp, vv, legacy):
+        mp, lp = os.path.join(tmp, "vv.jsonl"), os.path.join(tmp, "legacy.jsonl")
+        with open(mp, "w") as f:
+            f.write("".join(json.dumps(r) + "\n" for r in vv))
+        with open(lp, "w") as f:
+            f.write("".join(json.dumps(r) + "\n" for r in legacy))
+        return mp, lp
+
+    def vrow(ts, op, **kw):
+        return {"ts": ts, "op": op, "ms": 1, "out_bytes": 1, "exit": 0, "ver": "3.2.0", **kw}
+
+    def lrow(ts, **kw):
+        return {"ts": ts, "route": "legacy", "op": "read", "tool": "Read", "note_bytes": 10,
+                "eligible": True, "schema": 2, **kw}
+
+    beat = {"route": "legacy", "op": "alive", "eligible": False, "schema": 2}
+
+    # 1. `resolve` is a name lookup with no legacy counterpart the hook can see
+    #    (a collision-gate hook issued ~1,550 of them unstamped): it must not pad
+    #    the adoption numerator, headline or criteria.
+    with tempfile.TemporaryDirectory(prefix="vv-pilot-report-resolve-") as tmp:
+        mp, lp = write(tmp,
+                       [vrow("2026-11-01T10:00:0%d" % i, "read") for i in range(2)]
+                       + [vrow("2026-11-01T10:01:0%d" % i, "resolve", exit=1, kind="not-found")
+                          for i in range(3)],
+                       [dict(beat, ts="2026-11-01T09:00:00")]
+                       + [lrow("2026-11-01T10:02:0%d" % i) for i in range(2)])
+        out = run_report("--since 2026-11-01 --until 2026-11-02 --criteria", mp, lp)
+        check("resolve rows stay out of the headline adoption numerator",
+              "vv handled 2 of 4 eligible" in out, out)
+        check("resolve rows stay out of the criteria adoption numerator",
+              "target ≥ 85% every active day | 50% |" in out, out)
+
+    # 2. A covered day with eligible legacy work and NO vv rows of any version is
+    #    0% adoption, not absent -- the worst day must not vanish from the min.
+    #    (A day whose vv traffic is all pre-3.1.0 stays excluded: pinned above.)
+    with tempfile.TemporaryDirectory(prefix="vv-pilot-report-legacyonly-") as tmp:
+        mp, lp = write(tmp,
+                       [vrow("2026-11-01T10:00:00", "read")],
+                       [dict(beat, ts="2026-11-01T09:00:00"), dict(beat, ts="2026-11-02T09:00:00"),
+                        lrow("2026-11-02T10:00:00"), lrow("2026-11-02T10:00:01")])
+        out = run_report("--since 2026-11-01 --until 2026-11-03 --criteria", mp, lp)
+        check("a legacy-only day enters the per-day min as 0%",
+              "target ≥ 85% every active day | 0% |" in out, out)
+    # ...but not one before the cohort's first day: that predates what is measured.
+    with tempfile.TemporaryDirectory(prefix="vv-pilot-report-precohort-") as tmp:
+        mp, lp = write(tmp,
+                       [vrow("2026-11-02T10:00:00", "read")],
+                       [dict(beat, ts="2026-11-01T09:00:00"), dict(beat, ts="2026-11-02T09:00:00"),
+                        lrow("2026-11-01T10:00:00"), lrow("2026-11-01T10:00:01")])
+        out = run_report("--since 2026-11-01 --until 2026-11-03 --criteria", mp, lp)
+        check("a legacy-only day before the cohort starts stays out of the min",
+              "target ≥ 85% every active day | 100% |" in out, out)
+
+    # 3. A legacy row that declares `eligible: false` is not eligible, even when
+    #    the schema-1 inference (note_bytes > 0 and a Read/Edit tool) would say so.
+    with tempfile.TemporaryDirectory(prefix="vv-pilot-report-explicitfalse-") as tmp:
+        mp, lp = write(tmp,
+                       [vrow("2026-11-01T10:00:00", "read")],
+                       [dict(beat, ts="2026-11-01T09:00:00"),
+                        lrow("2026-11-01T10:00:01", eligible=False)])
+        out = run_report("--since 2026-11-01 --until 2026-11-02", mp, lp)
+        check("explicit eligible:false is honoured over inference",
+              "vv handled 1 of 1 eligible" in out, out)
 
     print(("ALL PASS (pilot report: %d)" % checks_run) if not fails
           else "FAILURES: " + ", ".join(fails))

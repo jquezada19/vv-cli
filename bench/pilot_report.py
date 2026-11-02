@@ -172,11 +172,24 @@ def is_eligible_legacy(r):
     """A legacy row counts toward the adoption denominator only if it was
     genuinely vv-shaped vault work, not any Bash invocation the hook happened
     to see. New rows declare it (`eligible: true`, `schema: 2`); old
-    schema-1 rows are inferred the same way the hook used to gate on."""
-    if r.get("eligible") is True:
-        return True
+    schema-1 rows are inferred the same way the hook used to gate on. A row
+    that declares `eligible` is taken at its word either way -- only a row
+    without the field is inferred."""
+    if "eligible" in r:
+        return r["eligible"] is True
     return r.get("note_bytes", 0) > 0 and r.get("tool") in (
         "Read", "Edit", "MultiEdit", "Write")
+
+
+# Ops that touch no note content and have no legacy counterpart the hook can
+# see, so they cannot sit in an adoption numerator: a name lookup, a health
+# check, an index build. A collision-gate hook issued ~1,550 unstamped
+# `resolve` calls from 2026-10-10, which read as 23% of "adoption".
+NON_ADOPTION_OPS = {"resolve", "doctor", "index"}
+
+
+def adoption_rows(rows):
+    return [r for r in rows if r.get("op") not in NON_ADOPTION_OPS]
 
 
 def strip_src(rows):
@@ -249,8 +262,9 @@ def per_day_eligible_adoption_min(rows, legacy, restrict_days=None):
     `restrict_days`, when given, limits the days considered to that set --
     the caller uses this to keep the legacy side scoped to the same date
     window as a `rows` cohort that has already been filtered (e.g. by
-    `ver`), so a legacy-only day with no matching vv activity can't drag the
-    min down (or a vv-only day inflate it) outside that window."""
+    `ver`), so a day whose vv traffic is all outside the cohort can't drag
+    the min down (or a vv-only day inflate it). A covered day with no vv
+    rows at all belongs in that set: it is 0% adoption, the worst day there is."""
     vv_by_day = collections.Counter(r["ts"][:10] for r in rows)
     legacy_any = collections.Counter(r["ts"][:10] for r in legacy)
     legacy_by_day = collections.Counter(
@@ -291,26 +305,42 @@ def print_criteria(rows, legacy):
                             for k in ("flag", "sha8", "prefix"))
 
     # Same ver>=3.1.0 cohort as every other row in this table: a pre-3.1.0 vv
-    # row must not pad the numerator, and a day with no ver>=3.1.0 vv traffic
-    # must not be pulled in by legacy volume alone.
-    measured_days = {r["ts"][:10] for r in measured}
-    note_touch, dark = per_day_eligible_adoption_min(measured, legacy, restrict_days=measured_days)
+    # row must not pad the numerator, and a day whose only vv traffic is
+    # pre-3.1.0 must not be pulled in by legacy volume alone. A day with eligible
+    # legacy work and no vv traffic of any version, on or after the cohort's
+    # first day, IS in: dropping it hid a 0% day from the min.
+    cohort = adoption_rows(measured)
+    measured_days = {r["ts"][:10] for r in cohort}
+    any_vv_days = {r["ts"][:10] for r in rows}
+    first = min(measured_days) if measured_days else None
+    legacy_only = {r["ts"][:10] for r in legacy if is_eligible_legacy(r)
+                   and r["ts"][:10] not in any_vv_days and first and r["ts"][:10] >= first}
+    note_touch, dark = per_day_eligible_adoption_min(cohort, legacy, restrict_days=measured_days | legacy_only)
     if dark:
         note_touch_s = f"n/a (denominator dark {len(dark)} day(s): {', '.join(dark)}) — FAIL"
     else:
         note_touch_s = "n/a" if note_touch is None else f"{note_touch:.0f}%"
 
-    da_rows = [r for r in measured
-               if r["op"] == "daily-append" and r.get("exit", 0) == 0 and r.get("sel")]
-    da_today = len([r for r in da_rows if r["sel"] == "today"])
-    da_landing = f"{100 * da_today / len(da_rows):.0f}%" if da_rows else "n/a"
+    # Registered for standups that HAVE a Today section. `eof` is daily-append's
+    # landing when none matched, so it sits outside the denominator and is shown
+    # beside it; whether such a note had a Today-like heading the matcher missed
+    # is not logged.
+    da_all = [r for r in measured if r["op"] == "daily-append"]
+    da_ok = [r for r in da_all if r.get("exit", 0) == 0 and r.get("sel")]
+    da_today = len([r for r in da_ok if r["sel"] == "today"])
+    da_eof = len([r for r in da_ok if r["sel"] == "eof"])
+    da_shaped = len(da_ok) - da_eof
+    da_failed = len([r for r in da_all if r.get("exit", 0) != 0])
+    da_rate = f"{100 * da_today / da_shaped:.0f}% ({da_today}/{da_shaped})" if da_shaped else "n/a"
+    da_landing = (f"{da_rate} · {da_eof} eof: no Today section matched · {da_failed} failed"
+                  if da_all else "n/a")
 
     print("\n| Metric | Baseline | Target | Measured |")
     print("|---|---|---|---|")
     print(f"| read nonzero-exit rate | baseline 36% (77/216) | target < 10% | {read_rate} |")
     print(f"| append usage rows | baseline 8 | target 0 | {append_usage} |")
     print(f"| set not-found rows | baseline 15 | target 0 | {set_nf} |")
-    print(f"| daily-append Today landings | baseline n/a | target 100% | {da_landing} |")
+    print(f"| daily-append Today landings | baseline n/a | target 100% on standups with a Today section | {da_landing} |")
     print(f"| note-touching adoption | baseline 80–99% | target ≥ 85% every active day | {note_touch_s} |")
     print(f"| read selector kinds (sel) | baseline unmeasured | target flag, prefix each > 0 (sha8: retired) | {sel_summary} |")
     print("sha8 criterion: FAILED at 0 in the 3.1 window; retired for 3.2 — sha8 is the CAS token "
@@ -419,18 +449,20 @@ def main():
     if legacy:
         lk = collections.Counter(r.get("op", "?") for r in legacy)
         eligible_legacy = [r for r in legacy if is_eligible_legacy(r)]
-        elig_tot = len(rows) + len(eligible_legacy)
-        elig_pct = f"{100 * len(rows) / elig_tot:.0f}%" if elig_tot else "n/a"
-        print(f"adoption: vv handled {len(rows)} of {elig_tot} eligible vault ops "
-              f"({elig_pct}) · raw legacy rows: {len(legacy)} — "
+        vv_n = len(adoption_rows(rows))
+        elig_tot = vv_n + len(eligible_legacy)
+        elig_pct = f"{100 * vv_n / elig_tot:.0f}%" if elig_tot else "n/a"
+        print(f"adoption: vv handled {vv_n} of {elig_tot} eligible vault ops "
+              f"({elig_pct}; {', '.join(sorted(NON_ADOPTION_OPS))} not counted) · "
+              f"raw legacy rows: {len(legacy)} — "
               + ", ".join(f"{k}:{n}" for k, n in lk.most_common()))
         lb = sum(r.get("note_bytes", 0) for r in legacy)
         if lb:
             print(f"legacy note bytes touched: {lb:,} B "
                   f"(whole-file for reads; touched-note size otherwise)")
-        tot = len(rows) + len(legacy)
-        print(f"raw adoption (all logged legacy rows): {len(rows)} of {tot} "
-              f"({100 * len(rows) / tot:.0f}%)")
+        tot = vv_n + len(legacy)
+        print(f"raw adoption (all logged legacy rows): {vv_n} of {tot} "
+              f"({100 * vv_n / tot:.0f}%)")
     else:
         print("adoption: no legacy-route ops logged — either vv took everything, "
               "or the legacy logger is not running (verify before concluding)")
