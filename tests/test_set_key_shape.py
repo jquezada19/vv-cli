@@ -27,9 +27,9 @@ N  `new` flag shape. The flag IS the property name (`--status open`): a flag
    name that is not a bare key (`--status=done`, `--'a b'`), the literal
    `--key` placeholder, a flag with no value or whose value is itself a flag,
    an extra positional, and `--template` with no name are usage refusals (two
-   of these were a StopIteration traceback). Values go through the same YAML
-   scalar quoting as `set` (`--description "a: b"` wrote invalid YAML that
-   drops the note out of every Bases view).
+   of these were a StopIteration traceback). A derived `next:` carries every
+   flag already accepted (`new` is not idempotent) and never offers a pair
+   that would itself be refused or consumed as a global flag.
 
 Cases marked "(control)" pass at the PR base (origin/main) by design; every
 other numbered case has a check that fails there (sub-checks such as "no
@@ -116,11 +116,12 @@ def refused(eng, tag, name, args, want_prefix, want_next):
     return r
 
 SET_BAD = "usage: set KEY must be a bare frontmatter key, got "
+SET_HINT = " (KEY and VALUE are separate arguments; one key per call)"
 
 def section_s(eng, tag):
     """S — set KEY shape."""
     refused(eng, tag, "1 incident: set T description=a b updated=x", ["set", "T", "description=a b", "updated=2026-10-31"],
-            SET_BAD + "'description=a b'", "vv set T description 'a b'")
+            SET_BAD + "'description=a b'" + SET_HINT, "vv set T description 'a b'")
     check(f"{tag}1' no junk line in T", "description=a b" not in eng.read("T.md"), eng.read("T.md"))
     refused(eng, tag, "2 --KEY VALUE spelling", ["set", "T", "--status", "done"],
             SET_BAD + "--status", "vv set T status done")
@@ -140,15 +141,17 @@ def section_s(eng, tag):
             SET_BAD + "'[a]'", "vv set T KEY v")
     refused(eng, tag, "10 KEY is checked before the note resolves", ["set", "Missing", "a=b", "v"],
             SET_BAD + "a=b", "vv set Missing a b")
+    refused(eng, tag, "10' a flag in the NOTE slot still derives the key", ["set", "--foo", "a=b", "v"],
+            SET_BAD + "a=b", "vv set NOTE a b")
     refused(eng, tag, "11 k= derives an empty value", ["set", "T", "status=", "v"],
             SET_BAD + "status=", "vv set T status ''")
     # arity misses whose KEY slot is malformed: the derived next step, not a junk-writing one
     refused(eng, tag, "12 two operands k=v", ["set", "T", "status=done"],
-            "usage: set takes 3 positional args, got 2 (KEY and VALUE are separate arguments)", "vv set T status done")
+            "usage: set takes 3 positional args, got 2 (KEY and VALUE are separate arguments; one key per call)", "vv set T status done")
     refused(eng, tag, "13 k=v pairs", ["set", "T", "a=1", "b=2", "c=3"],
-            "usage: set takes 3 positional args, got 4 (KEY and VALUE are separate arguments)", "vv set T a 1")
+            "usage: set takes 3 positional args, got 4 (KEY and VALUE are separate arguments; one key per call)", "vv set T a 1")
     refused(eng, tag, "14 bare --KEY", ["set", "T", "--status"],
-            "usage: set takes 3 positional args, got 2 (KEY and VALUE are separate arguments)", "vv set T status VALUE")
+            "usage: set takes 3 positional args, got 2 (KEY and VALUE are separate arguments; one key per call)", "vv set T status VALUE")
     refused(eng, tag, "15 unquoted VALUE (control)", ["set", "T", "description", "a", "b"],
             "usage: set takes 3 positional args, got 4 (VALUE is one argument; quote it)", "vv set T description 'a b'")
     # controls: well-formed keys still write, both engines
@@ -186,12 +189,29 @@ def section_n(eng, tag):
             "usage: new takes PATH, got extra positional 'extra'", "vv new Y6")
     refused(eng, tag, "7 --template with no name (was a traceback)", ["new", "Y7", "--template"],
             "usage: new flag --template needs a value", "vv new Y7 --template NAME")
-    # values are YAML-quoted like set's
-    r = eng.run("new", "Z", "--description", "a: b")
-    check(f"{tag}8 a value needing quotes is quoted (no frontmatter)", r.returncode == 0 and 'description: "a: b"' in eng.read("Z.md"), r.stderr + eng.read("Z.md"))
-    r = eng.run("new", "Z2", "--template", "Task", "--status", "a: b", "--owner", "#me")
-    z2 = eng.read("Z2.md")
-    check(f"{tag}9 …into a template's existing and missing keys", r.returncode == 0 and 'status: "a: b"' in z2 and 'owner: "#me"' in z2 and z2.count("---") == 2, r.stderr + z2)
+    refused(eng, tag, "11 next keeps the flags already given (new is not idempotent)",
+            ["new", "X8", "--template", "Task", "--owner", "jeff", "--status=done"],
+            "usage: new takes --KEY VALUE", "vv new X8 --template Task --owner jeff --status done")
+    refused(eng, tag, "12 --key template=X is not derived into a template pick", ["new", "X9", "--key", "template=Foo"],
+            "usage: new takes --KEY VALUE", "vv new X9 --KEY VALUE")
+    refused(eng, tag, "15 a derived global-flag name is not offered", ["new", "X12", "--key", "limit=5"],
+            "usage: new takes --KEY VALUE", "vv new X12 --KEY VALUE")
+    refused(eng, tag, "15' …nor --vault", ["new", "X12", "--vault=elsewhere"],
+            "usage: new takes --KEY VALUE", "vv new X12 --KEY VALUE")
+    refused(eng, tag, "16 a derived value that is a flag is not offered", ["new", "X13", "--status=--flag"],
+            "usage: new takes --KEY VALUE", "vv new X13 --KEY VALUE")
+    refused(eng, tag, "17 --key key=x does not derive --key", ["new", "X14", "--key", "key=x"],
+            "usage: new takes --KEY VALUE", "vv new X14 --KEY VALUE")
+    with open(os.path.join(eng.vault, "Templates", "Block.md"), "w") as f:
+        f.write("---\ndescription: |\n  first\n  second\n---\n# B\n")
+    r = eng.run("new", "X15", "--template", "Block", "--description", "|")
+    check(f"{tag}18 a block-scalar header override is written as given (control)",
+          r.returncode == 0 and "description: |\n  first" in eng.read("X15.md"), r.stderr + eng.read("X15.md"))
+    r = eng.run("new", "X10", "--note", "--verbose flag")
+    check(f"{tag}13 a value starting with -- that has a space is a value (control)",
+          r.returncode == 0 and "note: --verbose flag" in eng.read("X10.md"), r.stderr + eng.read("X10.md"))
+    r = eng.run("new", "X11", "--priority", "-1")
+    check(f"{tag}14 a single-dash value is a value (control)", r.returncode == 0 and "priority: -1" in eng.read("X11.md"), r.stderr + eng.read("X11.md"))
     r = eng.run("new", "W", "--template", "Task", "--status", "done", "--owner", "jeff")
     w = eng.read("W.md")
     check(f"{tag}10 well-formed flags still work (control)", r.returncode == 0 and "status: done" in w and "owner: jeff" in w, r.stderr + w)
@@ -220,7 +240,8 @@ if os.path.exists(VRUST):
     for name, args in [("1 k=v KEY", ["set", "T", "description=a b", "updated=x"]),
                        ("2 --KEY", ["set", "T", "--status", "done"]),
                        ("3 whitespace KEY", ["set", "T", "my key", "v"]),
-                       ("4 leading #", ["set", "T", "#tag", "v"])]:
+                       ("4 leading #", ["set", "T", "#tag", "v"]),
+                       ("6 non-ASCII key (valid; python writes it)", ["set", "T", "clé", "v"])]:
         before = nat.snapshot()
         r = nat.run(*args)
         check(f"NO{name}: native declines (sentinel reached)", r.returncode == 42 and "FALLBACK_SENTINEL" in r.stdout, f"rc={r.returncode} {r.stdout[:80]} {r.stderr[:80]}")

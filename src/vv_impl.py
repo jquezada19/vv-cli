@@ -1052,21 +1052,22 @@ def _fm_key_split(tok):
 def _next_set(args):
     """set's next step when the KEY slot is malformed: one key per call, the
     caller's own pair split into KEY VALUE (`a=1` -> `a 1`, `--k v` -> `k v`)."""
-    if len(args) < 2 or _is_flag(args[0]) or _fm_key_ok(args[1]):
+    if len(args) < 2 or _fm_key_ok(args[1]):
         return _next_from_table("set", args)
+    note = "NOTE" if _is_flag(args[0]) else _q(args[0])
     split = _fm_key_split(args[1])
     key, val = split if split else ("KEY", None)
     if val is None and len(args) > 2:
         val = args[2]
     key = _q(key, "KEY") if split else key
-    return f"vv set {_q(args[0])} {key} {'VALUE' if val is None else _q(val, 'VALUE')}"
+    return f"vv set {note} {key} {'VALUE' if val is None else _q(val, 'VALUE')}"
 
 def cmd_set(ref, key, value):
     if not _fm_key_ok(key):
         # before the note resolves or the journal gate: a usage error is about
         # the command line, not the vault (the relocate-tail precedent)
         die(f"usage: set KEY must be a bare frontmatter key, got {_q(key, 'KEY')}"
-            " (KEY and VALUE are separate arguments)", nxt=_next_set([ref, key, value]))
+            " (KEY and VALUE are separate arguments; one key per call)", nxt=_next_set([ref, key, value]))
     _dirty_gate()
     value = yaml_scalar(value)
     fp = resolve(ref)
@@ -1120,32 +1121,45 @@ def cmd_unset(ref, key):
     atomic_write(fp, _fm_join(bom, eol1, kept, eol2, tail, body), expect_sig=_sig)
     out(f"unset {key} in {rel(fp)}")
 
+_NEW_NO_DERIVE = {"key", "limit", "vault", "jsonl"}
+
 def cmd_new(*args):
     # The flag IS the property name (`--status open`). Every malformed shape is
     # refused before anything is written: `--key description=x` wrote
     # `key: description=x` (the usage text's own placeholder became a
     # property), `--status=done` and a trailing `--status` raised
-    # StopIteration, and an extra positional was silently dropped.
-    path, template, kv = None, None, {}
+    # StopIteration, and an extra positional was silently dropped. Values are
+    # written as given (yaml_scalar here would quote a block-scalar header).
+    path, template, kv, given = None, None, {}, []
     it = iter(args)
     def head():
+        # every flag already accepted rides along: `new` is not idempotent, so a
+        # next step that drops one creates the note without it
         return " ".join(["vv new", _q(path, "PATH") if path else "PATH"]
-                        + (["--template", _q(template, "NAME")] if template else []))
+                        + (["--template", _q(template, "NAME")] if template else [])
+                        + [f"--{_q(k, 'KEY')} {_q(v, 'VALUE')}" for k, v in given])
     for a in it:
         if a.startswith("--"):
             v = next(it, None)
             if a == "--template" or (_fm_key_ok(a[2:]) and a != "--key"):
-                if v is None or v.startswith("--"):
+                if v is None or (v.startswith("--") and _is_flag(v)):
                     ph = "NAME" if a == "--template" else "VALUE"
                     die(f"usage: new flag {_q(a, 'FLAG')} needs a value", nxt=f"{head()} {_q(a, '--KEY')} {ph}")
                 if a == "--template":
                     template = v
                 else:
-                    kv[a[2:]] = yaml_scalar(v)
+                    kv[a[2:]] = v
+                    given.append((a[2:], v))
                 continue
             # `--key k=v` and `--k=v` derive the intended pair; anything else is a placeholder
             split = _fm_key_split(v) if a == "--key" and v is not None else _fm_key_split(a)
-            if split and split[1] is not None:
+            # derive only a pair that would itself be accepted as a property: never
+            # `--key`, a global flag (`--limit`/`--vault`/`--jsonl` are consumed by
+            # main before `new` sees them), `--template` from `--key template=X`,
+            # or a value that is itself a flag
+            if (split and split[1] is not None and split[0] not in _NEW_NO_DERIVE
+                    and (split[0] != "template" or a != "--key")
+                    and not (split[1].startswith("--") and _is_flag(split[1]))):
                 pair = f"--{_q(split[0], 'KEY')} {_q(split[1], 'VALUE')}"
             else:
                 pair = "--KEY VALUE"
@@ -3190,8 +3204,8 @@ def _arity_hint(cmd, args):
     """Parenthetical BEFORE `— next:` (the next line itself stays a bare command)."""
     if cmd == "append" and _wants_section(args):
         return " (append has no --section; append inside a section is appendsec)"
-    if cmd == "set" and len(args) >= 2 and not _is_flag(args[0]) and not _fm_key_ok(args[1]):
-        return " (KEY and VALUE are separate arguments)"
+    if cmd == "set" and len(args) >= 2 and not _fm_key_ok(args[1]):
+        return " (KEY and VALUE are separate arguments; one key per call)"
     ops = _table_operands(cmd)
     if _surplus_slot(ops, args):
         return f" ({ops[-1]} is one argument; quote it)"
