@@ -1121,10 +1121,10 @@ def cmd_new(*args):
     # `key: description=x` (the usage text's own placeholder became a
     # property), `--status=done` and a trailing `--status` raised
     # StopIteration, and an extra positional was silently dropped. Each
-    # refusal answers the help, never a derived command: five review rounds of
-    # derivations each found a new way for the suggested write to differ from
-    # the caller's intent. Values are written as given (yaml_scalar here would
-    # quote a block-scalar header).
+    # refusal answers the help, never a derived command: every derivation
+    # tried had inputs where the suggested write differed from the caller's
+    # intent. Values are written as given (yaml_scalar here would quote a
+    # block-scalar header).
     path, template, kv = None, None, {}
     it = iter(args)
     for a in it:

@@ -27,9 +27,9 @@ N  `new` flag shape. The flag IS the property name (`--status open`): a flag
    an extra positional, and `--template` with no name are usage refusals (two
    of these were a StopIteration traceback).
 Every refusal either command adds answers `next: vv set --help` / `vv new
---help`, never a derived command: five review rounds of derived next steps
-each found a new way for the suggested write to differ from what the caller
-asked (a dropped --vault, a truncated VALUE, a guessed PATH).
+--help`, never a derived command: every derived next step tried had inputs
+where the suggested write differed from what the caller asked (a dropped
+--vault, a truncated VALUE, a guessed PATH).
 
 Cases marked "(control)" pass at the PR base (origin/main) by design; every
 other numbered case has a check that fails there (sub-checks such as "no
