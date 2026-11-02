@@ -1136,6 +1136,7 @@ def cmd_new(*args):
     # written as given (yaml_scalar here would quote a block-scalar header).
     toks = list(args)
     path, template, kv, given = None, None, {}, []
+    path_at = None
     last_val = None          # (toks index, given index or "template") of the last accepted value
     def flagish(t):
         return t.startswith("--") and _is_flag(t)
@@ -1146,10 +1147,15 @@ def cmd_new(*args):
         return " ".join(["vv new", _q(path, "PATH") if path and not _is_flag(path) else "PATH"]
                         + (["--template", _q(template, "NAME")] if template else [])
                         + [f"--{_q(k, 'KEY')} {_q(v, 'VALUE')}" for k, v in given])
-    def tail(i):
-        # the caller's own remaining tokens, unparsed: a second mistake there is
-        # refused on the next call, never dropped
-        return "".join(" " + _q(t, "ARG") for t in toks[i:])
+    def nxt(i, mid=""):
+        # the caller's own remaining tokens ride along unparsed: a second mistake
+        # there is refused on the next call, never dropped. A token _q cannot
+        # quote would become a bare placeholder a later VALUE join could absorb,
+        # so then the honest next step is the help.
+        rest = toks[i:]
+        if any(_CTL.search(t) or " — next: " in t for t in rest):
+            return "vv new --help"
+        return head() + mid + "".join(" " + _q(t) for t in rest)
     i = 0
     while i < len(toks):
         a = toks[i]; i += 1
@@ -1158,7 +1164,7 @@ def cmd_new(*args):
                 v = toks[i] if i < len(toks) else None
                 if v is None or flagish(v):
                     ph = "NAME" if a == "--template" else "VALUE"
-                    die(f"usage: new flag {_q(a, 'FLAG')} needs a value", nxt=f"{head()} {_q(a, '--KEY')} {ph}{tail(i)}")
+                    die(f"usage: new flag {_q(a, 'FLAG')} needs a value", nxt=nxt(i, f" {_q(a, '--KEY')} {ph}"))
                 i += 1
                 if a == "--template":
                     template, last_val = v, (i - 1, "template")
@@ -1184,14 +1190,19 @@ def cmd_new(*args):
             else:
                 pair = "--KEY VALUE"
             die(f"usage: new takes --KEY VALUE (the flag is the property name), got {_q(a, 'FLAG')}",
-                nxt=f"{head()} {pair}{tail(i)}")
+                nxt=nxt(i, f" {pair}"))
         elif path is None:
-            path = a
+            path, path_at = a, i - 1
         else:
-            if last_val and last_val[0] == i - 2:
+            if last_val and path_at == last_val[0] + 1:
+                # `vv new --status in progress A`: the PATH slot took a value word,
+                # so which positional is the PATH is a guess — no runnable write
+                die(f"usage: new takes PATH, got extra positional '{a}' (quote a multi-word VALUE)",
+                    nxt="vv new --help")
+            if last_val and last_val[0] == i - 2 and not _is_flag(a):
                 # words right after a value: an unquoted multi-word VALUE (set's surplus rule)
                 j = i
-                while j < len(toks) and not toks[j].startswith("--"):
+                while j < len(toks) and not _is_flag(toks[j]):
                     j += 1
                 words = " ".join(toks[i - 2:j])
                 if last_val[1] == "template":
@@ -1199,8 +1210,8 @@ def cmd_new(*args):
                 else:
                     given[last_val[1]] = (given[last_val[1]][0], words)
                 die(f"usage: new takes PATH, got extra positional '{a}' (VALUE is one argument; quote it)",
-                    nxt=f"{head()}{tail(j)}")
-            die(f"usage: new takes PATH, got extra positional '{a}'", nxt=f"{head()}{tail(i)}")
+                    nxt=nxt(j))
+            die(f"usage: new takes PATH, got extra positional '{a}'", nxt=nxt(i))
     if not path:
         die("usage: new PATH [--template NAME] [--KEY VALUE ...]")
     _dirty_gate()

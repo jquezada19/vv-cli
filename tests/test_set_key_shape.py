@@ -210,12 +210,22 @@ def section_n(eng, tag):
             "usage: new takes --KEY VALUE", "vv new A1 --status done --owner jeff")
     refused(eng, tag, "19b a --k=v token carries its own value and takes nothing after it", ["new", "A6", "--status=done", "Extra"],
             "usage: new takes --KEY VALUE", "vv new A6 --status done Extra")
+    refused(eng, tag, "19c an unquotable tail token sends next to the help, not into a VALUE",
+            ["new", "A7", "--status=done", "--owner\x7f", "jeff"], "usage: new takes --KEY VALUE", "vv new --help")
     refused(eng, tag, "20 incident shape with a tail", ["new", "A2", "--template", "Task", "--key", "description=x", "--status", "open"],
             "usage: new takes --KEY VALUE", "vv new A2 --template Task --description x --status open")
     refused(eng, tag, "21 an unquoted multi-word VALUE is joined, not cut", ["new", "A3", "--description", "a", "b"],
             "usage: new takes PATH, got extra positional 'b' (VALUE is one argument; quote it)", "vv new A3 --description 'a b'")
     refused(eng, tag, "21b a multi-word template name is joined too", ["new", "A4", "--template", "Daily", "Standup", "--status", "x"],
             "usage: new takes PATH, got extra positional 'Standup' (VALUE is one argument; quote it)", "vv new A4 --template 'Daily Standup' --status x")
+    refused(eng, tag, "21c a value word in the PATH slot is ambiguous: next is the help",
+            ["new", "--status", "in", "progress", "A8"],
+            "usage: new takes PATH, got extra positional 'A8' (quote a multi-word VALUE)", "vv new --help")
+    refused(eng, tag, "21d a flag-shaped extra token is not joined into a VALUE", ["new", "A9", "--status", "open", "-v"],
+            "usage: new takes PATH, got extra positional '-v'", "vv new A9 --status open")
+    refused(eng, tag, "21e the join stops at a single-dash flag", ["new", "A10", "--status", "in", "progress", "-v"],
+            "usage: new takes PATH, got extra positional 'progress' (VALUE is one argument; quote it)",
+            "vv new A10 --status 'in progress' -v")
     refused(eng, tag, "22 a repeated global flag is not accepted as a property", ["new", "A5", "--limit", "5", "--limit", "6", "--status=done"],
             "usage: new takes --KEY VALUE (the flag is the property name), got --limit", "vv new A5 --KEY 6 --status=done")
     refused(eng, tag, "23 a flag-shaped PATH is not carried into next (it would print help)", ["new", "--owner", "jeff", "-h", "--status=done"],
