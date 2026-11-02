@@ -1049,6 +1049,14 @@ def _fm_key_split(tok):
     k, eq, v = tok.lstrip("-").partition("=")
     return (k, v if eq else None) if _fm_key_ok(k) else None
 
+# The --vault main consumed, so a derived WRITE next step targets the same
+# vault: without it, `vv --vault B new X --status=done` suggested a command
+# that created X in the default vault.
+_VAULT_ARG = None
+
+def _vv():
+    return "vv" if _VAULT_ARG is None else f"vv --vault {_q(_VAULT_ARG, 'VAULT')}"
+
 def _next_set(args):
     """set's next step when the KEY slot is malformed: one key per call, the
     caller's own pair split into KEY VALUE (`a=1` -> `a 1`, `--k v` -> `k v`)."""
@@ -1058,11 +1066,12 @@ def _next_set(args):
     split = _fm_key_split(args[1])
     key, val = split if split else ("KEY", None)
     if val is None and len(args) > 2:
-        val = args[2]
+        # surplus words are one unquoted VALUE (set's surplus rule), never cut
+        val = " ".join(args[2:]) if not any(_is_flag(t) for t in args[3:]) else None
     if val is not None and val.startswith("--") and _is_flag(val):
         val = None           # main would consume `--jsonl`/`--limit`; any other flag is no VALUE
     key = _q(key, "KEY") if split else key
-    return f"vv set {note} {key} {'VALUE' if val is None else _q(val, 'VALUE')}"
+    return f"{_vv()} set {note} {key} {'VALUE' if val is None else _q(val, 'VALUE')}"
 
 def cmd_set(ref, key, value):
     if not _fm_key_ok(key):
@@ -1149,11 +1158,11 @@ def cmd_new(*args):
         # help, and a global flag in the tail (a repeated `--vault`) would be
         # consumed by main and redirect the write.
         rest = toks[i:]
-        carried = [t for t in [path, template, *[v for _, v in given], *rest] if t is not None]
+        carried = [t for t in [path, template, *[x for kv_ in given for x in kv_], *rest] if t is not None]
         if (any(_CTL.search(t) or " — next: " in t for t in carried)
                 or (path and _is_flag(path)) or any(t in _GLOBAL_FLAGS for t in rest)):
             return "vv new --help"
-        return " ".join(["vv new", _q(path) if path else "PATH"]
+        return " ".join([_vv(), "new", _q(path) if path else "PATH"]
                         + (["--template", _q(template)] if template else [])
                         + [f"--{_q(k)} {_q(v)}" for k, v in given]) + mid + "".join(" " + _q(t) for t in rest)
     i = 0
@@ -1196,7 +1205,7 @@ def cmd_new(*args):
             # An unquoted multi-word VALUE is the usual cause, but which word was
             # meant as the PATH is a guess (`new --status in progress A` put
             # `progress` there), so no runnable write is offered.
-            die(f"usage: new takes PATH, got extra positional '{a}' (quote a multi-word VALUE)",
+            die(f"usage: new takes PATH, got extra positional '{a}' (quote a multi-word PATH or VALUE)",
                 nxt="vv new --help")
     if not path:
         die("usage: new PATH [--template NAME] [--KEY VALUE ...]")
@@ -3414,7 +3423,7 @@ def _generate(kind):
     die(f"usage: unknown --generate kind '{kind}'", nxt="vv --generate man|complete-bash|complete-zsh|complete-fish")
 
 def main():
-    global VAULT, _VAULT_REAL, _op
+    global VAULT, _VAULT_REAL, _VAULT_ARG, _op
     a = sys.argv[1:]
     if a and a[0] in ("--version", "version"):
         print(f"vv {_version()}"); sys.exit(0)
@@ -3442,6 +3451,7 @@ def main():
             die(f"not-found: vault directory {VAULT}")
         os.environ["VV_VAULT"] = VAULT   # rust engine subprocesses inherit it
         _VAULT_REAL = os.path.realpath(VAULT)
+        _VAULT_ARG = VAULT
         a = a[:i] + a[i + 2:]
     if not a:
         # One line, stderr, exit 1: an accidental bare `vv` in an agent loop

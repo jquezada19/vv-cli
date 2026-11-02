@@ -32,7 +32,8 @@ N  `new` flag shape. The flag IS the property name (`--status open`): a flag
    that would itself be refused or consumed as a global flag. Where that
    command could not be trusted (an extra positional — which word was the
    PATH is a guess —, a token that cannot be shell-quoted, a flag-shaped
-   PATH, a global flag in the tail) the next step is `vv new --help`.
+   PATH, a global flag in the tail) the next step is `vv new --help`. A global `--vault`
+   that main consumed rides along into every derived write (`set` and `new`).
 
 Cases marked "(control)" pass at the PR base (origin/main) by design; every
 other numbered case has a check that fails there (sub-checks such as "no
@@ -150,6 +151,10 @@ def section_s(eng, tag):
             SET_BAD + "status=--jsonl", "vv set T status VALUE")
     refused(eng, tag, "10c a flag-shaped VALUE operand is a placeholder", ["set", "T", "--status", "--force"],
             SET_BAD + "--status", "vv set T status VALUE")
+    refused(eng, tag, "10d surplus words after a --KEY are one VALUE, not cut", ["set", "T", "--description", "first", "second"],
+            "usage: set takes 3 positional args, got 4" + SET_HINT, "vv set T description 'first second'")
+    refused(eng, tag, "10e a global --vault rides along into the derived write", ["--vault", eng.vault, "set", "T", "description=a b", "x"],
+            SET_BAD + "'description=a b'", f"vv --vault {eng.vault} set T description 'a b'")
     refused(eng, tag, "11 k= derives an empty value", ["set", "T", "status=", "v"],
             SET_BAD + "status=", "vv set T status ''")
     # arity misses whose KEY slot is malformed: the derived next step, not a junk-writing one
@@ -193,7 +198,7 @@ def section_n(eng, tag):
     refused(eng, tag, "5 whitespace in a flag name", ["new", "Y5", "--my key", "v"],
             "usage: new takes --KEY VALUE (the flag is the property name), got '--my key'", "vv new Y5 --KEY v")
     refused(eng, tag, "6 extra positional", ["new", "Y6", "extra"],
-            "usage: new takes PATH, got extra positional 'extra' (quote a multi-word VALUE)", "vv new --help")
+            "usage: new takes PATH, got extra positional 'extra' (quote a multi-word PATH or VALUE)", "vv new --help")
     refused(eng, tag, "7 --template with no name (was a traceback)", ["new", "Y7", "--template"],
             "usage: new flag --template needs a value", "vv new Y7 --template NAME")
     refused(eng, tag, "11 next keeps the flags already given (new is not idempotent)",
@@ -218,14 +223,14 @@ def section_n(eng, tag):
     refused(eng, tag, "20 incident shape with a tail", ["new", "A2", "--template", "Task", "--key", "description=x", "--status", "open"],
             "usage: new takes --KEY VALUE", "vv new A2 --template Task --description x --status open")
     refused(eng, tag, "21 an unquoted multi-word VALUE is not cut into a runnable write", ["new", "A3", "--description", "a", "b"],
-            "usage: new takes PATH, got extra positional 'b' (quote a multi-word VALUE)", "vv new --help")
+            "usage: new takes PATH, got extra positional 'b' (quote a multi-word PATH or VALUE)", "vv new --help")
     refused(eng, tag, "21b …nor a multi-word template name", ["new", "A4", "--template", "Daily", "Standup", "--status", "x"],
-            "usage: new takes PATH, got extra positional 'Standup' (quote a multi-word VALUE)", "vv new --help")
+            "usage: new takes PATH, got extra positional 'Standup' (quote a multi-word PATH or VALUE)", "vv new --help")
     refused(eng, tag, "21c a value word in the PATH slot is ambiguous: next is the help",
             ["new", "--status", "in", "progress", "A8"],
-            "usage: new takes PATH, got extra positional 'A8' (quote a multi-word VALUE)", "vv new --help")
+            "usage: new takes PATH, got extra positional 'A8' (quote a multi-word PATH or VALUE)", "vv new --help")
     refused(eng, tag, "21d a value word in the PATH slot with a later flag", ["new", "--status", "in", "progress", "--owner", "jeff", "A9"],
-            "usage: new takes PATH, got extra positional 'A9' (quote a multi-word VALUE)", "vv new --help")
+            "usage: new takes PATH, got extra positional 'A9' (quote a multi-word PATH or VALUE)", "vv new --help")
     refused(eng, tag, "21e …the same through a malformed-flag refusal: the tail is carried, then refused",
             ["new", "--status", "in", "progress", "--owner=jeff", "A10"],
             "usage: new takes --KEY VALUE", "vv new progress --status in --owner jeff A10")
@@ -237,6 +242,18 @@ def section_n(eng, tag):
             "usage: new takes --KEY VALUE (the flag is the property name), got --limit", "vv new A5 --KEY 6 --status=done")
     refused(eng, tag, "23 a flag-shaped PATH is not carried into next (it would print help)", ["new", "--owner", "jeff", "-h", "--status=done"],
             "usage: new takes --KEY VALUE", "vv new --help")
+    refused(eng, tag, "24 a global --vault rides along into new's derived write", ["--vault", eng.vault, "new", "B1", "--status=done"],
+            "usage: new takes --KEY VALUE", f"vv --vault {eng.vault} new B1 --status done")
+    refused(eng, tag, "25 an unquotable PATH sends next to the help", ["new", "B2\nx", "--status=done"],
+            "usage: new takes --KEY VALUE", "vv new --help")
+    refused(eng, tag, "25b …and an unquotable template name", ["new", "B3", "--template", "T\tx", "--status=done"],
+            "usage: new takes --KEY VALUE", "vv new --help")
+    if eng.name == "python":
+        # a non-UTF-8 argv byte decodes to a lone surrogate: a valid-looking key
+        # _q cannot quote (python arm only — the native entry's non-UTF-8 argv
+        # panic is a separate, pre-existing defect)
+        refused(eng, tag, "26 an unquotable accepted KEY sends next to the help", ["new", "B4", "--\udcffk", "v", "--status=done"],
+                "usage: new takes --KEY VALUE", "vv new --help")
     with open(os.path.join(eng.vault, "Templates", "Block.md"), "w") as f:
         f.write("---\ndescription: |\n  first\n  second\n---\n# B\n")
     r = eng.run("new", "X15", "--template", "Block", "--description", "|")
