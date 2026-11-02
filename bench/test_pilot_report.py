@@ -178,13 +178,13 @@ def main():
 
         daily_crit_out = run_report("--since 2026-09-24 --until 2026-09-25 --criteria",
                                     metrics_path, legacy_path)
-        # The target is registered for standups that HAVE a Today section; `eof`
-        # is daily-append's landing when none matched, so it is outside the
-        # denominator and reported beside it, never scored as a miss.
-        check("daily-append landing rate scored only on Today-shaped standups",
-              "| daily-append Today landings | baseline n/a | target 100% on standups with a Today section | "
-              "100% (1/1) · 1 eof: no Today section matched · 0 failed |"
+        check("daily-append landing rate measured from sel rows",
+              "daily-append Today landings | baseline n/a | target 100% | 50% |"
               in daily_crit_out, daily_crit_out)
+        # A row cannot say whether its note had a Today section, so `eof` stays
+        # in the rate and is named beside the table rather than scored away.
+        check("daily-append eof landings are named beside the rate",
+              "daily-append: 1 eof landing(s)" in daily_crit_out, daily_crit_out)
 
     # Regression pin: an all-synthetic vv window (every row carries `src`)
     # with an empty legacy sink must still trip the synthetic-only abort
@@ -256,9 +256,8 @@ def main():
 
     beat = {"route": "legacy", "op": "alive", "eligible": False, "schema": 2}
 
-    # 1. `resolve` is a name lookup with no legacy counterpart the hook can see
-    #    (a collision-gate hook issued ~1,550 of them unstamped): it must not pad
-    #    the adoption numerator, headline or criteria.
+    # 1. Unstamped `resolve` rows before the gate began stamping are hook probes:
+    #    they must not pad the adoption numerator, headline or criteria.
     with tempfile.TemporaryDirectory(prefix="vv-pilot-report-resolve-") as tmp:
         mp, lp = write(tmp,
                        [vrow("2026-11-01T10:00:0%d" % i, "read") for i in range(2)]
@@ -271,6 +270,36 @@ def main():
               "vv handled 2 of 4 eligible" in out, out)
         check("resolve rows stay out of the criteria adoption numerator",
               "target ≥ 85% every active day | 50% |" in out, out)
+        check("excluded probes are named, headline shape unchanged",
+              "not counted: 3 unstamped collision-gate" in out
+              and "eligible vault ops (50%) · raw legacy rows:" in out, out)
+    # ...but a `resolve` after stamping began is a genuine lookup and counts.
+    with tempfile.TemporaryDirectory(prefix="vv-pilot-report-resolve-late-") as tmp:
+        mp, lp = write(tmp,
+                       [vrow("2026-11-03T10:00:00", "resolve")],
+                       [dict(beat, ts="2026-11-03T09:00:00"), lrow("2026-11-03T10:00:01")])
+        out = run_report("--since 2026-11-03 --until 2026-11-04", mp, lp)
+        check("a resolve after stamping began counts as adoption",
+              "vv handled 1 of 2 eligible" in out, out)
+    # A day of gate probes alone is a 0% day, not a missing one -- and a probe
+    # day still starts the cohort, so a later legacy-only day is in range.
+    with tempfile.TemporaryDirectory(prefix="vv-pilot-report-probeday-") as tmp:
+        mp, lp = write(tmp,
+                       [vrow("2026-10-30T10:00:00", "resolve"), vrow("2026-11-01T10:00:00", "read")],
+                       [dict(beat, ts="2026-10-30T09:00:00"), dict(beat, ts="2026-10-31T09:00:00"),
+                        dict(beat, ts="2026-11-01T09:00:00"),
+                        lrow("2026-10-31T10:00:00")])
+        out = run_report("--since 2026-10-30 --until 2026-11-02 --criteria", mp, lp)
+        check("a legacy-only day after a probe-only cohort start reads 0%",
+              "target ≥ 85% every active day | 0% |" in out, out)
+    with tempfile.TemporaryDirectory(prefix="vv-pilot-report-probeonly-") as tmp:
+        mp, lp = write(tmp,
+                       [vrow("2026-11-01T10:00:00", "read"), vrow("2026-10-31T10:00:00", "resolve")],
+                       [dict(beat, ts="2026-10-31T09:00:00"), dict(beat, ts="2026-11-01T09:00:00"),
+                        lrow("2026-10-31T10:00:01")])
+        out = run_report("--since 2026-10-31 --until 2026-11-02 --criteria", mp, lp)
+        check("a day of gate probes plus legacy work reads 0%",
+              "target ≥ 85% every active day | 0% |" in out, out)
 
     # 2. A covered day with eligible legacy work and NO vv rows of any version is
     #    0% adoption, not absent -- the worst day must not vanish from the min.
@@ -303,6 +332,17 @@ def main():
         out = run_report("--since 2026-11-01 --until 2026-11-02", mp, lp)
         check("explicit eligible:false is honoured over inference",
               "vv handled 1 of 1 eligible" in out, out)
+    # A non-boolean declaration is not a declaration: it is inferred, so a
+    # malformed row cannot make adoption look better.
+    with tempfile.TemporaryDirectory(prefix="vv-pilot-report-nonbool-") as tmp:
+        mp, lp = write(tmp,
+                       [vrow("2026-11-01T10:00:00", "read")],
+                       [dict(beat, ts="2026-11-01T09:00:00"),
+                        lrow("2026-11-01T10:00:01", eligible="true"),
+                        lrow("2026-11-01T10:00:02", eligible=None)])
+        out = run_report("--since 2026-11-01 --until 2026-11-02", mp, lp)
+        check("non-boolean eligible falls back to inference",
+              "vv handled 1 of 3 eligible" in out, out)
 
     print(("ALL PASS (pilot report: %d)" % checks_run) if not fails
           else "FAILURES: " + ", ".join(fails))
