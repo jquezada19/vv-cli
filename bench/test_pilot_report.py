@@ -91,8 +91,8 @@ def main():
 
     # Regression pin: note-touching adoption must be computed over the SAME
     # ver>=3.1.0 cohort as the rest of the --criteria table -- a pre-3.1.0 vv
-    # row must not pad a day's numerator, and a day with no ver>=3.1.0 vv
-    # traffic at all must not be dragged in by legacy volume alone. Both bugs
+    # row must not pad a day's numerator, and a day whose only vv traffic is
+    # pre-3.1.0 must not be dragged in by legacy volume alone. Both bugs
     # would otherwise drop the printed value from the correct 50% to 29%.
     with tempfile.TemporaryDirectory(prefix="vv-pilot-report-ver-") as tmp:
         metrics_path = os.path.join(tmp, "vv.jsonl")
@@ -181,6 +181,10 @@ def main():
         check("daily-append landing rate measured from sel rows",
               "daily-append Today landings | baseline n/a | target 100% | 50% |"
               in daily_crit_out, daily_crit_out)
+        # A row cannot say whether its note had a Today section, so `eof` stays
+        # in the rate and is named beside the table rather than scored away.
+        check("daily-append eof landings are named beside the rate",
+              "daily-append: 1 eof landing(s)" in daily_crit_out, daily_crit_out)
 
     # Regression pin: an all-synthetic vv window (every row carries `src`)
     # with an empty legacy sink must still trip the synthetic-only abort
@@ -233,6 +237,138 @@ def main():
               bool(dark_line) and "2026-10-06" not in dark_line, out)
         check("sha8 is retired with the written reason",
               "sha8: retired" in out and "FAILED at 0" in out, out)
+
+    # Instrument defects found re-measuring the 3.2 criteria.
+    def write(tmp, vv, legacy):
+        mp, lp = os.path.join(tmp, "vv.jsonl"), os.path.join(tmp, "legacy.jsonl")
+        with open(mp, "w") as f:
+            f.write("".join(json.dumps(r) + "\n" for r in vv))
+        with open(lp, "w") as f:
+            f.write("".join(json.dumps(r) + "\n" for r in legacy))
+        return mp, lp
+
+    def vrow(ts, op, **kw):
+        return {"ts": ts, "op": op, "ms": 1, "out_bytes": 1, "exit": 0, "ver": "3.2.0", **kw}
+
+    def lrow(ts, **kw):
+        return {"ts": ts, "route": "legacy", "op": "read", "tool": "Read", "note_bytes": 10,
+                "eligible": True, "schema": 2, **kw}
+
+    beat = {"route": "legacy", "op": "alive", "eligible": False, "schema": 2}
+
+    # 1. Unstamped `resolve` rows before the gate began stamping are hook probes:
+    #    they must not pad the adoption numerator, headline or criteria.
+    with tempfile.TemporaryDirectory(prefix="vv-pilot-report-resolve-") as tmp:
+        mp, lp = write(tmp,
+                       [vrow("2026-11-01T10:00:0%d" % i, "read") for i in range(2)]
+                       + [vrow("2026-11-01T10:01:0%d" % i, "resolve", exit=1, kind="not-found")
+                          for i in range(3)],
+                       [dict(beat, ts="2026-11-01T09:00:00")]
+                       + [lrow("2026-11-01T10:02:0%d" % i) for i in range(2)])
+        out = run_report("--since 2026-11-01 --until 2026-11-02 --criteria", mp, lp)
+        check("resolve rows stay out of the headline adoption numerator",
+              "vv handled 2 of 4 eligible" in out, out)
+        check("resolve rows stay out of the criteria adoption numerator",
+              "target ≥ 85% every active day | 50% |" in out, out)
+        check("excluded probes are named, headline shape unchanged",
+              "not counted: 3 unstamped collision-gate" in out
+              and "eligible vault ops (50%) · raw legacy rows:" in out, out)
+    # ...but a `resolve` after stamping began is a genuine lookup and counts.
+    with tempfile.TemporaryDirectory(prefix="vv-pilot-report-resolve-late-") as tmp:
+        mp, lp = write(tmp,
+                       [vrow("2026-11-03T10:00:00", "resolve")],
+                       [dict(beat, ts="2026-11-03T09:00:00"), lrow("2026-11-03T10:00:01")])
+        out = run_report("--since 2026-11-03 --until 2026-11-04", mp, lp)
+        check("a resolve after stamping began counts as adoption",
+              "vv handled 1 of 2 eligible" in out, out)
+    # A day of gate probes alone is a 0% day, not a missing one -- and a probe
+    # day still starts the cohort, so a later legacy-only day is in range.
+    with tempfile.TemporaryDirectory(prefix="vv-pilot-report-probeday-") as tmp:
+        mp, lp = write(tmp,
+                       [vrow("2026-10-30T10:00:00", "resolve"), vrow("2026-11-01T10:00:00", "read")],
+                       [dict(beat, ts="2026-10-30T09:00:00"), dict(beat, ts="2026-10-31T09:00:00"),
+                        dict(beat, ts="2026-11-01T09:00:00"),
+                        lrow("2026-10-31T10:00:00")])
+        out = run_report("--since 2026-10-30 --until 2026-11-02 --criteria", mp, lp)
+        check("a legacy-only day after a probe-only cohort start reads 0%",
+              "target ≥ 85% every active day | 0% |" in out, out)
+    with tempfile.TemporaryDirectory(prefix="vv-pilot-report-probeonly-") as tmp:
+        mp, lp = write(tmp,
+                       [vrow("2026-11-01T10:00:00", "read"), vrow("2026-10-31T10:00:00", "resolve")],
+                       [dict(beat, ts="2026-10-31T09:00:00"), dict(beat, ts="2026-11-01T09:00:00"),
+                        lrow("2026-10-31T10:00:01")])
+        out = run_report("--since 2026-10-31 --until 2026-11-02 --criteria", mp, lp)
+        check("a day of gate probes plus legacy work reads 0%",
+              "target ≥ 85% every active day | 0% |" in out, out)
+    # A day of probes with no legacy row of any kind is still a dark day.
+    with tempfile.TemporaryDirectory(prefix="vv-pilot-report-probedark-") as tmp:
+        mp, lp = write(tmp,
+                       [vrow("2026-10-30T10:00:00", "resolve"), vrow("2026-11-01T10:00:00", "read")],
+                       [dict(beat, ts="2026-11-01T09:00:00")])
+        out = run_report("--since 2026-10-30 --until 2026-11-02 --criteria", mp, lp)
+        check("a probe-only day without a denominator is dark",
+              "n/a (denominator dark 1 day(s): 2026-10-30)" in out, out)
+    # The hook did not exist before 2026-10-07: a resolve then was a lookup.
+    with tempfile.TemporaryDirectory(prefix="vv-pilot-report-prehook-") as tmp:
+        mp, lp = write(tmp,
+                       [vrow("2026-09-21T10:00:00", "resolve")],
+                       [dict(beat, ts="2026-09-21T09:00:00"), lrow("2026-09-21T10:00:01")])
+        out = run_report("--since 2026-09-21 --until 2026-09-22", mp, lp)
+        check("a resolve before the hook existed counts as adoption",
+              "vv handled 1 of 2 eligible" in out, out)
+    # A day whose only vv traffic is a pre-3.1.0 row stays out, probe or not.
+    with tempfile.TemporaryDirectory(prefix="vv-pilot-report-oldprobe-") as tmp:
+        mp, lp = write(tmp,
+                       [vrow("2026-10-30T10:00:00", "read"),
+                        vrow("2026-10-31T10:00:00", "resolve", ver="3.0.0")],
+                       [dict(beat, ts="2026-10-30T09:00:00"), dict(beat, ts="2026-10-31T09:00:00"),
+                        lrow("2026-10-31T10:00:01")])
+        out = run_report("--since 2026-10-30 --until 2026-11-01 --criteria", mp, lp)
+        check("an old-version-only day stays out even when its rows are probes",
+              "target ≥ 85% every active day | 100% |" in out, out)
+
+    # 2. A covered day with eligible legacy work and NO vv rows of any version is
+    #    0% adoption, not absent -- the worst day must not vanish from the min.
+    #    (A day whose vv traffic is all pre-3.1.0 stays excluded: pinned above.)
+    with tempfile.TemporaryDirectory(prefix="vv-pilot-report-legacyonly-") as tmp:
+        mp, lp = write(tmp,
+                       [vrow("2026-11-01T10:00:00", "read")],
+                       [dict(beat, ts="2026-11-01T09:00:00"), dict(beat, ts="2026-11-02T09:00:00"),
+                        lrow("2026-11-02T10:00:00"), lrow("2026-11-02T10:00:01")])
+        out = run_report("--since 2026-11-01 --until 2026-11-03 --criteria", mp, lp)
+        check("a legacy-only day enters the per-day min as 0%",
+              "target ≥ 85% every active day | 0% |" in out, out)
+    # ...but not one before the cohort's first day: that predates what is measured.
+    with tempfile.TemporaryDirectory(prefix="vv-pilot-report-precohort-") as tmp:
+        mp, lp = write(tmp,
+                       [vrow("2026-11-02T10:00:00", "read")],
+                       [dict(beat, ts="2026-11-01T09:00:00"), dict(beat, ts="2026-11-02T09:00:00"),
+                        lrow("2026-11-01T10:00:00"), lrow("2026-11-01T10:00:01")])
+        out = run_report("--since 2026-11-01 --until 2026-11-03 --criteria", mp, lp)
+        check("a legacy-only day before the cohort starts stays out of the min",
+              "target ≥ 85% every active day | 100% |" in out, out)
+
+    # 3. A legacy row that declares `eligible: false` is not eligible, even when
+    #    the schema-1 inference (note_bytes > 0 and a Read/Edit tool) would say so.
+    with tempfile.TemporaryDirectory(prefix="vv-pilot-report-explicitfalse-") as tmp:
+        mp, lp = write(tmp,
+                       [vrow("2026-11-01T10:00:00", "read")],
+                       [dict(beat, ts="2026-11-01T09:00:00"),
+                        lrow("2026-11-01T10:00:01", eligible=False)])
+        out = run_report("--since 2026-11-01 --until 2026-11-02", mp, lp)
+        check("explicit eligible:false is honoured over inference",
+              "vv handled 1 of 1 eligible" in out, out)
+    # A non-boolean declaration is not a declaration: it is inferred, so a
+    # malformed row cannot make adoption look better.
+    with tempfile.TemporaryDirectory(prefix="vv-pilot-report-nonbool-") as tmp:
+        mp, lp = write(tmp,
+                       [vrow("2026-11-01T10:00:00", "read")],
+                       [dict(beat, ts="2026-11-01T09:00:00"),
+                        lrow("2026-11-01T10:00:01", eligible="true"),
+                        lrow("2026-11-01T10:00:02", eligible=None)])
+        out = run_report("--since 2026-11-01 --until 2026-11-02", mp, lp)
+        check("non-boolean eligible falls back to inference",
+              "vv handled 1 of 3 eligible" in out, out)
 
     print(("ALL PASS (pilot report: %d)" % checks_run) if not fails
           else "FAILURES: " + ", ".join(fails))
