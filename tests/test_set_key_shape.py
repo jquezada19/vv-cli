@@ -143,6 +143,10 @@ def section_s(eng, tag):
             SET_BAD + "a=b", "vv set Missing a b")
     refused(eng, tag, "10' a flag in the NOTE slot still derives the key", ["set", "--foo", "a=b", "v"],
             SET_BAD + "a=b", "vv set NOTE a b")
+    refused(eng, tag, "10b a derived global-flag VALUE is a placeholder", ["set", "T", "status=--jsonl", "ignored"],
+            SET_BAD + "status=--jsonl", "vv set T status VALUE")
+    refused(eng, tag, "10c a flag-shaped VALUE operand is a placeholder", ["set", "T", "--status", "--force"],
+            SET_BAD + "--status", "vv set T status VALUE")
     refused(eng, tag, "11 k= derives an empty value", ["set", "T", "status=", "v"],
             SET_BAD + "status=", "vv set T status ''")
     # arity misses whose KEY slot is malformed: the derived next step, not a junk-writing one
@@ -182,9 +186,9 @@ def section_n(eng, tag):
     refused(eng, tag, "3 flag with no value (was a traceback)", ["new", "Y3", "--status"],
             "usage: new flag --status needs a value", "vv new Y3 --status VALUE")
     refused(eng, tag, "4 flag whose value is a flag", ["new", "Y4", "--status", "--type", "t"],
-            "usage: new flag --status needs a value", "vv new Y4 --status VALUE")
+            "usage: new flag --status needs a value", "vv new Y4 --status VALUE --type t")
     refused(eng, tag, "5 whitespace in a flag name", ["new", "Y5", "--my key", "v"],
-            "usage: new takes --KEY VALUE (the flag is the property name), got '--my key'", "vv new Y5 --KEY VALUE")
+            "usage: new takes --KEY VALUE (the flag is the property name), got '--my key'", "vv new Y5 --KEY v")
     refused(eng, tag, "6 extra positional", ["new", "Y6", "extra"],
             "usage: new takes PATH, got extra positional 'extra'", "vv new Y6")
     refused(eng, tag, "7 --template with no name (was a traceback)", ["new", "Y7", "--template"],
@@ -202,6 +206,20 @@ def section_n(eng, tag):
             "usage: new takes --KEY VALUE", "vv new X13 --KEY VALUE")
     refused(eng, tag, "17 --key key=x does not derive --key", ["new", "X14", "--key", "key=x"],
             "usage: new takes --KEY VALUE", "vv new X14 --KEY VALUE")
+    refused(eng, tag, "19 the tail after a malformed flag rides along", ["new", "A1", "--status=done", "--owner", "jeff"],
+            "usage: new takes --KEY VALUE", "vv new A1 --status done --owner jeff")
+    refused(eng, tag, "19b a --k=v token carries its own value and takes nothing after it", ["new", "A6", "--status=done", "Extra"],
+            "usage: new takes --KEY VALUE", "vv new A6 --status done Extra")
+    refused(eng, tag, "20 incident shape with a tail", ["new", "A2", "--template", "Task", "--key", "description=x", "--status", "open"],
+            "usage: new takes --KEY VALUE", "vv new A2 --template Task --description x --status open")
+    refused(eng, tag, "21 an unquoted multi-word VALUE is joined, not cut", ["new", "A3", "--description", "a", "b"],
+            "usage: new takes PATH, got extra positional 'b' (VALUE is one argument; quote it)", "vv new A3 --description 'a b'")
+    refused(eng, tag, "21b a multi-word template name is joined too", ["new", "A4", "--template", "Daily", "Standup", "--status", "x"],
+            "usage: new takes PATH, got extra positional 'Standup' (VALUE is one argument; quote it)", "vv new A4 --template 'Daily Standup' --status x")
+    refused(eng, tag, "22 a repeated global flag is not accepted as a property", ["new", "A5", "--limit", "5", "--limit", "6", "--status=done"],
+            "usage: new takes --KEY VALUE (the flag is the property name), got --limit", "vv new A5 --KEY 6 --status=done")
+    refused(eng, tag, "23 a flag-shaped PATH is not carried into next (it would print help)", ["new", "--owner", "jeff", "-h", "--status=done"],
+            "usage: new takes --KEY VALUE", "vv new PATH --owner jeff --status done")
     with open(os.path.join(eng.vault, "Templates", "Block.md"), "w") as f:
         f.write("---\ndescription: |\n  first\n  second\n---\n# B\n")
     r = eng.run("new", "X15", "--template", "Block", "--description", "|")

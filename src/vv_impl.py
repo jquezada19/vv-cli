@@ -1059,6 +1059,8 @@ def _next_set(args):
     key, val = split if split else ("KEY", None)
     if val is None and len(args) > 2:
         val = args[2]
+    if val is not None and val.startswith("--") and _is_flag(val):
+        val = None           # main would consume `--jsonl`/`--limit`; any other flag is no VALUE
     key = _q(key, "KEY") if split else key
     return f"vv set {note} {key} {'VALUE' if val is None else _q(val, 'VALUE')}"
 
@@ -1121,7 +1123,9 @@ def cmd_unset(ref, key):
     atomic_write(fp, _fm_join(bom, eol1, kept, eol2, tail, body), expect_sig=_sig)
     out(f"unset {key} in {rel(fp)}")
 
-_NEW_NO_DERIVE = {"key", "limit", "vault", "jsonl"}
+# Not settable as `new` properties: the usage placeholder, and the global flags
+# main consumes before `new` sees them (a repeated `--vault` reached `new`).
+_NEW_NOT_PROPERTY = {"key", "limit", "vault", "jsonl"}
 
 def cmd_new(*args):
     # The flag IS the property name (`--status open`). Every malformed shape is
@@ -1130,45 +1134,73 @@ def cmd_new(*args):
     # property), `--status=done` and a trailing `--status` raised
     # StopIteration, and an extra positional was silently dropped. Values are
     # written as given (yaml_scalar here would quote a block-scalar header).
+    toks = list(args)
     path, template, kv, given = None, None, {}, []
-    it = iter(args)
+    last_val = None          # (toks index, given index or "template") of the last accepted value
+    def flagish(t):
+        return t.startswith("--") and _is_flag(t)
     def head():
         # every flag already accepted rides along: `new` is not idempotent, so a
-        # next step that drops one creates the note without it
-        return " ".join(["vv new", _q(path, "PATH") if path else "PATH"]
+        # next step that drops one creates the note without it. A flag-shaped
+        # PATH (`-h`) would turn the next step into help, so it is a placeholder.
+        return " ".join(["vv new", _q(path, "PATH") if path and not _is_flag(path) else "PATH"]
                         + (["--template", _q(template, "NAME")] if template else [])
                         + [f"--{_q(k, 'KEY')} {_q(v, 'VALUE')}" for k, v in given])
-    for a in it:
+    def tail(i):
+        # the caller's own remaining tokens, unparsed: a second mistake there is
+        # refused on the next call, never dropped
+        return "".join(" " + _q(t, "ARG") for t in toks[i:])
+    i = 0
+    while i < len(toks):
+        a = toks[i]; i += 1
         if a.startswith("--"):
-            v = next(it, None)
-            if a == "--template" or (_fm_key_ok(a[2:]) and a != "--key"):
-                if v is None or (v.startswith("--") and _is_flag(v)):
+            if a == "--template" or (_fm_key_ok(a[2:]) and a[2:] not in _NEW_NOT_PROPERTY):
+                v = toks[i] if i < len(toks) else None
+                if v is None or flagish(v):
                     ph = "NAME" if a == "--template" else "VALUE"
-                    die(f"usage: new flag {_q(a, 'FLAG')} needs a value", nxt=f"{head()} {_q(a, '--KEY')} {ph}")
+                    die(f"usage: new flag {_q(a, 'FLAG')} needs a value", nxt=f"{head()} {_q(a, '--KEY')} {ph}{tail(i)}")
+                i += 1
                 if a == "--template":
-                    template = v
+                    template, last_val = v, (i - 1, "template")
                 else:
                     kv[a[2:]] = v
                     given.append((a[2:], v))
+                    last_val = (i - 1, len(given) - 1)
                 continue
-            # `--key k=v` and `--k=v` derive the intended pair; anything else is a placeholder
+            # malformed. A `--k=v` token carries its own value; otherwise the next
+            # non-flag token is the value the caller meant for it.
+            v = None
+            if "=" not in a and i < len(toks) and not flagish(toks[i]):
+                v, i = toks[i], i + 1
             split = _fm_key_split(v) if a == "--key" and v is not None else _fm_key_split(a)
             # derive only a pair that would itself be accepted as a property: never
-            # `--key`, a global flag (`--limit`/`--vault`/`--jsonl` are consumed by
-            # main before `new` sees them), `--template` from `--key template=X`,
-            # or a value that is itself a flag
-            if (split and split[1] is not None and split[0] not in _NEW_NO_DERIVE
-                    and (split[0] != "template" or a != "--key")
-                    and not (split[1].startswith("--") and _is_flag(split[1]))):
+            # `--key`, a global flag, `--template` from `--key template=X`, or a
+            # value that is itself a flag
+            if (split and split[1] is not None and split[0] not in _NEW_NOT_PROPERTY
+                    and (split[0] != "template" or a != "--key") and not flagish(split[1])):
                 pair = f"--{_q(split[0], 'KEY')} {_q(split[1], 'VALUE')}"
+            elif v is not None and a != "--key":
+                pair = f"--KEY {_q(v, 'VALUE')}"
             else:
                 pair = "--KEY VALUE"
             die(f"usage: new takes --KEY VALUE (the flag is the property name), got {_q(a, 'FLAG')}",
-                nxt=f"{head()} {pair}")
+                nxt=f"{head()} {pair}{tail(i)}")
         elif path is None:
             path = a
         else:
-            die(f"usage: new takes PATH, got extra positional '{a}'", nxt=head())
+            if last_val and last_val[0] == i - 2:
+                # words right after a value: an unquoted multi-word VALUE (set's surplus rule)
+                j = i
+                while j < len(toks) and not toks[j].startswith("--"):
+                    j += 1
+                words = " ".join(toks[i - 2:j])
+                if last_val[1] == "template":
+                    template = words
+                else:
+                    given[last_val[1]] = (given[last_val[1]][0], words)
+                die(f"usage: new takes PATH, got extra positional '{a}' (VALUE is one argument; quote it)",
+                    nxt=f"{head()}{tail(j)}")
+            die(f"usage: new takes PATH, got extra positional '{a}'", nxt=f"{head()}{tail(i)}")
     if not path:
         die("usage: new PATH [--template NAME] [--KEY VALUE ...]")
     _dirty_gate()
