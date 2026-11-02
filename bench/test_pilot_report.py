@@ -91,8 +91,8 @@ def main():
 
     # Regression pin: note-touching adoption must be computed over the SAME
     # ver>=3.1.0 cohort as the rest of the --criteria table -- a pre-3.1.0 vv
-    # row must not pad a day's numerator, and a day with no ver>=3.1.0 vv
-    # traffic at all must not be dragged in by legacy volume alone. Both bugs
+    # row must not pad a day's numerator, and a day whose only vv traffic is
+    # pre-3.1.0 must not be dragged in by legacy volume alone. Both bugs
     # would otherwise drop the printed value from the correct 50% to 29%.
     with tempfile.TemporaryDirectory(prefix="vv-pilot-report-ver-") as tmp:
         metrics_path = os.path.join(tmp, "vv.jsonl")
@@ -300,6 +300,32 @@ def main():
         out = run_report("--since 2026-10-31 --until 2026-11-02 --criteria", mp, lp)
         check("a day of gate probes plus legacy work reads 0%",
               "target ≥ 85% every active day | 0% |" in out, out)
+    # A day of probes with no legacy row of any kind is still a dark day.
+    with tempfile.TemporaryDirectory(prefix="vv-pilot-report-probedark-") as tmp:
+        mp, lp = write(tmp,
+                       [vrow("2026-10-30T10:00:00", "resolve"), vrow("2026-11-01T10:00:00", "read")],
+                       [dict(beat, ts="2026-11-01T09:00:00")])
+        out = run_report("--since 2026-10-30 --until 2026-11-02 --criteria", mp, lp)
+        check("a probe-only day without a denominator is dark",
+              "n/a (denominator dark 1 day(s): 2026-10-30)" in out, out)
+    # The hook did not exist before 2026-10-07: a resolve then was a lookup.
+    with tempfile.TemporaryDirectory(prefix="vv-pilot-report-prehook-") as tmp:
+        mp, lp = write(tmp,
+                       [vrow("2026-09-21T10:00:00", "resolve")],
+                       [dict(beat, ts="2026-09-21T09:00:00"), lrow("2026-09-21T10:00:01")])
+        out = run_report("--since 2026-09-21 --until 2026-09-22", mp, lp)
+        check("a resolve before the hook existed counts as adoption",
+              "vv handled 1 of 2 eligible" in out, out)
+    # A day whose only vv traffic is a pre-3.1.0 row stays out, probe or not.
+    with tempfile.TemporaryDirectory(prefix="vv-pilot-report-oldprobe-") as tmp:
+        mp, lp = write(tmp,
+                       [vrow("2026-10-30T10:00:00", "read"),
+                        vrow("2026-10-31T10:00:00", "resolve", ver="3.0.0")],
+                       [dict(beat, ts="2026-10-30T09:00:00"), dict(beat, ts="2026-10-31T09:00:00"),
+                        lrow("2026-10-31T10:00:01")])
+        out = run_report("--since 2026-10-30 --until 2026-11-01 --criteria", mp, lp)
+        check("an old-version-only day stays out even when its rows are probes",
+              "target ≥ 85% every active day | 100% |" in out, out)
 
     # 2. A covered day with eligible legacy work and NO vv rows of any version is
     #    0% adoption, not absent -- the worst day must not vanish from the min.

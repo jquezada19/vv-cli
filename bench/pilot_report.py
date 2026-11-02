@@ -183,17 +183,20 @@ def is_eligible_legacy(r):
         "Read", "Edit", "MultiEdit", "Write")
 
 
-# Before this moment a collision-gate hook ran `vv resolve` as an existence
+# Between these moments a collision-gate hook ran `vv resolve` as an existence
 # probe around every vv write without stamping `src`: 878 of the 3,778 vv rows
-# (23%) in 2026-10-10..24. Those rows are hook traffic, not note work; from
-# here on the hook stamps them and strip_src() drops them like any other.
+# (23%) in 2026-10-10..24. Those rows are hook traffic, not note work; before
+# the hook existed a resolve was a lookup, and after it the hook stamps its
+# probes so strip_src() drops them like any other.
+GATE_PROBE_UNSTAMPED_FROM = "2026-10-07"
 GATE_PROBE_STAMPED_SINCE = "2026-11-02T15:57"
 
 
 def adoption_rows(rows):
     """vv rows that count as adoption: all but the unstamped gate probes."""
     return [r for r in rows
-            if not (r.get("op") == "resolve" and r.get("ts", "") < GATE_PROBE_STAMPED_SINCE)]
+            if not (r.get("op") == "resolve"
+                    and GATE_PROBE_UNSTAMPED_FROM <= r.get("ts", "") < GATE_PROBE_STAMPED_SINCE)]
 
 
 def strip_src(rows):
@@ -256,7 +259,7 @@ def print_sel_census(rows):
     print("\nselector census: " + ", ".join(f"sel {k}: {n}" for k, n in counts.most_common()))
 
 
-def per_day_eligible_adoption_min(rows, legacy, restrict_days=None):
+def per_day_eligible_adoption_min(rows, legacy, restrict_days=None, active=None):
     """(min over covered active days of vv/(vv+eligible legacy) as a percentage,
     list of DARK days). A day is dark when vv has rows but the legacy sink has
     no row of any kind -- not even the hook's heartbeat -- so the denominator was
@@ -268,17 +271,21 @@ def per_day_eligible_adoption_min(rows, legacy, restrict_days=None):
     window as a `rows` cohort that has already been filtered (e.g. by
     `ver`), so a day whose vv traffic is all outside the cohort can't drag
     the min down (or a vv-only day inflate it). A covered day with no vv
-    rows at all belongs in that set: it is 0% adoption, the worst day there is."""
+    rows at all belongs in that set: it is 0% adoption, the worst day there is.
+
+    `active`, when given, is every vv row the dark check should see -- a day
+    of rows that are not adoption is still a day vv ran without a denominator."""
     vv_by_day = collections.Counter(r["ts"][:10] for r in rows)
+    active_by_day = collections.Counter(r["ts"][:10] for r in (rows if active is None else active))
     legacy_any = collections.Counter(r["ts"][:10] for r in legacy)
     legacy_by_day = collections.Counter(
         r["ts"][:10] for r in legacy if is_eligible_legacy(r))
-    days = set(vv_by_day) | set(legacy_by_day)
+    days = set(active_by_day) | set(legacy_by_day)
     if restrict_days is not None:
         days &= restrict_days
     pcts, dark = [], []
     for d in sorted(days):
-        if vv_by_day.get(d, 0) and not legacy_any.get(d, 0):
+        if active_by_day.get(d, 0) and not legacy_any.get(d, 0):
             dark.append(d)
             continue
         tot = vv_by_day.get(d, 0) + legacy_by_day.get(d, 0)
@@ -317,11 +324,12 @@ def print_criteria(rows, legacy):
     # that are adoption, so a day of gate probes alone still reads 0%.
     cohort = adoption_rows(measured)
     measured_days = {r["ts"][:10] for r in measured}
-    any_vv_days = {r["ts"][:10] for r in adoption_rows(rows)}
+    any_vv_days = {r["ts"][:10] for r in rows}
     first = min(measured_days) if measured_days else None
     legacy_only = {r["ts"][:10] for r in legacy if is_eligible_legacy(r)
                    and r["ts"][:10] not in any_vv_days and first and r["ts"][:10] >= first}
-    note_touch, dark = per_day_eligible_adoption_min(cohort, legacy, restrict_days=measured_days | legacy_only)
+    note_touch, dark = per_day_eligible_adoption_min(cohort, legacy, restrict_days=measured_days | legacy_only,
+                                                     active=measured)
     if dark:
         note_touch_s = f"n/a (denominator dark {len(dark)} day(s): {', '.join(dark)}) — FAIL"
     else:
