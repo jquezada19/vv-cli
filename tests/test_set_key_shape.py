@@ -29,7 +29,10 @@ N  `new` flag shape. The flag IS the property name (`--status open`): a flag
    an extra positional, and `--template` with no name are usage refusals (two
    of these were a StopIteration traceback). A derived `next:` carries every
    flag already accepted (`new` is not idempotent) and never offers a pair
-   that would itself be refused or consumed as a global flag.
+   that would itself be refused or consumed as a global flag. Where that
+   command could not be trusted (an extra positional — which word was the
+   PATH is a guess —, a token that cannot be shell-quoted, a flag-shaped
+   PATH, a global flag in the tail) the next step is `vv new --help`.
 
 Cases marked "(control)" pass at the PR base (origin/main) by design; every
 other numbered case has a check that fails there (sub-checks such as "no
@@ -190,7 +193,7 @@ def section_n(eng, tag):
     refused(eng, tag, "5 whitespace in a flag name", ["new", "Y5", "--my key", "v"],
             "usage: new takes --KEY VALUE (the flag is the property name), got '--my key'", "vv new Y5 --KEY v")
     refused(eng, tag, "6 extra positional", ["new", "Y6", "extra"],
-            "usage: new takes PATH, got extra positional 'extra'", "vv new Y6")
+            "usage: new takes PATH, got extra positional 'extra' (quote a multi-word VALUE)", "vv new --help")
     refused(eng, tag, "7 --template with no name (was a traceback)", ["new", "Y7", "--template"],
             "usage: new flag --template needs a value", "vv new Y7 --template NAME")
     refused(eng, tag, "11 next keeps the flags already given (new is not idempotent)",
@@ -214,22 +217,26 @@ def section_n(eng, tag):
             ["new", "A7", "--status=done", "--owner\x7f", "jeff"], "usage: new takes --KEY VALUE", "vv new --help")
     refused(eng, tag, "20 incident shape with a tail", ["new", "A2", "--template", "Task", "--key", "description=x", "--status", "open"],
             "usage: new takes --KEY VALUE", "vv new A2 --template Task --description x --status open")
-    refused(eng, tag, "21 an unquoted multi-word VALUE is joined, not cut", ["new", "A3", "--description", "a", "b"],
-            "usage: new takes PATH, got extra positional 'b' (VALUE is one argument; quote it)", "vv new A3 --description 'a b'")
-    refused(eng, tag, "21b a multi-word template name is joined too", ["new", "A4", "--template", "Daily", "Standup", "--status", "x"],
-            "usage: new takes PATH, got extra positional 'Standup' (VALUE is one argument; quote it)", "vv new A4 --template 'Daily Standup' --status x")
+    refused(eng, tag, "21 an unquoted multi-word VALUE is not cut into a runnable write", ["new", "A3", "--description", "a", "b"],
+            "usage: new takes PATH, got extra positional 'b' (quote a multi-word VALUE)", "vv new --help")
+    refused(eng, tag, "21b …nor a multi-word template name", ["new", "A4", "--template", "Daily", "Standup", "--status", "x"],
+            "usage: new takes PATH, got extra positional 'Standup' (quote a multi-word VALUE)", "vv new --help")
     refused(eng, tag, "21c a value word in the PATH slot is ambiguous: next is the help",
             ["new", "--status", "in", "progress", "A8"],
             "usage: new takes PATH, got extra positional 'A8' (quote a multi-word VALUE)", "vv new --help")
-    refused(eng, tag, "21d a flag-shaped extra token is not joined into a VALUE", ["new", "A9", "--status", "open", "-v"],
-            "usage: new takes PATH, got extra positional '-v'", "vv new A9 --status open")
-    refused(eng, tag, "21e the join stops at a single-dash flag", ["new", "A10", "--status", "in", "progress", "-v"],
-            "usage: new takes PATH, got extra positional 'progress' (VALUE is one argument; quote it)",
-            "vv new A10 --status 'in progress' -v")
+    refused(eng, tag, "21d a value word in the PATH slot with a later flag", ["new", "--status", "in", "progress", "--owner", "jeff", "A9"],
+            "usage: new takes PATH, got extra positional 'A9' (quote a multi-word VALUE)", "vv new --help")
+    refused(eng, tag, "21e …the same through a malformed-flag refusal: the tail is carried, then refused",
+            ["new", "--status", "in", "progress", "--owner=jeff", "A10"],
+            "usage: new takes --KEY VALUE", "vv new progress --status in --owner jeff A10")
+    refused(eng, tag, "21f an accepted value _q cannot quote sends next to the help",
+            ["new", "A11", "--description", "first\n  second", "--status=done"], "usage: new takes --KEY VALUE", "vv new --help")
+    refused(eng, tag, "21g a global flag in the tail sends next to the help (it would redirect the write)",
+            ["new", "A12", "--vault", eng.vault, "--status=done", "--vault", "/elsewhere"], "usage: new takes --KEY VALUE", "vv new --help")
     refused(eng, tag, "22 a repeated global flag is not accepted as a property", ["new", "A5", "--limit", "5", "--limit", "6", "--status=done"],
             "usage: new takes --KEY VALUE (the flag is the property name), got --limit", "vv new A5 --KEY 6 --status=done")
     refused(eng, tag, "23 a flag-shaped PATH is not carried into next (it would print help)", ["new", "--owner", "jeff", "-h", "--status=done"],
-            "usage: new takes --KEY VALUE", "vv new PATH --owner jeff --status done")
+            "usage: new takes --KEY VALUE", "vv new --help")
     with open(os.path.join(eng.vault, "Templates", "Block.md"), "w") as f:
         f.write("---\ndescription: |\n  first\n  second\n---\n# B\n")
     r = eng.run("new", "X15", "--template", "Block", "--description", "|")

@@ -1126,6 +1126,7 @@ def cmd_unset(ref, key):
 # Not settable as `new` properties: the usage placeholder, and the global flags
 # main consumes before `new` sees them (a repeated `--vault` reached `new`).
 _NEW_NOT_PROPERTY = {"key", "limit", "vault", "jsonl"}
+_GLOBAL_FLAGS = {"--limit", "--vault", "--jsonl"}   # the spellings main strips
 
 def cmd_new(*args):
     # The flag IS the property name (`--status open`). Every malformed shape is
@@ -1136,26 +1137,25 @@ def cmd_new(*args):
     # written as given (yaml_scalar here would quote a block-scalar header).
     toks = list(args)
     path, template, kv, given = None, None, {}, []
-    path_at = None
-    last_val = None          # (toks index, given index or "template") of the last accepted value
     def flagish(t):
         return t.startswith("--") and _is_flag(t)
-    def head():
-        # every flag already accepted rides along: `new` is not idempotent, so a
-        # next step that drops one creates the note without it. A flag-shaped
-        # PATH (`-h`) would turn the next step into help, so it is a placeholder.
-        return " ".join(["vv new", _q(path, "PATH") if path and not _is_flag(path) else "PATH"]
-                        + (["--template", _q(template, "NAME")] if template else [])
-                        + [f"--{_q(k, 'KEY')} {_q(v, 'VALUE')}" for k, v in given])
-    def nxt(i, mid=""):
-        # the caller's own remaining tokens ride along unparsed: a second mistake
-        # there is refused on the next call, never dropped. A token _q cannot
-        # quote would become a bare placeholder a later VALUE join could absorb,
-        # so then the honest next step is the help.
+    def nxt(i, mid):
+        # One corrected command: every flag already accepted, the derived pair,
+        # then the caller's remaining tokens unparsed (a second mistake there is
+        # refused on the next call, never dropped — `new` is not idempotent, so
+        # a dropped flag would create the note without it). Help instead when
+        # that command could not be trusted: a token _q cannot quote would
+        # become a literal placeholder, a flag-shaped PATH (`-h`) would print
+        # help, and a global flag in the tail (a repeated `--vault`) would be
+        # consumed by main and redirect the write.
         rest = toks[i:]
-        if any(_CTL.search(t) or " — next: " in t for t in rest):
+        carried = [t for t in [path, template, *[v for _, v in given], *rest] if t is not None]
+        if (any(_CTL.search(t) or " — next: " in t for t in carried)
+                or (path and _is_flag(path)) or any(t in _GLOBAL_FLAGS for t in rest)):
             return "vv new --help"
-        return head() + mid + "".join(" " + _q(t) for t in rest)
+        return " ".join(["vv new", _q(path) if path else "PATH"]
+                        + (["--template", _q(template)] if template else [])
+                        + [f"--{_q(k)} {_q(v)}" for k, v in given]) + mid + "".join(" " + _q(t) for t in rest)
     i = 0
     while i < len(toks):
         a = toks[i]; i += 1
@@ -1167,11 +1167,10 @@ def cmd_new(*args):
                     die(f"usage: new flag {_q(a, 'FLAG')} needs a value", nxt=nxt(i, f" {_q(a, '--KEY')} {ph}"))
                 i += 1
                 if a == "--template":
-                    template, last_val = v, (i - 1, "template")
+                    template = v
                 else:
                     kv[a[2:]] = v
                     given.append((a[2:], v))
-                    last_val = (i - 1, len(given) - 1)
                 continue
             # malformed. A `--k=v` token carries its own value; otherwise the next
             # non-flag token is the value the caller meant for it.
@@ -1192,26 +1191,13 @@ def cmd_new(*args):
             die(f"usage: new takes --KEY VALUE (the flag is the property name), got {_q(a, 'FLAG')}",
                 nxt=nxt(i, f" {pair}"))
         elif path is None:
-            path, path_at = a, i - 1
+            path = a
         else:
-            if last_val and path_at == last_val[0] + 1:
-                # `vv new --status in progress A`: the PATH slot took a value word,
-                # so which positional is the PATH is a guess — no runnable write
-                die(f"usage: new takes PATH, got extra positional '{a}' (quote a multi-word VALUE)",
-                    nxt="vv new --help")
-            if last_val and last_val[0] == i - 2 and not _is_flag(a):
-                # words right after a value: an unquoted multi-word VALUE (set's surplus rule)
-                j = i
-                while j < len(toks) and not _is_flag(toks[j]):
-                    j += 1
-                words = " ".join(toks[i - 2:j])
-                if last_val[1] == "template":
-                    template = words
-                else:
-                    given[last_val[1]] = (given[last_val[1]][0], words)
-                die(f"usage: new takes PATH, got extra positional '{a}' (VALUE is one argument; quote it)",
-                    nxt=nxt(j))
-            die(f"usage: new takes PATH, got extra positional '{a}'", nxt=nxt(i))
+            # An unquoted multi-word VALUE is the usual cause, but which word was
+            # meant as the PATH is a guess (`new --status in progress A` put
+            # `progress` there), so no runnable write is offered.
+            die(f"usage: new takes PATH, got extra positional '{a}' (quote a multi-word VALUE)",
+                nxt="vv new --help")
     if not path:
         die("usage: new PATH [--template NAME] [--KEY VALUE ...]")
     _dirty_gate()
