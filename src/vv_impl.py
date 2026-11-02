@@ -1028,7 +1028,45 @@ def yaml_scalar(v):
     return '"' + esc + '"'
 
 
+# A KEY operand is written verbatim before `: `, so it must be a bare
+# frontmatter key: no `=`, `:`, whitespace or control character, and no
+# leading YAML indicator (`-` is also how a flag spelling arrives, `#` starts
+# a comment, `[`/`{` a flow collection). `vv set T description="a b"
+# updated=2026-10-31` took `description=a b` as the KEY and appended
+# `description=a b: updated=2026-10-31` with exit 0 on both engines — two
+# vault todos on 2026-10-31. Every key in the author's vault (197 distinct,
+# 2026-11-02) is [A-Za-z0-9_.-]; non-ASCII letters stay valid. The native
+# engine serves only an ASCII subset of this and falls back for the rest, so
+# this predicate is the one authority.
+_FM_KEY_BAD = re.compile(r"[=:\s\x00-\x1f\x7f-\x9f]|^[-?,\[\]{}#&*!|>'\"%@`]")
+
+def _fm_key_ok(k):
+    return bool(k) and not _FM_KEY_BAD.search(k)
+
+def _fm_key_split(tok):
+    """`k=v`, `--k`, `--k=v` -> (k, v-or-None) when k is a bare key; else None.
+    The derivation a `next:` line offers for a flag or pair spelling."""
+    k, eq, v = tok.lstrip("-").partition("=")
+    return (k, v if eq else None) if _fm_key_ok(k) else None
+
+def _next_set(args):
+    """set's next step when the KEY slot is malformed: one key per call, the
+    caller's own pair split into KEY VALUE (`a=1` -> `a 1`, `--k v` -> `k v`)."""
+    if len(args) < 2 or _is_flag(args[0]) or _fm_key_ok(args[1]):
+        return _next_from_table("set", args)
+    split = _fm_key_split(args[1])
+    key, val = split if split else ("KEY", None)
+    if val is None and len(args) > 2:
+        val = args[2]
+    key = _q(key, "KEY") if split else key
+    return f"vv set {_q(args[0])} {key} {'VALUE' if val is None else _q(val, 'VALUE')}"
+
 def cmd_set(ref, key, value):
+    if not _fm_key_ok(key):
+        # before the note resolves or the journal gate: a usage error is about
+        # the command line, not the vault (the relocate-tail precedent)
+        die(f"usage: set KEY must be a bare frontmatter key, got {_q(key, 'KEY')}"
+            " (KEY and VALUE are separate arguments)", nxt=_next_set([ref, key, value]))
     _dirty_gate()
     value = yaml_scalar(value)
     fp = resolve(ref)
@@ -1083,18 +1121,43 @@ def cmd_unset(ref, key):
     out(f"unset {key} in {rel(fp)}")
 
 def cmd_new(*args):
-    _dirty_gate()
+    # The flag IS the property name (`--status open`). Every malformed shape is
+    # refused before anything is written: `--key description=x` wrote
+    # `key: description=x` (the usage text's own placeholder became a
+    # property), `--status=done` and a trailing `--status` raised
+    # StopIteration, and an extra positional was silently dropped.
     path, template, kv = None, None, {}
     it = iter(args)
+    def head():
+        return " ".join(["vv new", _q(path, "PATH") if path else "PATH"]
+                        + (["--template", _q(template, "NAME")] if template else []))
     for a in it:
-        if a == "--template":
-            template = next(it)
-        elif a.startswith("--"):
-            kv[a[2:]] = next(it)
+        if a.startswith("--"):
+            v = next(it, None)
+            if a == "--template" or (_fm_key_ok(a[2:]) and a != "--key"):
+                if v is None or v.startswith("--"):
+                    ph = "NAME" if a == "--template" else "VALUE"
+                    die(f"usage: new flag {_q(a, 'FLAG')} needs a value", nxt=f"{head()} {_q(a, '--KEY')} {ph}")
+                if a == "--template":
+                    template = v
+                else:
+                    kv[a[2:]] = yaml_scalar(v)
+                continue
+            # `--key k=v` and `--k=v` derive the intended pair; anything else is a placeholder
+            split = _fm_key_split(v) if a == "--key" and v is not None else _fm_key_split(a)
+            if split and split[1] is not None:
+                pair = f"--{_q(split[0], 'KEY')} {_q(split[1], 'VALUE')}"
+            else:
+                pair = "--KEY VALUE"
+            die(f"usage: new takes --KEY VALUE (the flag is the property name), got {_q(a, 'FLAG')}",
+                nxt=f"{head()} {pair}")
         elif path is None:
             path = a
+        else:
+            die(f"usage: new takes PATH, got extra positional '{a}'", nxt=head())
     if not path:
-        die("usage: new PATH [--template NAME] [--key value ...]")
+        die("usage: new PATH [--template NAME] [--KEY VALUE ...]")
+    _dirty_gate()
     fp = contain(path if path.endswith(".md") else path + ".md")
     if os.path.exists(fp):
         die(f"exists: {rel(fp)}", nxt="pick another name or edit it")
@@ -3119,12 +3182,16 @@ def _next_append(args):
 
 # read/patch: the honest next step is the outline — with the note the caller
 # already named — because SEC (and patch's SHA8) come from it.
-ARITY_NEXT = {"read": _next_read, "patch": _next_read, "append": _next_append}   # runnable, per the `next:` contract
+# set: a malformed KEY slot (`set T a=1 b=2`) gets the one-key form, not the
+# surplus-joined `vv set T a=1 'b=2'` that would write the junk key itself.
+ARITY_NEXT = {"read": _next_read, "patch": _next_read, "append": _next_append, "set": _next_set}   # runnable, per the `next:` contract
 
 def _arity_hint(cmd, args):
     """Parenthetical BEFORE `— next:` (the next line itself stays a bare command)."""
     if cmd == "append" and _wants_section(args):
         return " (append has no --section; append inside a section is appendsec)"
+    if cmd == "set" and len(args) >= 2 and not _is_flag(args[0]) and not _fm_key_ok(args[1]):
+        return " (KEY and VALUE are separate arguments)"
     ops = _table_operands(cmd)
     if _surplus_slot(ops, args):
         return f" ({ops[-1]} is one argument; quote it)"
@@ -3244,7 +3311,7 @@ COMMAND_TABLE = [
     {"name": "prepend",      "args": "NOTE TEXT",               "summary": "insert after frontmatter (CAS-guarded)"},
     {"name": "set",          "args": "NOTE KEY VALUE",          "summary": "frontmatter field flip, body untouched"},
     {"name": "unset",        "args": "NOTE KEY",                "summary": "remove a frontmatter field"},
-    {"name": "new",          "args": "PATH [--template T] [--key v ...]", "summary": "create from a vault template"},
+    {"name": "new",          "args": "PATH [--template T] [--KEY VALUE ...]", "summary": "create from a vault template"},
     {"name": "daily-append", "args": "TEXT",                    "summary": "append inside today's standup Today section"},
     {"name": "rename",       "args": "NOTE NEWNAME [--apply [SHA8]]", "summary": "link-aware journaled rename; dry-run by default"},
     {"name": "move",         "args": "NOTE FOLDER [--apply [SHA8]]",  "summary": "link-aware journaled move; dry-run by default"},
