@@ -18,22 +18,18 @@ the native `set` must DECLINE a malformed key, never write it.
 S  `set` KEY shape. A KEY is written verbatim before `: `, so a KEY carrying
    `=`, `:`, whitespace, a control character, or a leading YAML indicator
    (`-`, `#`, `[`, …) is refused with a usage error before the note is even
-   resolved, and the `next:` line is the runnable one-key form derived from
-   the caller's own operands where it can be (`k=v` → `k v`, `--k v` → `k v`).
-   An arity miss whose KEY slot is malformed gets the same derived next step —
-   the old one (`vv set T a=1 'b=2 c=3'`) pointed at the junk-writing form.
+   resolved. An arity miss whose KEY slot is malformed is answered the same
+   way — its old next step (`vv set T a=1 'b=2 c=3'`) was the junk-writing form.
    `unset` stays permissive on purpose: it is how a junk line is removed.
 N  `new` flag shape. The flag IS the property name (`--status open`): a flag
    name that is not a bare key (`--status=done`, `--'a b'`), the literal
    `--key` placeholder, a flag with no value or whose value is itself a flag,
    an extra positional, and `--template` with no name are usage refusals (two
-   of these were a StopIteration traceback). A derived `next:` carries every
-   flag already accepted (`new` is not idempotent) and never offers a pair
-   that would itself be refused or consumed as a global flag. Where that
-   command could not be trusted (an extra positional — which word was the
-   PATH is a guess —, a token that cannot be shell-quoted, a flag-shaped
-   PATH, a global flag in the tail) the next step is `vv new --help`. A global `--vault`
-   that main consumed rides along into every derived write (`set` and `new`).
+   of these were a StopIteration traceback).
+Every refusal either command adds answers `next: vv set --help` / `vv new
+--help`, never a derived command: five review rounds of derived next steps
+each found a new way for the suggested write to differ from what the caller
+asked (a dropped --vault, a truncated VALUE, a guessed PATH).
 
 Cases marked "(control)" pass at the PR base (origin/main) by design; every
 other numbered case has a check that fails there (sub-checks such as "no
@@ -125,46 +121,30 @@ SET_HINT = " (KEY and VALUE are separate arguments; one key per call)"
 def section_s(eng, tag):
     """S — set KEY shape."""
     refused(eng, tag, "1 incident: set T description=a b updated=x", ["set", "T", "description=a b", "updated=2026-10-31"],
-            SET_BAD + "'description=a b'" + SET_HINT, "vv set T description 'a b'")
+            SET_BAD + "'description=a b'" + SET_HINT, "vv set --help")
     check(f"{tag}1' no junk line in T", "description=a b" not in eng.read("T.md"), eng.read("T.md"))
-    refused(eng, tag, "2 --KEY VALUE spelling", ["set", "T", "--status", "done"],
-            SET_BAD + "--status", "vv set T status done")
-    refused(eng, tag, "3 --KEY=VALUE spelling", ["set", "T", "--status=done", "x"],
-            SET_BAD + "--status=done", "vv set T status done")
-    refused(eng, tag, "4 whitespace in KEY", ["set", "T", "my key", "v"],
-            SET_BAD + "'my key'", "vv set T KEY v")
-    refused(eng, tag, "5 colon in KEY", ["set", "T", "a:", "v"],
-            SET_BAD + "a:", "vv set T KEY v")
-    refused(eng, tag, "6 leading # (a YAML comment)", ["set", "T", "#tag", "v"],
-            SET_BAD + "'#tag'", "vv set T KEY v")
-    refused(eng, tag, "7 empty KEY", ["set", "T", "", "v"],
-            SET_BAD + "''", "vv set T KEY v")
-    refused(eng, tag, "8 tab in KEY", ["set", "T", "a\tb", "v"],
-            SET_BAD + "KEY", "vv set T KEY v")
-    refused(eng, tag, "9 leading [ (a flow sequence)", ["set", "T", "[a]", "v"],
-            SET_BAD + "'[a]'", "vv set T KEY v")
-    refused(eng, tag, "10 KEY is checked before the note resolves", ["set", "Missing", "a=b", "v"],
-            SET_BAD + "a=b", "vv set Missing a b")
-    refused(eng, tag, "10' a flag in the NOTE slot still derives the key", ["set", "--foo", "a=b", "v"],
-            SET_BAD + "a=b", "vv set NOTE a b")
-    refused(eng, tag, "10b a derived global-flag VALUE is a placeholder", ["set", "T", "status=--jsonl", "ignored"],
-            SET_BAD + "status=--jsonl", "vv set T status VALUE")
-    refused(eng, tag, "10c a flag-shaped VALUE operand is a placeholder", ["set", "T", "--status", "--force"],
-            SET_BAD + "--status", "vv set T status VALUE")
-    refused(eng, tag, "10d surplus words after a --KEY are one VALUE, not cut", ["set", "T", "--description", "first", "second"],
-            "usage: set takes 3 positional args, got 4" + SET_HINT, "vv set T description 'first second'")
-    refused(eng, tag, "10e a global --vault rides along into the derived write", ["--vault", eng.vault, "set", "T", "description=a b", "x"],
-            SET_BAD + "'description=a b'", f"vv --vault {eng.vault} set T description 'a b'")
-    refused(eng, tag, "11 k= derives an empty value", ["set", "T", "status=", "v"],
-            SET_BAD + "status=", "vv set T status ''")
-    # arity misses whose KEY slot is malformed: the derived next step, not a junk-writing one
-    refused(eng, tag, "12 two operands k=v", ["set", "T", "status=done"],
-            "usage: set takes 3 positional args, got 2 (KEY and VALUE are separate arguments; one key per call)", "vv set T status done")
-    refused(eng, tag, "13 k=v pairs", ["set", "T", "a=1", "b=2", "c=3"],
-            "usage: set takes 3 positional args, got 4 (KEY and VALUE are separate arguments; one key per call)", "vv set T a 1")
-    refused(eng, tag, "14 bare --KEY", ["set", "T", "--status"],
-            "usage: set takes 3 positional args, got 2 (KEY and VALUE are separate arguments; one key per call)", "vv set T status VALUE")
-    refused(eng, tag, "15 unquoted VALUE (control)", ["set", "T", "description", "a", "b"],
+    refused(eng, tag, "2 --KEY VALUE spelling", ["set", "T", "--status", "done"], SET_BAD + "--status", "vv set --help")
+    refused(eng, tag, "3 --KEY=VALUE spelling", ["set", "T", "--status=done", "x"], SET_BAD + "--status=done", "vv set --help")
+    refused(eng, tag, "4 whitespace in KEY", ["set", "T", "my key", "v"], SET_BAD + "'my key'", "vv set --help")
+    refused(eng, tag, "5 colon in KEY", ["set", "T", "a:", "v"], SET_BAD + "a:", "vv set --help")
+    refused(eng, tag, "6 leading # (a YAML comment)", ["set", "T", "#tag", "v"], SET_BAD + "'#tag'", "vv set --help")
+    refused(eng, tag, "7 empty KEY", ["set", "T", "", "v"], SET_BAD + "''", "vv set --help")
+    refused(eng, tag, "8 tab in KEY", ["set", "T", "a\tb", "v"], SET_BAD + "KEY", "vv set --help")
+    refused(eng, tag, "9 leading [ (a flow sequence)", ["set", "T", "[a]", "v"], SET_BAD + "'[a]'", "vv set --help")
+    refused(eng, tag, "10 KEY is checked before the note resolves", ["set", "Missing", "a=b", "v"], SET_BAD + "a=b", "vv set --help")
+    refused(eng, tag, "10' …and with a flag in the NOTE slot", ["set", "--foo", "a=b", "v"], SET_BAD + "a=b", "vv set --help")
+    refused(eng, tag, "11 k= is a malformed KEY too", ["set", "T", "status=", "v"], SET_BAD + "status=", "vv set --help")
+    # arity misses whose KEY slot is malformed answer the help too — the table's
+    # surplus join (`vv set T a=1 'b=2 c=3'`) would write the junk key itself
+    for name, args, got in [("12 two operands k=v", ["set", "T", "status=done"], 2),
+                            ("13 k=v pairs", ["set", "T", "a=1", "b=2", "c=3"], 4),
+                            ("14 bare --KEY", ["set", "T", "--status"], 2),
+                            ("14' --KEY with an unquoted VALUE", ["set", "T", "--description", "first", "second"], 4)]:
+        refused(eng, tag, name, args, f"usage: set takes 3 positional args, got {got}" + SET_HINT, "vv set --help")
+    refused(eng, tag, "14'' a global --vault does not change the answer", ["--vault", eng.vault, "set", "T", "description=a b", "x"],
+            SET_BAD + "'description=a b'", "vv set --help")
+    refused(eng, tag, "15 unquoted VALUE with a bare KEY (control: the table's surplus join is unchanged)",
+            ["set", "T", "description", "a", "b"],
             "usage: set takes 3 positional args, got 4 (VALUE is one argument; quote it)", "vv set T description 'a b'")
     # controls: well-formed keys still write, both engines
     for name, key, val, line in [("17 plain key (control)", "status", "done", "status: done"),
@@ -185,75 +165,21 @@ def section_s(eng, tag):
 
 def section_n(eng, tag):
     """N — new flag shape (python-only command; the native entry execs python)."""
-    refused(eng, tag, "1 incident: --key placeholder", ["new", "X", "--template", "Task", "--key", "description=x"],
-            "usage: new takes --KEY VALUE (the flag is the property name), got --key", "vv new X --template Task --description x")
-    refused(eng, tag, "1' --key with a plain value", ["new", "X1", "--key", "status"],
-            "usage: new takes --KEY VALUE (the flag is the property name), got --key", "vv new X1 --KEY VALUE")
-    refused(eng, tag, "2 --KEY=VALUE", ["new", "Y2", "--status=done"],
-            "usage: new takes --KEY VALUE (the flag is the property name), got --status=done", "vv new Y2 --status done")
-    refused(eng, tag, "3 flag with no value (was a traceback)", ["new", "Y3", "--status"],
-            "usage: new flag --status needs a value", "vv new Y3 --status VALUE")
-    refused(eng, tag, "4 flag whose value is a flag", ["new", "Y4", "--status", "--type", "t"],
-            "usage: new flag --status needs a value", "vv new Y4 --status VALUE --type t")
-    refused(eng, tag, "5 whitespace in a flag name", ["new", "Y5", "--my key", "v"],
-            "usage: new takes --KEY VALUE (the flag is the property name), got '--my key'", "vv new Y5 --KEY v")
+    BADF = "usage: new takes --KEY VALUE (the flag is the property name), got "
+    refused(eng, tag, "1 incident: --key placeholder", ["new", "X", "--template", "Task", "--key", "description=x"], BADF + "--key", "vv new --help")
+    refused(eng, tag, "1' --key with a plain value", ["new", "X1", "--key", "status"], BADF + "--key", "vv new --help")
+    refused(eng, tag, "2 --KEY=VALUE", ["new", "Y2", "--status=done"], BADF + "--status=done", "vv new --help")
+    refused(eng, tag, "3 flag with no value (was a traceback)", ["new", "Y3", "--status"], "usage: new flag --status needs a value", "vv new --help")
+    refused(eng, tag, "4 flag whose value is a flag", ["new", "Y4", "--status", "--type", "t"], "usage: new flag --status needs a value", "vv new --help")
+    refused(eng, tag, "5 whitespace in a flag name", ["new", "Y5", "--my key", "v"], BADF + "'--my key'", "vv new --help")
     refused(eng, tag, "6 extra positional", ["new", "Y6", "extra"],
             "usage: new takes PATH, got extra positional 'extra' (quote a multi-word PATH or VALUE)", "vv new --help")
-    refused(eng, tag, "7 --template with no name (was a traceback)", ["new", "Y7", "--template"],
-            "usage: new flag --template needs a value", "vv new Y7 --template NAME")
-    refused(eng, tag, "11 next keeps the flags already given (new is not idempotent)",
-            ["new", "X8", "--template", "Task", "--owner", "jeff", "--status=done"],
-            "usage: new takes --KEY VALUE", "vv new X8 --template Task --owner jeff --status done")
-    refused(eng, tag, "12 --key template=X is not derived into a template pick", ["new", "X9", "--key", "template=Foo"],
-            "usage: new takes --KEY VALUE", "vv new X9 --KEY VALUE")
-    refused(eng, tag, "15 a derived global-flag name is not offered", ["new", "X12", "--key", "limit=5"],
-            "usage: new takes --KEY VALUE", "vv new X12 --KEY VALUE")
-    refused(eng, tag, "15' …nor --vault", ["new", "X12", "--vault=elsewhere"],
-            "usage: new takes --KEY VALUE", "vv new X12 --KEY VALUE")
-    refused(eng, tag, "16 a derived value that is a flag is not offered", ["new", "X13", "--status=--flag"],
-            "usage: new takes --KEY VALUE", "vv new X13 --KEY VALUE")
-    refused(eng, tag, "17 --key key=x does not derive --key", ["new", "X14", "--key", "key=x"],
-            "usage: new takes --KEY VALUE", "vv new X14 --KEY VALUE")
-    refused(eng, tag, "19 the tail after a malformed flag rides along", ["new", "A1", "--status=done", "--owner", "jeff"],
-            "usage: new takes --KEY VALUE", "vv new A1 --status done --owner jeff")
-    refused(eng, tag, "19b a --k=v token carries its own value and takes nothing after it", ["new", "A6", "--status=done", "Extra"],
-            "usage: new takes --KEY VALUE", "vv new A6 --status done Extra")
-    refused(eng, tag, "19c an unquotable tail token sends next to the help, not into a VALUE",
-            ["new", "A7", "--status=done", "--owner\x7f", "jeff"], "usage: new takes --KEY VALUE", "vv new --help")
-    refused(eng, tag, "20 incident shape with a tail", ["new", "A2", "--template", "Task", "--key", "description=x", "--status", "open"],
-            "usage: new takes --KEY VALUE", "vv new A2 --template Task --description x --status open")
-    refused(eng, tag, "21 an unquoted multi-word VALUE is not cut into a runnable write", ["new", "A3", "--description", "a", "b"],
+    refused(eng, tag, "7 --template with no name (was a traceback)", ["new", "Y7", "--template"], "usage: new flag --template needs a value", "vv new --help")
+    refused(eng, tag, "8 an unquoted multi-word VALUE", ["new", "A3", "--description", "a", "b"],
             "usage: new takes PATH, got extra positional 'b' (quote a multi-word PATH or VALUE)", "vv new --help")
-    refused(eng, tag, "21b …nor a multi-word template name", ["new", "A4", "--template", "Daily", "Standup", "--status", "x"],
-            "usage: new takes PATH, got extra positional 'Standup' (quote a multi-word PATH or VALUE)", "vv new --help")
-    refused(eng, tag, "21c a value word in the PATH slot is ambiguous: next is the help",
-            ["new", "--status", "in", "progress", "A8"],
-            "usage: new takes PATH, got extra positional 'A8' (quote a multi-word PATH or VALUE)", "vv new --help")
-    refused(eng, tag, "21d a value word in the PATH slot with a later flag", ["new", "--status", "in", "progress", "--owner", "jeff", "A9"],
-            "usage: new takes PATH, got extra positional 'A9' (quote a multi-word PATH or VALUE)", "vv new --help")
-    refused(eng, tag, "21e …the same through a malformed-flag refusal: the tail is carried, then refused",
-            ["new", "--status", "in", "progress", "--owner=jeff", "A10"],
-            "usage: new takes --KEY VALUE", "vv new progress --status in --owner jeff A10")
-    refused(eng, tag, "21f an accepted value _q cannot quote sends next to the help",
-            ["new", "A11", "--description", "first\n  second", "--status=done"], "usage: new takes --KEY VALUE", "vv new --help")
-    refused(eng, tag, "21g a global flag in the tail sends next to the help (it would redirect the write)",
-            ["new", "A12", "--vault", eng.vault, "--status=done", "--vault", "/elsewhere"], "usage: new takes --KEY VALUE", "vv new --help")
-    refused(eng, tag, "22 a repeated global flag is not accepted as a property", ["new", "A5", "--limit", "5", "--limit", "6", "--status=done"],
-            "usage: new takes --KEY VALUE (the flag is the property name), got --limit", "vv new A5 --KEY 6 --status=done")
-    refused(eng, tag, "23 a flag-shaped PATH is not carried into next (it would print help)", ["new", "--owner", "jeff", "-h", "--status=done"],
-            "usage: new takes --KEY VALUE", "vv new --help")
-    refused(eng, tag, "24 a global --vault rides along into new's derived write", ["--vault", eng.vault, "new", "B1", "--status=done"],
-            "usage: new takes --KEY VALUE", f"vv --vault {eng.vault} new B1 --status done")
-    refused(eng, tag, "25 an unquotable PATH sends next to the help", ["new", "B2\nx", "--status=done"],
-            "usage: new takes --KEY VALUE", "vv new --help")
-    refused(eng, tag, "25b …and an unquotable template name", ["new", "B3", "--template", "T\tx", "--status=done"],
-            "usage: new takes --KEY VALUE", "vv new --help")
-    if eng.name == "python":
-        # a non-UTF-8 argv byte decodes to a lone surrogate: a valid-looking key
-        # _q cannot quote (python arm only — the native entry's non-UTF-8 argv
-        # panic is a separate, pre-existing defect)
-        refused(eng, tag, "26 an unquotable accepted KEY sends next to the help", ["new", "B4", "--\udcffk", "v", "--status=done"],
-                "usage: new takes --KEY VALUE", "vv new --help")
+    refused(eng, tag, "9 a repeated global flag is not accepted as a property", ["new", "A5", "--limit", "5", "--limit", "6"], BADF + "--limit", "vv new --help")
+    refused(eng, tag, "9' …nor --vault=", ["new", "X12", "--vault=elsewhere"], BADF + "--vault=elsewhere", "vv new --help")
+    refused(eng, tag, "9'' a global --vault does not change the answer", ["--vault", eng.vault, "new", "B1", "--status=done"], BADF + "--status=done", "vv new --help")
     with open(os.path.join(eng.vault, "Templates", "Block.md"), "w") as f:
         f.write("---\ndescription: |\n  first\n  second\n---\n# B\n")
     r = eng.run("new", "X15", "--template", "Block", "--description", "|")

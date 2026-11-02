@@ -1043,42 +1043,21 @@ _FM_KEY_BAD = re.compile(r"[=:\s\x00-\x1f\x7f-\x9f]|^[-?,\[\]{}#&*!|>'\"%@`]")
 def _fm_key_ok(k):
     return bool(k) and not _FM_KEY_BAD.search(k)
 
-def _fm_key_split(tok):
-    """`k=v`, `--k`, `--k=v` -> (k, v-or-None) when k is a bare key; else None.
-    The derivation a `next:` line offers for a flag or pair spelling."""
-    k, eq, v = tok.lstrip("-").partition("=")
-    return (k, v if eq else None) if _fm_key_ok(k) else None
-
-# The --vault main consumed, so a derived WRITE next step targets the same
-# vault: without it, `vv --vault B new X --status=done` suggested a command
-# that created X in the default vault.
-_VAULT_ARG = None
-
-def _vv():
-    return "vv" if _VAULT_ARG is None else f"vv --vault {_q(_VAULT_ARG, 'VAULT')}"
-
 def _next_set(args):
-    """set's next step when the KEY slot is malformed: one key per call, the
-    caller's own pair split into KEY VALUE (`a=1` -> `a 1`, `--k v` -> `k v`)."""
-    if len(args) < 2 or _fm_key_ok(args[1]):
-        return _next_from_table("set", args)
-    note = "NOTE" if _is_flag(args[0]) else _q(args[0])
-    split = _fm_key_split(args[1])
-    key, val = split if split else ("KEY", None)
-    if val is None and len(args) > 2:
-        # surplus words are one unquoted VALUE (set's surplus rule), never cut
-        val = " ".join(args[2:]) if not any(_is_flag(t) for t in args[3:]) else None
-    if val is not None and val.startswith("--") and _is_flag(val):
-        val = None           # main would consume `--jsonl`/`--limit`; any other flag is no VALUE
-    key = _q(key, "KEY") if split else key
-    return f"{_vv()} set {note} {key} {'VALUE' if val is None else _q(val, 'VALUE')}"
+    """set's next step for an arity miss. A malformed KEY slot answers the help:
+    a derived write (`set T a=1 'b=2 c=3'` joined the surplus into the junk
+    key itself; later derivations dropped the caller's --vault or cut a VALUE)
+    is a guess, and a wrong guess is a write."""
+    if len(args) >= 2 and not _fm_key_ok(args[1]):
+        return "vv set --help"
+    return _next_from_table("set", args)
 
 def cmd_set(ref, key, value):
     if not _fm_key_ok(key):
         # before the note resolves or the journal gate: a usage error is about
         # the command line, not the vault (the relocate-tail precedent)
         die(f"usage: set KEY must be a bare frontmatter key, got {_q(key, 'KEY')}"
-            " (KEY and VALUE are separate arguments; one key per call)", nxt=_next_set([ref, key, value]))
+            " (KEY and VALUE are separate arguments; one key per call)", nxt="vv set --help")
     _dirty_gate()
     value = yaml_scalar(value)
     fp = resolve(ref)
@@ -1135,76 +1114,36 @@ def cmd_unset(ref, key):
 # Not settable as `new` properties: the usage placeholder, and the global flags
 # main consumes before `new` sees them (a repeated `--vault` reached `new`).
 _NEW_NOT_PROPERTY = {"key", "limit", "vault", "jsonl"}
-_GLOBAL_FLAGS = {"--limit", "--vault", "--jsonl"}   # the spellings main strips
 
 def cmd_new(*args):
     # The flag IS the property name (`--status open`). Every malformed shape is
     # refused before anything is written: `--key description=x` wrote
     # `key: description=x` (the usage text's own placeholder became a
     # property), `--status=done` and a trailing `--status` raised
-    # StopIteration, and an extra positional was silently dropped. Values are
-    # written as given (yaml_scalar here would quote a block-scalar header).
-    toks = list(args)
-    path, template, kv, given = None, None, {}, []
-    def flagish(t):
-        return t.startswith("--") and _is_flag(t)
-    def nxt(i, mid):
-        # One corrected command: every flag already accepted, the derived pair,
-        # then the caller's remaining tokens unparsed (a second mistake there is
-        # refused on the next call, never dropped — `new` is not idempotent, so
-        # a dropped flag would create the note without it). Help instead when
-        # that command could not be trusted: a token _q cannot quote would
-        # become a literal placeholder, a flag-shaped PATH (`-h`) would print
-        # help, and a global flag in the tail (a repeated `--vault`) would be
-        # consumed by main and redirect the write.
-        rest = toks[i:]
-        carried = [t for t in [path, template, *[x for kv_ in given for x in kv_], *rest] if t is not None]
-        if (any(_CTL.search(t) or " — next: " in t for t in carried)
-                or (path and _is_flag(path)) or any(t in _GLOBAL_FLAGS for t in rest)):
-            return "vv new --help"
-        return " ".join([_vv(), "new", _q(path) if path else "PATH"]
-                        + (["--template", _q(template)] if template else [])
-                        + [f"--{_q(k)} {_q(v)}" for k, v in given]) + mid + "".join(" " + _q(t) for t in rest)
-    i = 0
-    while i < len(toks):
-        a = toks[i]; i += 1
+    # StopIteration, and an extra positional was silently dropped. Each
+    # refusal answers the help, never a derived command: five review rounds of
+    # derivations each found a new way for the suggested write to differ from
+    # the caller's intent. Values are written as given (yaml_scalar here would
+    # quote a block-scalar header).
+    path, template, kv = None, None, {}
+    it = iter(args)
+    for a in it:
         if a.startswith("--"):
             if a == "--template" or (_fm_key_ok(a[2:]) and a[2:] not in _NEW_NOT_PROPERTY):
-                v = toks[i] if i < len(toks) else None
-                if v is None or flagish(v):
-                    ph = "NAME" if a == "--template" else "VALUE"
-                    die(f"usage: new flag {_q(a, 'FLAG')} needs a value", nxt=nxt(i, f" {_q(a, '--KEY')} {ph}"))
-                i += 1
+                v = next(it, None)
+                # a value with whitespace that starts with -- is a value, not a flag
+                if v is None or (v.startswith("--") and _is_flag(v)):
+                    die(f"usage: new flag {_q(a, 'FLAG')} needs a value", nxt="vv new --help")
                 if a == "--template":
                     template = v
                 else:
                     kv[a[2:]] = v
-                    given.append((a[2:], v))
                 continue
-            # malformed. A `--k=v` token carries its own value; otherwise the next
-            # non-flag token is the value the caller meant for it.
-            v = None
-            if "=" not in a and i < len(toks) and not flagish(toks[i]):
-                v, i = toks[i], i + 1
-            split = _fm_key_split(v) if a == "--key" and v is not None else _fm_key_split(a)
-            # derive only a pair that would itself be accepted as a property: never
-            # `--key`, a global flag, `--template` from `--key template=X`, or a
-            # value that is itself a flag
-            if (split and split[1] is not None and split[0] not in _NEW_NOT_PROPERTY
-                    and (split[0] != "template" or a != "--key") and not flagish(split[1])):
-                pair = f"--{_q(split[0], 'KEY')} {_q(split[1], 'VALUE')}"
-            elif v is not None and a != "--key":
-                pair = f"--KEY {_q(v, 'VALUE')}"
-            else:
-                pair = "--KEY VALUE"
             die(f"usage: new takes --KEY VALUE (the flag is the property name), got {_q(a, 'FLAG')}",
-                nxt=nxt(i, f" {pair}"))
+                nxt="vv new --help")
         elif path is None:
             path = a
         else:
-            # An unquoted multi-word VALUE is the usual cause, but which word was
-            # meant as the PATH is a guess (`new --status in progress A` put
-            # `progress` there), so no runnable write is offered.
             die(f"usage: new takes PATH, got extra positional '{a}' (quote a multi-word PATH or VALUE)",
                 nxt="vv new --help")
     if not path:
@@ -3234,7 +3173,7 @@ def _next_append(args):
 
 # read/patch: the honest next step is the outline — with the note the caller
 # already named — because SEC (and patch's SHA8) come from it.
-# set: a malformed KEY slot (`set T a=1 b=2`) gets the one-key form, not the
+# set: a malformed KEY slot (`set T a=1 b=2`) answers the help, not the
 # surplus-joined `vv set T a=1 'b=2'` that would write the junk key itself.
 ARITY_NEXT = {"read": _next_read, "patch": _next_read, "append": _next_append, "set": _next_set}   # runnable, per the `next:` contract
 
@@ -3423,7 +3362,7 @@ def _generate(kind):
     die(f"usage: unknown --generate kind '{kind}'", nxt="vv --generate man|complete-bash|complete-zsh|complete-fish")
 
 def main():
-    global VAULT, _VAULT_REAL, _VAULT_ARG, _op
+    global VAULT, _VAULT_REAL, _op
     a = sys.argv[1:]
     if a and a[0] in ("--version", "version"):
         print(f"vv {_version()}"); sys.exit(0)
@@ -3451,7 +3390,6 @@ def main():
             die(f"not-found: vault directory {VAULT}")
         os.environ["VV_VAULT"] = VAULT   # rust engine subprocesses inherit it
         _VAULT_REAL = os.path.realpath(VAULT)
-        _VAULT_ARG = VAULT
         a = a[:i] + a[i + 2:]
     if not a:
         # One line, stderr, exit 1: an accidental bare `vv` in an agent loop
