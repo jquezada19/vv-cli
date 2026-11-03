@@ -1028,7 +1028,36 @@ def yaml_scalar(v):
     return '"' + esc + '"'
 
 
+# A KEY operand is written verbatim before `: `, so it must be a bare
+# frontmatter key: no `=`, `:`, whitespace or control character, and no
+# leading YAML indicator (`-` is also how a flag spelling arrives, `#` starts
+# a comment, `[`/`{` a flow collection). `vv set T description="a b"
+# updated=2026-10-31` took `description=a b` as the KEY and appended
+# `description=a b: updated=2026-10-31` with exit 0 on both engines — two
+# vault todos on 2026-10-31. Every key in the author's vault (197 distinct,
+# 2026-11-02) is [A-Za-z0-9_.-]; non-ASCII letters stay valid. The native
+# engine serves only an ASCII subset of this and falls back for the rest, so
+# this predicate is the one authority.
+_FM_KEY_BAD = re.compile(r"[=:\s\x00-\x1f\x7f-\x9f]|^[-?,\[\]{}#&*!|>'\"%@`]")
+
+def _fm_key_ok(k):
+    return bool(k) and not _FM_KEY_BAD.search(k)
+
+def _next_set(args):
+    """set's next step for an arity miss. A malformed KEY slot answers the help:
+    a derived write (`set T a=1 'b=2 c=3'` joined the surplus into the junk
+    key itself; later derivations dropped the caller's --vault or cut a VALUE)
+    is a guess, and a wrong guess is a write."""
+    if len(args) >= 2 and not _fm_key_ok(args[1]):
+        return "vv set --help"
+    return _next_from_table("set", args)
+
 def cmd_set(ref, key, value):
+    if not _fm_key_ok(key):
+        # before the note resolves or the journal gate: a usage error is about
+        # the command line, not the vault (the relocate-tail precedent)
+        die(f"usage: set KEY must be a bare frontmatter key, got {_q(key, 'KEY')}"
+            " (KEY and VALUE are separate arguments; one key per call)", nxt="vv set --help")
     _dirty_gate()
     value = yaml_scalar(value)
     fp = resolve(ref)
@@ -1082,19 +1111,44 @@ def cmd_unset(ref, key):
     atomic_write(fp, _fm_join(bom, eol1, kept, eol2, tail, body), expect_sig=_sig)
     out(f"unset {key} in {rel(fp)}")
 
+# Not settable as `new` properties: the usage placeholder, and the global flags
+# main consumes before `new` sees them (a repeated `--vault` reached `new`).
+_NEW_NOT_PROPERTY = {"key", "limit", "vault", "jsonl"}
+
 def cmd_new(*args):
-    _dirty_gate()
+    # The flag IS the property name (`--status open`). Every malformed shape is
+    # refused before anything is written: `--key description=x` wrote
+    # `key: description=x` (the usage text's own placeholder became a
+    # property), `--status=done` and a trailing `--status` raised
+    # StopIteration, and an extra positional was silently dropped. Each
+    # refusal answers the help, never a derived command: every derivation
+    # tried had inputs where the suggested write differed from the caller's
+    # intent. Values are written as given (yaml_scalar here would quote a
+    # block-scalar header).
     path, template, kv = None, None, {}
     it = iter(args)
     for a in it:
-        if a == "--template":
-            template = next(it)
-        elif a.startswith("--"):
-            kv[a[2:]] = next(it)
+        if a.startswith("--"):
+            if a == "--template" or (_fm_key_ok(a[2:]) and a[2:] not in _NEW_NOT_PROPERTY):
+                v = next(it, None)
+                # a value with whitespace that starts with -- is a value, not a flag
+                if v is None or (v.startswith("--") and _is_flag(v)):
+                    die(f"usage: new flag {_q(a, 'FLAG')} needs a value", nxt="vv new --help")
+                if a == "--template":
+                    template = v
+                else:
+                    kv[a[2:]] = v
+                continue
+            die(f"usage: new takes --KEY VALUE (the flag is the property name), got {_q(a, 'FLAG')}",
+                nxt="vv new --help")
         elif path is None:
             path = a
+        else:
+            die(f"usage: new takes PATH, got extra positional '{a}' (quote a multi-word PATH or VALUE)",
+                nxt="vv new --help")
     if not path:
-        die("usage: new PATH [--template NAME] [--key value ...]")
+        die("usage: new PATH [--template NAME] [--KEY VALUE ...]")
+    _dirty_gate()
     fp = contain(path if path.endswith(".md") else path + ".md")
     if os.path.exists(fp):
         die(f"exists: {rel(fp)}", nxt="pick another name or edit it")
@@ -3119,12 +3173,16 @@ def _next_append(args):
 
 # read/patch: the honest next step is the outline — with the note the caller
 # already named — because SEC (and patch's SHA8) come from it.
-ARITY_NEXT = {"read": _next_read, "patch": _next_read, "append": _next_append}   # runnable, per the `next:` contract
+# set: a malformed KEY slot (`set T a=1 b=2`) answers the help, not the
+# surplus-joined `vv set T a=1 'b=2'` that would write the junk key itself.
+ARITY_NEXT = {"read": _next_read, "patch": _next_read, "append": _next_append, "set": _next_set}   # runnable, per the `next:` contract
 
 def _arity_hint(cmd, args):
     """Parenthetical BEFORE `— next:` (the next line itself stays a bare command)."""
     if cmd == "append" and _wants_section(args):
         return " (append has no --section; append inside a section is appendsec)"
+    if cmd == "set" and len(args) >= 2 and not _fm_key_ok(args[1]):
+        return " (KEY and VALUE are separate arguments; one key per call)"
     ops = _table_operands(cmd)
     if _surplus_slot(ops, args):
         return f" ({ops[-1]} is one argument; quote it)"
@@ -3244,7 +3302,7 @@ COMMAND_TABLE = [
     {"name": "prepend",      "args": "NOTE TEXT",               "summary": "insert after frontmatter (CAS-guarded)"},
     {"name": "set",          "args": "NOTE KEY VALUE",          "summary": "frontmatter field flip, body untouched"},
     {"name": "unset",        "args": "NOTE KEY",                "summary": "remove a frontmatter field"},
-    {"name": "new",          "args": "PATH [--template T] [--key v ...]", "summary": "create from a vault template"},
+    {"name": "new",          "args": "PATH [--template T] [--KEY VALUE ...]", "summary": "create from a vault template"},
     {"name": "daily-append", "args": "TEXT",                    "summary": "append inside today's standup Today section"},
     {"name": "rename",       "args": "NOTE NEWNAME [--apply [SHA8]]", "summary": "link-aware journaled rename; dry-run by default"},
     {"name": "move",         "args": "NOTE FOLDER [--apply [SHA8]]",  "summary": "link-aware journaled move; dry-run by default"},

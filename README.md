@@ -102,7 +102,7 @@ and it does not change link resolution (`[[24995]]` stays unresolved).
 | `patch NOTE SEC SHA8 <stdin` | replace one section, compare-and-swap on its sha8 — exit 3 = stale, re-outline |
 | `appendsec NOTE SEC TEXT` · `append NOTE [SEC] TEXT` | append inside a section · at end of note, or inside SEC when given |
 | `set NOTE KEY VALUE` · `unset NOTE KEY` | frontmatter field flip, body untouched |
-| `new PATH [--template T] [--key v ...]` | create from a vault template |
+| `new PATH [--template T] [--KEY VALUE ...]` | create from a vault template |
 | `daily-append TEXT` | append inside today's standup Today section |
 
 ### Refactor (link-aware, journaled)

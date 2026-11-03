@@ -446,8 +446,21 @@ fn rel_of<'a>(vault: &Path, fp: &'a Path) -> std::borrow::Cow<'a, str> {
 
 // ---------- commands ----------
 
+/// The KEY shapes the native `set` serves: ASCII `[A-Za-z0-9_.-]`, not
+/// starting with `-`. A strict subset of python's `_fm_key_ok` (every key in
+/// the author's vault fits it); anything else — a malformed key python refuses
+/// with a usage error, or a non-ASCII key it writes — falls back, so python is
+/// the one authority on what a valid key is. `set T description="a b" x` once
+/// wrote `description=a b: x` here with exit 0.
+fn native_key(k: &str) -> bool {
+    !k.is_empty()
+        && !k.starts_with('-')
+        && k.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'.' || b == b'-')
+}
+
 fn cmd_set(vault: &Path, args: &[String]) -> Outcome {
-    if args.len() != 3 {
+    if args.len() != 3 || !native_key(&args[1]) {
         return Outcome::Fallback;
     }
     if has_pending_journal(vault) {
