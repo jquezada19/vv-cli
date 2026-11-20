@@ -21,7 +21,7 @@ the python fallback made impossible, for the cases the native entry answers
 itself: it must produce the same bytes or decline, never the old ones.
 
 Cases marked "(control)" pass at the PR base by design; every other case has a
-check that fails there.
+check that fails there on at least one engine.
 """
 import os, sys, shutil, subprocess, tempfile, atexit, re
 
@@ -177,6 +177,7 @@ for e in ENGINES:
     rc, out, err = e.run("new", "X", "--template", "T", "--status", "done")
     check(f"N5[{n}] an unterminated template block is refused, nothing created",
           rc == 1 and err.startswith("refused: template frontmatter is unterminated") and not e.has("X.md"), (rc, out, err))
+    e.fresh({"Templates/T.md": "---\nstatus: draft\n"})
     rc, out, err = e.run("new", "X", "--template", "T")
     check(f"N6[{n}] (control) the same template without property flags still creates",
           rc == 0 and e.get("X.md") == "---\nstatus: draft\n", (rc, err))
@@ -201,7 +202,7 @@ for e in ENGINES:
             os.chmod(os.path.join(e.vault, "A/Src.md"), 0)
             rc, out, err = e.run(cmd, *args)
             os.chmod(os.path.join(e.vault, "A/Src.md"), 0o644)
-            check(f"D3[{n},{cmd}] an unreadable source is a clean refusal, not a traceback",
+            check(f"D3[{n},{cmd}] (control) an unreadable source is a clean refusal, not a traceback",
                   rc == 1 and "Traceback" not in err and e.has("A/Src.md"), (rc, out, err[:300]))
 
     # ---- S: search numeric flags ----
@@ -219,7 +220,7 @@ for e in ENGINES:
     rc, out, err = e.run("search", "alpha", "--k", "0" * 4400 + "1", "--w", "0000000000000000000020")
     check(f"S4[{n}] leading zeros do not count toward the digit bound", rc == 0 and "A.md" in out, (rc, out[:80], err[:200]))
     rc, out, err = e.run("search", "alpha", "--limit", "1" + "0" * 18)   # 19 digits: past the --k bound
-    check(f"S5[{n}] a 19-digit global --limit still searches", rc == 0 and "A.md" in out, (rc, out[:80], err[:200]))
+    check(f"S5[{n}] (control) a 19-digit global --limit still searches", rc == 0 and "A.md" in out, (rc, out[:80], err[:200]))
 
 if NATIVE_ONLY is not None:
     e = NATIVE_ONLY
@@ -255,7 +256,7 @@ if os.path.exists(VRUST):
     r = subprocess.run([sys.executable, VV, "search", "alpha", "--limit", "1" + "0" * 18],
                        capture_output=True, text=True, timeout=60,
                        env=dict(env5, VV_VAULT=v, VV_NO_METRICS="1", VV_INDEX_ROOT=mkdtemp("vv-wdef-idx-")))
-    check("X5 a 19-digit global --limit survives delegation to the native scanner",
+    check("X5 (control at the base; fails without the clamp) a 19-digit global --limit survives delegation to the native scanner",
           r.returncode == 0 and "A.md" in r.stdout, (r.returncode, r.stdout[:80], r.stderr[:200]))
 
 print(f"\n{len(fails)} failures" if fails else "\nall write-defect checks passed")
