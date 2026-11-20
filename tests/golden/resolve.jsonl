@@ -9,7 +9,7 @@
 {"argv": ["resolve", "Twin"], "exit": 1, "files": {}, "id": "resolve/ambiguous-name", "served": "handoff", "stderr": "ambiguous: Area/Twin.md | Notes/Twin.md — next: vv resolve Area/Twin.md\n", "stdin": null, "stdout": ""}
 {"argv": ["resolve", "202"], "exit": 1, "files": {}, "id": "resolve/ambiguous-id", "served": "handoff", "stderr": "ambiguous: 202 matches 2 notes: Other/202 - Dup two.md | Work/202 - Dup one.md — next: vv resolve 'Other/202 - Dup two.md'\n", "stdin": null, "stdout": ""}
 {"argv": ["resolve", "999"], "exit": 1, "files": {}, "id": "resolve/id-no-candidate", "served": "handoff", "stderr": "not-found: no note matches '999'\n", "stdin": null, "stdout": ""}
-{"argv": ["resolve"], "exit": 1, "files": {}, "id": "resolve/arity-0", "served": "handoff", "stderr": "usage: resolve takes 1 positional args, got 0 — next: vv resolve NAME\n", "stdin": null, "stdout": ""}
-{"argv": ["resolve", "Hub", "x"], "exit": 1, "files": {}, "id": "resolve/arity-2", "served": "handoff", "stderr": "usage: resolve takes 1 positional args, got 2 — next: vv resolve Hub\n", "stdin": null, "stdout": ""}
+{"argv": ["resolve"], "exit": 1, "files": {}, "id": "resolve/arity-0", "served": "native", "stderr": "usage: resolve takes 1 positional args, got 0 — next: vv resolve NAME\n", "stdin": null, "stdout": ""}
+{"argv": ["resolve", "Hub", "x"], "exit": 1, "files": {}, "id": "resolve/arity-2", "served": "native", "stderr": "usage: resolve takes 1 positional args, got 2 — next: vv resolve Hub\n", "stdin": null, "stdout": ""}
 {"argv": ["resolve", "../outside.md"], "exit": 1, "files": {}, "id": "resolve/escape", "served": "handoff", "stderr": "escape: path leaves the vault: ../outside.md\n", "stdin": null, "stdout": ""}
 {"argv": ["resolve", "Sollo"], "exit": 1, "files": {}, "id": "resolve/near-miss-suggestion", "served": "handoff", "stderr": "not-found: no note matches 'Sollo'\ndid you mean: Solo\n", "stdin": null, "stdout": ""}

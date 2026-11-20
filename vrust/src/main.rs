@@ -324,7 +324,7 @@ fn cmd_search(args: &[String], orig: &[String]) -> ! {
     // the vault again to rediscover the zero.
     // "Multi-word" is python's `len(t.split()) > 1`: str.split() also breaks
     // on U+001C..U+001F, which char::is_whitespace does not count.
-    let py_space = |c: char| c.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&c);
+    let py_space = err::py_space;
     if hits.is_empty()
         && !readpath::from_py()
         && terms
@@ -814,6 +814,14 @@ fn main() {
             "board" | "tags" | "props" | "show" => Some(query::run),
             _ => None,
         };
+        // The operand count, before any handler: python checks arity ahead of
+        // everything a command does. With a global flag on the line python
+        // validates that first, so the refusal stays python's.
+        if readpath::GLOBAL_FLAG.get().is_none() {
+            if let Some(readpath::Outcome::Done(code)) = err::arity(cmd, &args[1..]) {
+                exit(code);
+            }
+        }
         if let Some(h) = handler {
             match h(cmd, &args[1..], &vault()) {
                 readpath::Outcome::Done(c) => exit(c),

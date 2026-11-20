@@ -7,6 +7,10 @@ hand-off itself.
 
 A  `read` arity. `vv read` with no operand, or with more than three, is
    answered natively with python's own line and exit 1.
+B  Arity for every command the native dispatcher serves, from one operand
+   table: the count python reports, the hint (an unquoted TEXT or VALUE, a
+   `--section` given to `append`, a malformed `set` KEY) and the runnable next
+   step with the caller's own operands quoted into their slots.
 G  A global flag (`--vault`, `--limit`) on the command line: python validates
    those before arity, so the native entry hands the call off instead.
 M  The row a native refusal logs: exit code and kind, timed from process
@@ -16,7 +20,7 @@ U  An argument that is not valid UTF-8 is handed to python byte for byte
 P  The post-stdin `patch` hand-off finds python the way every other hand-off
    does (VV_PYTHON, VV_PY_ENTRY) and says so when it cannot.
 """
-import json, os, shlex, shutil, stat, subprocess, sys, tempfile, atexit, hashlib
+import json, os, re, shlex, shutil, stat, subprocess, sys, tempfile, atexit, hashlib
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
@@ -107,6 +111,65 @@ check("A3 (control) a well-formed read is still served", got[0] == 0 and not b.s
 b = Box()
 got = b.run(["read", "Hub.md", "H1", "H2"])
 check("A4 (control) a three-operand refusal that is not arity still hands off", b.started() and got[0] == 42, got)
+
+# ---- B: arity across the table, differentially ----
+# Every command, every operand count from 0 to 5, several operand shapes. The
+# python engine decides what the answer is; when its answer is the arity
+# refusal the native entry must give the same bytes without starting python,
+# and otherwise must hand the call off untouched.
+SHAPES = {
+    "plain": ["Hub.md", "H2", "x", "y", "z"],
+    "spaced": ["Area/Solo.md", "two words", "it's", "a b", "c"],
+    "flags": ["Hub.md", "--section", "H2", "--k", "-x"],
+    "bullet": ["Hub.md", "- item", "text", "more", "words"],
+    "bad-key": ["Area/Solo.md", "a=b", "c", "d", "e"],
+    "odd": ["x\x01y", "", "a \u2014 next: b", "caf\u00e9", "$(id)"],
+    "dash-first": ["--weird", "Hub.md", "x", "y", "z"],
+}
+COMMANDS = ("outline read show head resolve search patch append appendsec set unset "
+            "links backlinks orphans deadends board tags props").split()
+box_a, box_b = Box(), Box()
+tried = refused = others = handed = 0
+for cmd in COMMANDS:
+    for shape, pool in SHAPES.items():
+        for n in range(0, 6):
+            argv = [cmd] + pool[:n]
+            if cmd == "search" and any(a in ("--k", "--w") for a in argv):
+                continue                      # numeric-flag refusals have their own suite
+            want = oracle(box_a, argv)
+            # the boundary check's own wording; `append` with three operands is
+            # refused later, by the command, with a line that looks alike
+            is_arity = (re.match(rf"usage: {cmd} takes [0-9+-]+ positional args, got {n}\b",
+                                 want[2].decode("utf-8", "replace")) and not (cmd == "append" and n == 3))
+            if not is_arity:
+                if os.path.exists(box_b.mark):
+                    os.remove(box_b.mark)
+                got = box_b.run(argv)
+                handed += got[0] == 42 and box_b.started()
+                others += 1
+                if re.match(rb"usage: \S+ takes [0-9+-]+ positional args", got[2]):
+                    check(f"B1x[{cmd} {shape} {n}] no native arity refusal where python gives none", False, (got, want))
+                continue                      # a success or another refusal: not this slice
+            tried += 1
+            if os.path.exists(box_b.mark):
+                os.remove(box_b.mark)
+            got = box_b.run(argv)
+            ok = got == want and not box_b.started()
+            refused += ok
+            if not ok:
+                check(f"B1[{cmd} {shape} {n}] the native entry gives python's arity refusal itself", False, (got, want))
+check(f"B1 every arity refusal python gives ({tried}) is answered natively with the same bytes", refused == tried and tried >= 150,
+      (refused, tried))
+check(f"B1b no native arity refusal where python gives none ({others} other calls checked)",
+      others >= 100 and not any(f.startswith("B1x") for f in fails), others)
+for cmd, argv in (("tags", ["tags", "a", "b", "c"]), ("search", ["search"]), ("show", ["show", "Hub.md", "x", "y"])):
+    b = Box()
+    got = b.run(argv)
+    check(f"B2[{cmd}] (control) a count python accepts is not turned into an arity refusal",
+          b"takes" not in got[2], got)
+b = Box()
+got = b.run(["--limit", "3", "outline"])
+check("B3 with a global flag the arity refusal is python's", b.started() and got[0] == 42, got)
 
 # ---- G: a global flag hands the refusal off ----
 for label, argv in (("--limit", ["--limit", "2", "read"]), ("--vault", ["read", "--vault", "/nonexistent-vault"]),
