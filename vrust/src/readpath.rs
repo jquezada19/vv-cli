@@ -386,16 +386,21 @@ pub fn contain(vault: &Path, rel: &str) -> Option<PathBuf> {
 }
 
 pub fn resolve(vault: &Path, ref_: &str) -> Option<PathBuf> {
-    if let Some(fp) = contain(vault, ref_) {
-        if fp.is_file() {
-            return Some(fp);
-        }
-    }
-    if !ref_.ends_with(".md") {
-        if let Some(fp) = contain(vault, &format!("{}.md", ref_)) {
-            if fp.is_file() {
+    // Each typed form in python's order: a contained file is the answer; a
+    // form that EXISTS but fails containment (a symlink out of the vault) is
+    // python's `escape:` refusal, never a reason to go on to the next form
+    // or to match the same text as a basename or an id.
+    let md = format!("{}.md", ref_);
+    let forms: [Option<&str>; 2] = [Some(ref_), (!ref_.ends_with(".md")).then_some(md.as_str())];
+    for r in forms.into_iter().flatten() {
+        match contain(vault, r) {
+            Some(fp) if fp.is_file() => {
+                let _ = REF_KIND.set("path");
                 return Some(fp);
             }
+            Some(_) => {}
+            None if vault.join(r).symlink_metadata().is_ok() => return None,
+            None => {}
         }
     }
     let want = ref_.strip_suffix(".md").unwrap_or(ref_).to_lowercase();
@@ -420,13 +425,51 @@ pub fn resolve(vault: &Path, ref_: &str) -> Option<PathBuf> {
         let real = fs::canonicalize(hits[0]).ok()?;
         let vreal = fs::canonicalize(vault).ok()?;
         if real == vreal || real.starts_with(&vreal) {
+            let _ = REF_KIND.set("name");
             Some(hits[0].clone())
         } else {
             None // escaping symlink: python refuses with `escape:`
         }
+    } else if hits.is_empty() {
+        resolve_id(vault, &want, &files)
     } else {
-        None
-    } // 0 or 2+: python
+        None // 2+: python words the `ambiguous:` refusal
+    }
+}
+
+/// The id rule, on the SAME completed walk: bare digits name the one note
+/// whose basename starts `<digits> - ` (mirrors `_resolve_id_prefix`). Zero or
+/// several candidates, a `#`-prefixed spelling, and an escaping symlink are
+/// python's to answer.
+fn resolve_id(vault: &Path, want: &str, files: &[PathBuf]) -> Option<PathBuf> {
+    if want.is_empty() || !want.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    // a name this engine cannot read as text may be a second candidate that
+    // python does count: uniqueness is then python's to judge
+    if files
+        .iter()
+        .any(|p| p.file_name().is_some_and(|n| n.to_str().is_none()))
+    {
+        return None;
+    }
+    let prefix = format!("{} - ", want);
+    let mut cands = files.iter().filter(|p| {
+        p.file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.starts_with(&prefix))
+    });
+    let only = cands.next()?;
+    if cands.next().is_some() {
+        return None;
+    }
+    let real = fs::canonicalize(only).ok()?;
+    let vreal = fs::canonicalize(vault).ok()?;
+    if real.starts_with(&vreal) {
+        let _ = REF_KIND.set("id");
+        return Some(only.clone());
+    }
+    None
 }
 
 // ---------- metrics (mirror _log in vv_impl.py) ----------
@@ -463,10 +506,13 @@ pub fn log_metrics(op: &str, t0: std::time::Instant, out_bytes: usize, cf: u64, 
     } else {
         format!(", \"src\": \"{}\"", src)
     };
-    let sel_field = match sel {
+    let mut sel_field = match sel {
         Some(s) => format!(", \"sel\": \"{}\"", s),
         None => String::new(),
     };
+    if let Some(k) = REF_KIND.get() {
+        sel_field.push_str(&format!(", \"ref\": \"{}\"", k));
+    }
     let rec = format!(
         "{{\"ts\": \"{}\", \"op\": \"{}\", \"ms\": {}, \"out_bytes\": {}, \"exit\": 0, \"cf_bytes\": {}, \"engine\": \"native\", \"ver\": \"{}\"{}{}}}\n",
         ts, op, ms, out_bytes, cf, env!("CARGO_PKG_VERSION"), src_field, sel_field);
@@ -479,6 +525,19 @@ pub fn log_metrics(op: &str, t0: std::time::Instant, out_bytes: usize, cf: u64, 
 /// Global --limit N, stripped from argv in main(). Enumerators honor it via
 /// push_limited; absent = unlimited.
 pub static LIMIT: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+
+/// Wall-clock nanoseconds at process start, set first thing in `main` and
+/// handed to python on a fallback (`VV_NATIVE_T0_NS`) so the row it logs
+/// covers the whole invocation: the native share and interpreter start-up.
+pub static START_NS: std::sync::OnceLock<u128> = std::sync::OnceLock::new();
+
+pub fn start_ns() -> String {
+    START_NS.get().copied().unwrap_or(0).to_string()
+}
+
+/// How the NOTE operand was addressed, for the metrics row: "path" (a typed
+/// vault-relative path), "name" (a unique basename) or "id" (the id rule).
+pub static REF_KIND: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
 
 /// Entry lines + count trailer for an enumerator. The K-of-M trailer appears
 /// ONLY when --limit actually truncated — `total` may exceed entries.len()

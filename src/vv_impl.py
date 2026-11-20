@@ -66,6 +66,27 @@ def _metrics_src():
     return v or None
 
 
+# Set by the native entry when it hands an invocation to python: the
+# wall-clock nanosecond it started at. A row is then timed from there, so
+# `ms` covers the native share and interpreter start-up as well. Only a
+# plausible value is believed: digits, and no more than _HANDOFF_MAX_NS ago
+# (a hand-off reaches this line within interpreter start-up; an older value
+# was inherited from somewhere else).
+_HANDOFF_MAX_NS = 60 * 10**9
+_t0ns = os.environ.get("VV_NATIVE_T0_NS", "")
+_NATIVE_T0_NS = int(_t0ns) if (_t0ns.isascii() and _t0ns.isdigit() and 16 <= len(_t0ns) <= 20) else 0
+if not 0 <= time.time_ns() - _NATIVE_T0_NS <= _HANDOFF_MAX_NS:
+    _NATIVE_T0_NS = 0
+# The time before `_t0`: fixed once, from one wall-clock sample minus what
+# the monotonic clock has already counted since `_t0`, and never negative.
+# The rest of the row is monotonic, so a clock step cannot distort `ms`.
+_PRE_MS = max(0.0, (time.time_ns() - _NATIVE_T0_NS) / 1e6 - (time.perf_counter() - _t0) * 1000) if _NATIVE_T0_NS else 0.0
+
+def _elapsed_ms():
+    return round(_PRE_MS + (time.perf_counter() - _t0) * 1000)
+
+_ref_kind = None   # how the NOTE operand was addressed: "path" | "name" | "id"
+
 def _log(out_bytes, exit_code=0, kind=None):
     # Test suites (VV_JOURNAL_ROOT) and explicit opt-out don't pollute the
     # day-to-day usage log the shadow pilot reads.
@@ -74,9 +95,13 @@ def _log(out_bytes, exit_code=0, kind=None):
     try:
         import datetime
         rec = {"ts": datetime.datetime.now().isoformat(timespec="seconds"),
-               "op": _op, "ms": round((time.perf_counter() - _t0) * 1000),
+               "op": _op, "ms": _elapsed_ms(),
                "out_bytes": out_bytes, "exit": exit_code,
                "ver": _version(), "engine": "python"}
+        if _NATIVE_T0_NS:
+            rec["fb"] = 1          # the native entry ran first and declined
+        if _ref_kind:
+            rec["ref"] = _ref_kind
         src = _metrics_src()
         if src:
             rec["src"] = src
@@ -222,12 +247,15 @@ def _cf(fp):
 def resolve(ref):
     """Vault-relative path if it exists, else wikilink-style bare-name resolution.
     All paths are contained to the vault (no abs/.. escape)."""
+    global _ref_kind
     fp = contain(ref)
     if os.path.isfile(fp):
+        _ref_kind = _ref_kind or "path"
         return _cf(fp)
     # allow folder/Name (no .md) exact path resolution
     fp_md = contain(ref + ".md") if not ref.endswith(".md") else fp
     if os.path.isfile(fp_md):
+        _ref_kind = _ref_kind or "path"
         return _cf(fp_md)
     want = (ref[:-3] if ref.endswith(".md") else ref).lower()
     # a dangling symlink is walk-visible but not a note: never a hit (the read
@@ -242,14 +270,17 @@ def resolve(ref):
         for cand in (bare, bare + ".md"):
             fp_b = contain(cand)
             if os.path.isfile(fp_b):
+                _ref_kind = _ref_kind or "path"
                 return _cf(fp_b)
         want = want[1:]
         hits = _name_hits(want, all_notes)
     if len(hits) == 1:
+        _ref_kind = _ref_kind or "name"
         return _cf(_contained(hits[0]))
     if not hits:
         idhit = _resolve_id_prefix(want, all_notes)
         if idhit:
+            _ref_kind = _ref_kind or "id"
             return _cf(idhit)
         if _walk_errors:
             _incomplete(f"'{ref}' is absent")
@@ -1633,6 +1664,13 @@ def cmd_search(*args):
                 else {"path": r_, "score": s_, "snippet": sn}
                 for s_, r_, sn in hits[:k]]
         _list_out(rows, len(hits), "matches", cmd="search")
+        return
+    if use_rust() and terms and _NATIVE_T0_NS and os.environ.get("VV_NATIVE_ZERO") == str(os.getppid()):
+        # the native entry already scanned and found nothing; it handed off
+        # only for the phrase hint, so do not scan again to rediscover the zero
+        out("(0 of 0 matches)")
+        h = _phrase_hint(terms)
+        if h: out(h)
         return
     if use_rust():
         import subprocess
