@@ -31,6 +31,29 @@ next release is MAJOR unless they are judged defect repairs.
   slower, same answer). Output is unchanged.
   Measured: 262 ms → 99 ms for a one-word miss.
 
+- **`vv read` with the wrong number of operands is answered natively.** The
+  refusal (`usage: read takes 1-3 positional args, got N — next: vv outline
+  …`, exit 1) used to cost a hand-off to python; the native entry now prints
+  the same bytes itself. With a well-formed `--vault` or `--limit` on the
+  command line the call still hands off, because python validates those
+  first. This is the
+  first refusal the native entry words itself.
+- **An argument that is not valid UTF-8 no longer crashes the native entry.**
+  It is handed to python byte for byte, and python answers such a call itself
+  instead of delegating the scan back (the same when the vault's own path is
+  not valid UTF-8). A native process that python started never hands a call
+  back to python; it refuses, so the two engines cannot call each other
+  without end. `VV_FROM_PY` now carries python's pid and is believed only
+  from the parent process.
+- **`patch` refuses a body it could not read.** A read error on stdin used to
+  forward whatever bytes had arrived, which python could apply as a shorter
+  section; it is now `io: could not read the replacement body from stdin`,
+  exit 1, with the note untouched.
+- **The post-stdin `patch` hand-off finds python like every other hand-off.**
+  It honours `VV_PYTHON` and the packaged layout, prints the `engine:` line
+  when the interpreter cannot be started, and no longer falls back to a
+  `vv.py` in the current directory.
+
 ### Added
 
 - **Metrics row fields.** `ref` says how the NOTE operand was addressed

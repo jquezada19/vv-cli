@@ -10,6 +10,9 @@ Python floor 27 ms. Reads already native (E2, 0 divergences over 6,004+117).
    doubt (miss, ambiguity, non-UTF-8, io error, unsupported flag) return
    Fallback -> exec python3 src/vv.py with ORIGINAL argv. Python stays the sole
    author of error text and exit codes.
+   *Superseded slice by slice:* the native entry now words some refusals
+   itself (`vrust/src/err.rs`), each one byte-identical to python's and pinned
+   in `tests/golden/`. A refusal not yet ported still hands off.
 2. **Byte parity** on stdout+stderr+exit against the Python implementation,
    pinned by differential tests (fixtures + full-corpus sweep). Semantics are
    ported line-for-line from src/vv_impl.py — never re-derived from taste.

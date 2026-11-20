@@ -70,7 +70,7 @@ STAGES = collections.OrderedDict([
                                  "_journal_rollback _journal_done _pending_journals _vault_journal_root cmd_rename cmd_move"),
     ("4 lint, index, doctor", "cmd_lint _lint_report _table_pipe_findings cmd_doctor _git _scope _walk_scope "
                               "_index_db_path _index_parse _index_stat_walk _index_sync index_handle cmd_index"),
-    ("5 cutover", "use_rust"),
+    ("5 cutover", "use_rust _native_argv_ok"),
 ])
 STAGE_OF = {fn: stage for stage, fns in STAGES.items() for fn in fns.split()}
 REGEX_LITERAL = re.compile(
