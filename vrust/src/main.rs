@@ -254,7 +254,19 @@ fn cmd_search(args: &[String], orig: &[String]) -> ! {
         }
     }
     if terms.is_empty() {
-        eprintln!("error: no query");
+        // python's line and next step; with a global flag on the command line
+        // (or as python's own child) the refusal is python's to give
+        if readpath::GLOBAL_FLAG.get().is_some() || readpath::from_py() {
+            exec_python(orig);
+        }
+        if let readpath::Outcome::Done(code) = err::die(
+            "search",
+            "usage: search needs a query",
+            Some("vv search <terms> [--k N] [--w CHARS]"),
+            1,
+        ) {
+            exit(code);
+        }
         exit(1);
     }
     let root = vault();

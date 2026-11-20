@@ -170,6 +170,13 @@ for cmd, argv in (("tags", ["tags", "a", "b", "c"]), ("search", ["search"]), ("s
 b = Box()
 got = b.run(["--limit", "3", "outline"])
 check("B3 with a global flag the arity refusal is python's", b.started() and got[0] == 42, got)
+b = Box()
+got = b.run(["search"])
+check("B4 a search with no query is python's usage line, given natively",
+      got == oracle(b, ["search"]) and not b.started() and got[2].startswith(b"usage: search needs a query"), (got, oracle(b, ["search"])))
+b = Box()
+got = b.run(["--limit", "3", "search"])
+check("B5 with a global flag that refusal is python's too", b.started() and got[0] == 42, got)
 
 # ---- G: a global flag hands the refusal off ----
 for label, argv in (("--limit", ["--limit", "2", "read"]), ("--vault", ["read", "--vault", "/nonexistent-vault"]),

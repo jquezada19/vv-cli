@@ -38,6 +38,17 @@ next release is MAJOR unless they are judged defect repairs.
   command line the call still hands off, because python validates those
   first. This is the
   first refusal the native entry words itself.
+- **Wrong operand counts are answered natively for every native command.**
+  `outline`, `head`, `resolve`, `show`, `patch`, `append`, `appendsec`, `set`,
+  `unset`, `links`, `backlinks`, `orphans`, `deadends`, `board` and `props`
+  join `read`: the `usage: CMD takes N positional args, got M …` line, its
+  hint (an unquoted TEXT or VALUE, `--section` given to `append`, a malformed
+  `set` KEY) and its runnable next step are printed by the native entry with
+  python's exact bytes, from one operand table. A global flag on the command
+  line still hands the call off.
+- **`vv search` with no query says what python says.** The native entry
+  printed `error: no query`; it now prints `usage: search needs a query —
+  next: vv search <terms> [--k N] [--w CHARS]`, exit 1 as before.
 - **An argument that is not valid UTF-8 no longer crashes the native entry.**
   It is handed to python byte for byte, and python answers such a call itself
   instead of delegating the scan back (the same when the vault's own path is
