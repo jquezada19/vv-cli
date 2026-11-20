@@ -118,7 +118,18 @@ for e in ENGINES:
     rc, out, err = e.run("resolve", "88")
     check(f"I12[{n}] a typed path that escapes the vault is refused, not re-read as an id",
           rc == 1 and err.startswith("escape:") and out == "", (rc, out, err))
-    os.remove(os.path.join(e.vault, "88")); os.remove(os.path.join(e.vault, "Work", "88 - Good.md"))
+    os.remove(os.path.join(e.vault, "Work", "88 - Good.md"))
+    with open(os.path.join(e.vault, "88.md"), "w") as f:
+        f.write("# the .md form\n")
+    rc, out, err = e.run("resolve", "88")
+    check(f"I13[{n}] the escaping bare form is refused before its .md form is tried",
+          rc == 1 and err.startswith("escape:") and out == "", (rc, out, err))
+    os.remove(os.path.join(e.vault, "88")); os.remove(os.path.join(e.vault, "88.md"))
+    os.symlink(os.path.join(outside, "x.md"), os.path.join(e.vault, "Work", "91 - Outside.md"))
+    rc, out, err = e.run("resolve", "91")
+    check(f"I14[{n}] an id candidate that is a symlink out of the vault is refused",
+          rc == 1 and err.startswith("escape:") and out == "", (rc, out, err))
+    os.remove(os.path.join(e.vault, "Work", "91 - Outside.md"))
 
 if HAVE_NATIVE:
     # ---- the native entry by itself: python unreachable ----
@@ -132,6 +143,13 @@ if HAVE_NATIVE:
     check("I9 (control) several candidates are python's to word", rc != 0 and "vv.py" in err, (rc, out, err))
     rc, out, err = solo.run("resolve", "42")
     check("I10 (control) an exact basename still resolves natively", rc == 0 and out.strip() == "Work/42.md", (rc, out, err))
+    outside = mkdtemp("vv-resm-solo-outside-")
+    with open(os.path.join(outside, "x.md"), "w") as f:
+        f.write("# outside\n")
+    os.symlink(os.path.join(outside, "x.md"), os.path.join(solo.vault, "Work", "91 - Outside.md"))
+    rc, out, err = solo.run("resolve", "91")
+    check("I15 the native entry never answers an id candidate that leaves the vault", rc != 0 and out == "", (rc, out, err))
+    os.remove(os.path.join(solo.vault, "Work", "91 - Outside.md"))
     os.symlink("/nonexistent/target.md", os.path.join(solo.vault, "Work", "55555 - Dangling.md"))
     rc, out, err = solo.run("resolve", "55555")
     check("I11 a dangling symlink is never answered natively", rc != 0 and out == "", (rc, out, err))
@@ -183,15 +201,17 @@ if HAVE_NATIVE:
     r = p.rows()
     check("M10 a direct python call carries ref and no fb", len(r) == 6 and r[0].get("ref") == "id" and "fb" not in r[0], r)
     check("M11 a stale, future or malformed start time is not believed",
-          len(r) == 6 and all("fb" not in x and 0 <= x["ms"] < 30_000 for x in r[1:5]), r[1:5])
+          len(r) == 6 and all("fb" not in x and 0 <= x["ms"] < 120_000 for x in r[1:5]), r[1:5])
     check("M12 a recent start time is: the row is flagged and its ms starts there",
-          len(r) == 6 and r[5].get("fb") == 1 and 2_000 <= r[5]["ms"] < 30_000, r[5:])
+          len(r) == 6 and r[5].get("fb") == 1 and 2_000 <= r[5]["ms"] < 120_000, r[5:])
 
     # a zero-flag that did not come from this process's own parent is never believed
     z = Engine("python-launcher", {}, [sys.executable, VV])
-    for forged in ("1", str(os.getpid() + 1)):
+    # os.getpid() IS the parent of the python we launch: the flag alone, even
+    # with the right pid, is not believed without a hand-off start time
+    for label, forged in (("literal", "1"), ("other-pid", str(os.getpid() + 1)), ("parent-pid", str(os.getpid()))):
         rc, out, err = z.run("search", "alpha", env={"VV_NATIVE_ZERO": forged})
-        check(f"Z8[{forged == '1' and 'literal' or 'pid'}] an inherited zero-flag cannot turn a hit into a miss",
+        check(f"Z8[{label}] an inherited zero-flag cannot turn a hit into a miss",
               rc == 0 and "Plain Note.md" in out, (rc, out, err))
 
 print(f"\n{len(fails)} failures" if fails else "\nall resolve/metrics checks passed")

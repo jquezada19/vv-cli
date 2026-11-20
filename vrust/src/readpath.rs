@@ -386,26 +386,22 @@ pub fn contain(vault: &Path, rel: &str) -> Option<PathBuf> {
 }
 
 pub fn resolve(vault: &Path, ref_: &str) -> Option<PathBuf> {
-    if let Some(fp) = contain(vault, ref_) {
-        if fp.is_file() {
-            let _ = REF_KIND.set("path");
-            return Some(fp);
-        }
-    }
-    if !ref_.ends_with(".md") {
-        if let Some(fp) = contain(vault, &format!("{}.md", ref_)) {
-            if fp.is_file() {
+    // Each typed form in python's order: a contained file is the answer; a
+    // form that EXISTS but fails containment (a symlink out of the vault) is
+    // python's `escape:` refusal, never a reason to go on to the next form
+    // or to match the same text as a basename or an id.
+    let md = format!("{}.md", ref_);
+    let forms: [Option<&str>; 2] = [Some(ref_), (!ref_.ends_with(".md")).then_some(md.as_str())];
+    for r in forms.into_iter().flatten() {
+        match contain(vault, r) {
+            Some(fp) if fp.is_file() => {
                 let _ = REF_KIND.set("path");
                 return Some(fp);
             }
+            Some(_) => {}
+            None if vault.join(r).symlink_metadata().is_ok() => return None,
+            None => {}
         }
-    }
-    // A typed path that EXISTS but failed containment (a symlink out of the
-    // vault) is python's `escape:` refusal, never a reason to go on and match
-    // the same text as a basename or an id.
-    let typed = |r: &str| contain(vault, r).is_none() && vault.join(r).symlink_metadata().is_ok();
-    if typed(ref_) || (!ref_.ends_with(".md") && typed(&format!("{}.md", ref_))) {
-        return None;
     }
     let want = ref_.strip_suffix(".md").unwrap_or(ref_).to_lowercase();
     let mut files = Vec::new();
@@ -469,7 +465,7 @@ fn resolve_id(vault: &Path, want: &str, files: &[PathBuf]) -> Option<PathBuf> {
     }
     let real = fs::canonicalize(only).ok()?;
     let vreal = fs::canonicalize(vault).ok()?;
-    if real.is_file() && real.starts_with(&vreal) {
+    if real.starts_with(&vreal) {
         let _ = REF_KIND.set("id");
         return Some(only.clone());
     }

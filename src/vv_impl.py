@@ -77,9 +77,10 @@ _t0ns = os.environ.get("VV_NATIVE_T0_NS", "")
 _NATIVE_T0_NS = int(_t0ns) if (_t0ns.isascii() and _t0ns.isdigit() and 16 <= len(_t0ns) <= 20) else 0
 if not 0 <= time.time_ns() - _NATIVE_T0_NS <= _HANDOFF_MAX_NS:
     _NATIVE_T0_NS = 0
-# the native share, fixed once: the rest of the row is timed on the monotonic
-# clock, so a wall-clock step mid-command cannot make `ms` negative or absurd
-_PRE_MS = (time.time_ns() - _NATIVE_T0_NS) / 1e6 if _NATIVE_T0_NS else 0.0
+# The time before `_t0`: fixed once, from one wall-clock sample minus what
+# the monotonic clock has already counted since `_t0`, and never negative.
+# The rest of the row is monotonic, so a clock step cannot distort `ms`.
+_PRE_MS = max(0.0, (time.time_ns() - _NATIVE_T0_NS) / 1e6 - (time.perf_counter() - _t0) * 1000) if _NATIVE_T0_NS else 0.0
 
 def _elapsed_ms():
     return round(_PRE_MS + (time.perf_counter() - _t0) * 1000)
@@ -1664,7 +1665,7 @@ def cmd_search(*args):
                 for s_, r_, sn in hits[:k]]
         _list_out(rows, len(hits), "matches", cmd="search")
         return
-    if use_rust() and terms and os.environ.get("VV_NATIVE_ZERO") == str(os.getppid()):
+    if use_rust() and terms and _NATIVE_T0_NS and os.environ.get("VV_NATIVE_ZERO") == str(os.getppid()):
         # the native entry already scanned and found nothing; it handed off
         # only for the phrase hint, so do not scan again to rediscover the zero
         out("(0 of 0 matches)")

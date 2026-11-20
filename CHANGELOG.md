@@ -26,7 +26,9 @@ next release is MAJOR unless they are judged defect repairs.
 - **A search with no hits scans once.** Every zero-hit query was handed to
   python, which scanned again to rediscover the zero. Python is now reached
   only for a quoted multi-word argument (the one case the phrase hint can
-  arise) and is told the scan already came back empty. Output is unchanged.
+  arise) and is told the scan already came back empty (when python is
+  launched through a wrapper that is not its direct parent it scans again:
+  slower, same answer). Output is unchanged.
   Measured: 262 ms → 99 ms for a one-word miss.
 
 ### Added
@@ -35,7 +37,8 @@ next release is MAJOR unless they are judged defect repairs.
   (`path`, `name`, `id`). A row python writes after the native entry declined
   carries `fb: 1`, and its `ms` is measured from the native process start, so
   it covers the native share and interpreter start-up (it used to cover
-  python's share only, which under-reported every hand-off).
+  python's share only, which under-reported every hand-off). The start time
+  is an environment value believed only when it is less than a minute old.
 - **A typed path that leaves the vault is refused before any name matching.**
   With a symlink `42` pointing outside the vault and a note `42 - Good.md`,
   the native entry declines and python answers `escape:`, as it does for

@@ -330,8 +330,9 @@ fn cmd_search(args: &[String], orig: &[String]) -> ! {
             .iter()
             .any(|t| t.split(py_space).filter(|w| !w.is_empty()).count() > 1)
     {
-        // our pid: python believes the flag only from its own parent, so a
-        // value inherited from some outer environment is never a false zero
+        // our pid: python believes the flag only from its own parent and
+        // only on a hand-off, so a value merely inherited from an outer
+        // environment does not become a false zero
         std::env::set_var("VV_NATIVE_ZERO", std::process::id().to_string());
         exec_python(orig);
     }
