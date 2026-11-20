@@ -69,9 +69,12 @@ impl SequenceMatcher {
         self.a.extend(a.chars());
     }
 
-    /// Longest matching block in `a[alo..ahi]` / `b[blo..bhi]`: of all maximal
-    /// blocks, the one starting earliest in `a`, and of those the one starting
-    /// earliest in `b`. Returns `(i, j, k)`.
+    /// CPython's `find_longest_match` over `a[alo..ahi]` / `b[blo..bhi]`:
+    /// the longest block built from elements `b2j` still indexes (earliest in
+    /// `a`, then earliest in `b`), then widened across equal neighbours on
+    /// both sides. Returns `(i, j, k)`. With autojunk this is not always the
+    /// longest common block: a run made only of popular elements is never
+    /// seeded, so `a = "b" + "a"*199` against `b = "a"*200` gives `k == 0`.
     fn find_longest_match(
         &self,
         alo: usize,
@@ -296,6 +299,9 @@ mod tests {
                         }
                         e => return Err(format!("bad escape \\{e}")),
                     },
+                    ch if (ch as u32) < 0x20 => {
+                        return Err(format!("raw control character {:?} in string", ch))
+                    }
                     ch => out.push(ch),
                 }
             }
@@ -335,6 +341,15 @@ mod tests {
         r.expect('{')?;
         loop {
             let key = r.string()?;
+            let seen = match key.as_str() {
+                "word" => word.is_some(),
+                "possibilities" => poss.is_some(),
+                "expected" => exp.is_some(),
+                _ => false,
+            };
+            if seen {
+                return Err(format!("repeated key {key:?}"));
+            }
             r.expect(':')?;
             match key.as_str() {
                 "word" => word = Some(r.string()?),
@@ -369,7 +384,19 @@ mod tests {
         assert_eq!(c.word, "a\"b\\c\n\u{e9}\u{1f600}\t");
         assert!(c.possibilities.is_empty());
         assert_eq!(c.expected, ["x", ""]);
-        assert!(parse_line(r#"{"word": 1}"#).is_err());
+        // each of these is a complete row but for the one defect it names
+        let ok = r#"{"word":"w","possibilities":[],"expected":[]}"#;
+        assert!(parse_line(ok).is_ok());
+        for bad in [
+            r#"{"word":1,"possibilities":[],"expected":[]}"#,
+            "{\"word\":\"a\tb\",\"possibilities\":[],\"expected\":[]}",
+            "{\"word\":\"a\u{0}b\",\"possibilities\":[],\"expected\":[]}",
+            r#"{"word":"w","word":"v","possibilities":[],"expected":[]}"#,
+            r#"{"word":"w","possibilities":[],"expected":[],"expected":[]}"#,
+            r#"{"word":"w","possibilities":[]}"#,
+        ] {
+            assert!(parse_line(bad).is_err(), "accepted {bad:?}");
+        }
     }
 
     #[test]

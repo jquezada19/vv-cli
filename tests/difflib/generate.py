@@ -203,6 +203,49 @@ def case_long_candidate(rng, pool):
     return word, poss
 
 
+def exact_len(rng, s, n, fill):
+    """`s` cut or padded with characters from `fill` to exactly `n` items."""
+    while len(s) < n:
+        s += rng.choice(fill)
+    return s[:n]
+
+
+def case_autojunk_edge(rng, pool):
+    """Words of 197..201 characters against candidates on both sides of 200.
+    Autojunk keys on the word's length alone (it is difflib's second
+    sequence), so a word of 199 keeps its popular characters and a word of
+    200 drops them: word "a"*199 matches "b"+"a"*199, word "a"*200 does not
+    match "b"+"a"*200."""
+    L = rng.choice((197, 198, 199, 200, 201))
+    kind = rng.randrange(3)
+    if kind == 0:   # one dominant character, a few others sprinkled in
+        main = rng.choice("ae ")
+        word = main * L
+        for _ in range(rng.randrange(0, 4)):
+            i = rng.randrange(L)
+            word = word[:i] + rng.choice("xyzé東") + word[i + 1:]
+    elif kind == 1:  # title-like text, spaces and vowels popular
+        word = exact_len(rng, long_text(rng), L, "aeio ")
+    else:            # a short repeated pattern
+        word = exact_len(rng, rng.choice(("ab", "abc", "a b", "note ")) * 60, L, "ab")
+    poss = []
+    for _ in range(rng.randrange(2, 7)):
+        T = rng.choice((196, 198, 199, 200, 201, 202, 204))
+        op = rng.randrange(4)
+        if op == 0:
+            cand = rng.choice("bxq") + word
+        elif op == 1:
+            cand = word + rng.choice("bxq")
+        elif op == 2:
+            cand = mutate(rng, word, rng.randrange(1, 6))
+        else:
+            cand = rng.choice("bxq") + word[1:]
+        poss.append(exact_len(rng, cand, T, "aeb "))
+    poss += rng.sample(pool, rng.randrange(0, 4))
+    rng.shuffle(poss)
+    return word, poss
+
+
 def case_empty(rng, pool):
     kind = rng.randrange(4)
     if kind == 0:
@@ -218,7 +261,7 @@ KINDS = [
     (case_near, 700), (case_substring, 250), (case_transpose, 250),
     (case_non_ascii, 250), (case_duplicates, 150), (case_ties, 250),
     (case_boundary, 250), (case_long, 160), (case_long_candidate, 60),
-    (case_empty, 40),
+    (case_empty, 40), (case_autojunk_edge, 200),
 ]
 
 
@@ -240,13 +283,33 @@ def build():
         ("e\u0301", ["é", "e", "\u0301"]),
         ("📝", ["📝📝", "📝 notes", "📝"]),
         ("tab\there", ["tab here", "tab\there", "line\nbreak"]),
+        ("a" * 199, ["b" + "a" * 199]),
+        ("a" * 200, ["b" + "a" * 200]),
+        ("a" * 198, ["b" + "a" * 198, "a" * 201]),
     ]
     return cases
 
 
+def matches_if_autojunk(word, poss):
+    """The answer difflib would give if autojunk also applied to this word
+    (CPython only applies it at 200 items or more): popular elements are
+    dropped from b2j by the same rule __chain_b uses."""
+    n = len(word)
+    ntest = n // 100 + 1
+    out = []
+    for x in poss:
+        sm = difflib.SequenceMatcher(None, x, word)
+        for elt in [e for e, idxs in sm.b2j.items() if len(idxs) > ntest]:
+            del sm.b2j[elt]
+        if sm.real_quick_ratio() >= CUTOFF and sm.quick_ratio() >= CUTOFF and sm.ratio() >= CUTOFF:
+            out.append((sm.ratio(), x))
+    return [x for _, x in sorted(out, reverse=True)[:N]]
+
+
 def coverage(cases):
     """Counts of the edges the corpus must keep covering."""
-    c = dict(autojunk_word=0, autojunk_changes=0, ties=0, exact_cutoff=0,
+    c = dict(autojunk_word=0, autojunk_changes=0, short_word_long_candidate=0,
+             below_trigger_198=0, below_trigger_199=0, ties=0, exact_cutoff=0,
              empty_word=0, empty_candidates=0, duplicates=0, non_ascii=0,
              combining=0, astral=0, full_results=0, empty_results=0)
     for word, poss in cases:
@@ -260,6 +323,11 @@ def coverage(cases):
         c["non_ascii"] += any(ord(ch) > 127 for ch in s)
         c["combining"] += any(0x300 <= ord(ch) < 0x370 for ch in s)
         c["astral"] += any(ord(ch) > 0xFFFF for ch in s)
+        if len(word) < 200 and any(len(x) >= 200 for x in poss):
+            c["short_word_long_candidate"] += 1
+        if len(word) in (198, 199) and matches_if_autojunk(word, poss) != res:
+            # a trigger moved down to 198 (or 199) would change this answer
+            c[f"below_trigger_{len(word)}"] += 1
         if len(word) >= 200:
             c["autojunk_word"] += 1
             raw = []
@@ -281,7 +349,8 @@ def coverage(cases):
     return c
 
 
-MINIMUMS = dict(autojunk_word=150, autojunk_changes=10, ties=200, exact_cutoff=100,
+MINIMUMS = dict(autojunk_word=150, autojunk_changes=10, short_word_long_candidate=60,
+                below_trigger_198=10, below_trigger_199=10, ties=200, exact_cutoff=100,
                 empty_word=5, empty_candidates=5, duplicates=100, non_ascii=200,
                 combining=20, astral=20, full_results=300, empty_results=50)
 
