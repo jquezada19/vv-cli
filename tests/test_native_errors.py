@@ -195,6 +195,20 @@ if os.name == "posix":
         check(f"U8[{label}] a marker that does not name the parent changes nothing",
               got[0] == 42 and b.started(), got)
 
+    # The predicate itself, on every host (the filesystem case below needs a
+    # volume that accepts such a name; APFS does not).
+    probe = ("import os, sys; sys.path.insert(0, os.path.join(sys.argv[1], 'src')); import vv_impl as v; "
+             "print(v._native_argv_ok(['plain']), v._native_argv_ok([os.fsdecode(b'x\\xffy')]))")
+    def predicate(vault):
+        r = subprocess.run([sys.executable, "-c", probe, REPO], capture_output=True, text=True, timeout=60,
+                           env={"PATH": os.environ.get("PATH", ""), "HOME": mkdtemp("vv-nerr-h-"),
+                                "VV_VAULT": vault, "VV_NO_METRICS": "1"})
+        return r.stdout.strip() or r.stderr.strip()[-200:]
+    check("U9a python delegates a plain operand in a plain vault, never an undecodable operand",
+          predicate(mkdtemp("vv-nerr-pv-")) == "True False", predicate(mkdtemp("vv-nerr-pv-")))
+    check("U9b and delegates nothing when the vault path itself is undecodable",
+          predicate(os.fsdecode(b"/tmp/v\xffault")) == "False False", predicate(os.fsdecode(b"/tmp/v\xffault")))
+
     # A vault whose path is not valid UTF-8: the binary cannot take it from
     # VV_VAULT, so python must scan it itself rather than let the binary
     # search its default vault.
@@ -212,7 +226,7 @@ if os.name == "posix":
         e.pop("VV_PY_ENTRY")
         r = subprocess.run([sys.executable, VV, "search", "unique-token-here", "--files"], capture_output=True,
                            env=e, timeout=120, cwd=b.base)
-        check("U9 a search in a vault with an undecodable path is answered from that vault",
+        check("U9c a search in a vault with an undecodable path is answered from that vault",
               r.returncode == 0 and r.stdout == b"Only.md\n(1 of 1 matches)\n", (r.returncode, r.stdout, r.stderr))
 
 # ---- P: the post-stdin patch hand-off uses the shared launcher ----
