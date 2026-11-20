@@ -220,8 +220,19 @@ fn cmd_search(args: &[String], orig: &[String]) -> ! {
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
-            "--k" => k = it.next().and_then(|v| v.parse().ok()).unwrap_or(5),
-            "--w" => w = it.next().and_then(|v| v.parse().ok()).unwrap_or(500),
+            // a missing or non-numeric value is a usage error, and python
+            // authors that text — never a silent default
+            "--k" | "--w" => {
+                let n = it
+                    .next()
+                    .filter(|v| !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit()))
+                    .and_then(|v| v.parse::<usize>().ok());
+                match (a.as_str(), n) {
+                    ("--k", Some(n)) => k = n,
+                    (_, Some(n)) => w = n,
+                    (_, None) => exec_python(orig),
+                }
+            }
             "--files" => files_only = true,
             t => terms.push(t.to_lowercase()),
         }

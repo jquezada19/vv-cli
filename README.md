@@ -110,7 +110,7 @@ and it does not change link resolution (`[[24995]]` stays unresolved).
 | command | what it does |
 |---|---|
 | `rename NOTE NEWNAME` | dry-run: prints every link that will be rewritten + a **plan digest** |
-| `move NOTE FOLDER` | same, for folder moves; bare-name links are left alone |
+| `move NOTE FOLDER` | same, for folder moves; bare-name links are left alone, and the moved note's own relative markdown links are re-anchored |
 | `... --apply` | execute the plan |
 | `... --apply <digest>` | execute **exactly** the previewed plan — exit 3 if anything drifted since review |
 | (tail rule) | one note per call: after the operands only `--apply [SHA8]` is accepted — an extra positional, an unknown flag, a non-hex plan id, or a flag in an operand slot is a usage error before anything resolves or prints. A bare name or id whose note is a symlink out of the vault is `escape:` |
@@ -276,7 +276,7 @@ same way (any doubt → live scan + rebuild, delete-don't-repair).
   One documented deviation under the native entry: a CAS conflict there falls back to
   python, which re-reads the latest bytes and applies — no update is ever lost, but
   during an active race the exit-3 warning is replaced by a clean retry;
-  rename/move dry-runs print a plan digest over every affected file's bytes, and
+  rename/move dry-runs print a plan digest over the note's own bytes and every affected file's bytes, and
   `--apply <digest>` refuses to execute a plan that drifted since review.
 - **Journaled refactors, recoverable after a HARD crash** — rename/move backs up
   every file (sha256-manifested, vault-scoped) before writing, and the journal
