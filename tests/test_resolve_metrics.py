@@ -93,7 +93,7 @@ for e in ENGINES:
     check(f"I4[{n}] an exact basename outranks the id rule", rc == 0 and out.strip() == "Work/42.md", (rc, out, err))
     rc, out, err = e.run("resolve", "77777")
     check(f"I5[{n}] no candidate is a not-found", rc == 1 and err.startswith("not-found:"), (rc, out, err))
-    rc, out, err = e.run("resolve", "#24995")
+    rc, out, err = e.run("resolve", "#" + "24995")
     check(f"I6[{n}] the #id spelling resolves", rc == 0 and out.strip() == "Work/24995 - Disney follow-ups.md", (rc, out, err))
     rc, out, err = e.run("search", "zzqqxxnotaword")
     check(f"Z1[{n}] a one-word miss answers the zero", rc == 0 and out == "(0 of 0 matches)\n", (rc, out, err))
