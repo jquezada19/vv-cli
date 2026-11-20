@@ -1197,6 +1197,11 @@ def cmd_new(*args):
     # `--status done` rewrite a body line that happened to start `status:`.
     # One key at a time against the current text, so a line an earlier VALUE
     # introduced is visible to a later key.
+    if kv and _fm_parts(content) is None and content.lstrip(BOM).split("\n", 1)[0].rstrip("\r") == "---":
+        # an opening `---` that never closes: there is no block to write a
+        # property into, and stacking a second one above it leaves two
+        die("refused: template frontmatter is unterminated (no closing ---)",
+            nxt="fix the template, or create the note without --KEY flags")
     for k, v in kv.items():
         parts = _fm_parts(content)
         if parts is None:

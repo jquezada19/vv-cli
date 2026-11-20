@@ -12,7 +12,7 @@ a different non-zero exit, or a success that becomes a refusal, is MAJOR.
 
 ## [Unreleased]
 
-Three entries below turn an exit 0 into a refusal; under the rule above the
+Four entries below turn an exit 0 into a refusal; under the rule above the
 next release is MAJOR unless they are judged defect repairs.
 
 ### Fixed
@@ -34,7 +34,10 @@ next release is MAJOR unless they are judged defect repairs.
 - **`new --KEY VALUE` rewrote a template body line.** The property was matched
   anywhere in the template, so a body line starting `KEY:` was replaced and no
   property was created. Properties are now matched inside the frontmatter
-  only, and a missing one is inserted there.
+  only, and a missing one is inserted there. A template whose opening `---`
+  never closes is refused when property flags are given (it used to take a
+  replacement anywhere in the text and silently drop a new key).
+  *Success → refusal (exit 1) for that template.*
 - **The plan digest did not cover the source note.** `rename`, `move` and
   `trash` hashed the files that link to the note but not the note itself, so
   `--apply <digest>` accepted a plan after the note's bytes had changed. The

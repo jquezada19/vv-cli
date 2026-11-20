@@ -234,7 +234,18 @@ fn cmd_search(args: &[String], orig: &[String]) -> ! {
                 match (a.as_str(), n) {
                     ("--k", Some(n)) => k = n,
                     (_, Some(n)) => w = n,
-                    (_, None) => exec_python(orig),
+                    (_, None) => {
+                        // python delegated this search (VV_FROM_PY): handing
+                        // back would bounce between the engines without bound
+                        if std::env::var_os("VV_FROM_PY").is_some() {
+                            eprintln!(
+                                "engine: search {} value is not one the native scanner parses",
+                                a
+                            );
+                            exit(1);
+                        }
+                        exec_python(orig)
+                    }
                 }
             }
             "--files" => files_only = true,

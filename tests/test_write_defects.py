@@ -69,7 +69,8 @@ class Engine:
     def run(self, *args, stdin=None):
         e = dict(os.environ, VV_VAULT=self.vault, VV_NO_METRICS="1", VV_INDEX_ROOT=self.index,
                  VV_JOURNAL_ROOT=self.journals, **self.env)
-        r = subprocess.run(self.entry + list(args), capture_output=True, text=True, env=e, input=stdin)
+        # bounded: a hang must be a red check, never a stuck gate
+        r = subprocess.run(self.entry + list(args), capture_output=True, text=True, env=e, input=stdin, timeout=120)
         return r.returncode, r.stdout, r.stderr
 
 ENGINES = [Engine("python", {"VV_ENGINE": "python"}, [sys.executable, VV])]
@@ -172,6 +173,14 @@ for e in ENGINES:
     check(f"N4[{n}] (control) a line an earlier VALUE introduced is visible to a later key",
           rc == 0 and e.get("X.md") == "---\na: 1\nb: 3\n---\n", repr(e.has("X.md") and e.get("X.md")))
 
+    e.fresh({"Templates/T.md": "---\nstatus: draft\n"})
+    rc, out, err = e.run("new", "X", "--template", "T", "--status", "done")
+    check(f"N5[{n}] an unterminated template block is refused, nothing created",
+          rc == 1 and err.startswith("refused: template frontmatter is unterminated") and not e.has("X.md"), (rc, out, err))
+    rc, out, err = e.run("new", "X", "--template", "T")
+    check(f"N6[{n}] (control) the same template without property flags still creates",
+          rc == 0 and e.get("X.md") == "---\nstatus: draft\n", (rc, err))
+
     # ---- D: the plan digest covers the source note's bytes ----
     for cmd, args in (("rename", ("A/Src.md", "Dst")), ("move", ("A/Src.md", "C")), ("trash", ("A/Src.md",))):
         e.fresh({"A/Src.md": "alpha\n", "C/keep.md": "k\n"})
@@ -215,6 +224,19 @@ if NATIVE_ONLY is not None:
     e.fresh({"A.md": "alpha\n"})
     rc, out, err = e.run("search", "alpha", "--k", "banana")
     check("X3 native declines a non-numeric --k, never defaults it", rc != 0 and "vv.py" in err and out == "", (rc, out, err))
+
+if os.path.exists(VRUST):
+    # The native scanner, invoked the way python delegates to it (VV_FROM_PY),
+    # must answer an unparseable value itself: handing back to python is the
+    # hop that would bounce between the engines without bound.
+    v = mkdtemp("vv-wdef-frompy-")
+    open(os.path.join(v, "A.md"), "w").write("alpha\n")
+    r = subprocess.run([VRUST, "search", "alpha", "--k", "-1"], capture_output=True, text=True, timeout=60,
+                       env=dict(os.environ, VV_VAULT=v, VV_NO_METRICS="1", VV_FROM_PY="1",
+                                VV_PY_ENTRY="/nonexistent/vv.py"))
+    check("X4 a delegated native search never hands an unparseable value back",
+          r.returncode == 1 and r.stderr.startswith("engine: search --k") and "vv.py" not in r.stderr,
+          (r.returncode, r.stdout, r.stderr))
 
 print(f"\n{len(fails)} failures" if fails else "\nall write-defect checks passed")
 sys.exit(1 if fails else 0)
