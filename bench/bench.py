@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Three-way vault-access benchmark: raw shell (grep/cat), the official `obsidian`
-CLI (needs the app running), and vv.
+"""Vault-access benchmark: raw shell (grep/cat), ripgrep when installed, the
+official `obsidian` CLI (needs the app running), and vv.
 
 Two costs per task, because for an AI-agent workflow BOTH matter:
   bytes — stdout the agent must carry as context (the token bill)
@@ -54,6 +54,7 @@ def main():
         sys.exit(f"note not found: {note_path}")
     name = os.path.basename(a.note)[:-3]
     have_obs = shutil.which("obsidian") is not None
+    have_rg = shutil.which("rg") is not None   # what most agent harnesses search with
     if not have_obs:
         print("(obsidian CLI not installed — its column will be skipped)")
 
@@ -75,6 +76,8 @@ def main():
 
     # -- search --------------------------------------------------------------
     row("search", "shell", ["grep", "-rni", "--include=*.md", a.term, VAULT])
+    if have_rg:
+        row("search", "ripgrep", ["rg", "-ni", "-g", "*.md", a.term, VAULT])
     if have_obs:
         row("search", "obsidian", ["obsidian", "search:context", f"query={a.term}"])
     row("search", "vv", VV + ["search", a.term])
@@ -92,6 +95,8 @@ def main():
 
     # -- backlinks -----------------------------------------------------------
     row("backlinks", "shell", ["grep", "-rlF", "--include=*.md", f"[[{name}", VAULT])
+    if have_rg:
+        row("backlinks", "ripgrep", ["rg", "-lF", "-g", "*.md", f"[[{name}", VAULT])
     if have_obs:
         row("backlinks", "obsidian", ["obsidian", "backlinks", f"path={a.note}"])
     row("backlinks", "vv", VV + ["backlinks", a.note])
