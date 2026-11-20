@@ -20,8 +20,8 @@ tests/test_set_key_shape.py pattern). A third arm runs the native binary with
 the python fallback made impossible, for the cases the native entry answers
 itself: it must produce the same bytes or decline, never the old ones.
 
-Cases marked "(control)" pass at the PR base by design; every other case has a
-check that fails there on at least one engine.
+Cases marked "(control)" pin behaviour these repairs leave unchanged; every
+other case has a check that fails without its repair on at least one engine.
 """
 import os, sys, shutil, subprocess, tempfile, atexit, re
 
@@ -260,7 +260,7 @@ if os.path.exists(VRUST):
     r = subprocess.run([sys.executable, VV, "search", "alpha", "--limit", "1" + "0" * 18],
                        capture_output=True, text=True, timeout=60,
                        env=dict(env5, VV_VAULT=v, VV_NO_METRICS="1", VV_INDEX_ROOT=mkdtemp("vv-wdef-idx-")))
-    check("X5 (control at the base; fails without the clamp) a 19-digit global --limit survives delegation to the native scanner",
+    check("X5 a 19-digit global --limit survives delegation to the native scanner",
           r.returncode == 0 and "A.md" in r.stdout, (r.returncode, r.stdout[:80], r.stderr[:200]))
 
 print(f"\n{len(fails)} failures" if fails else "\nall write-defect checks passed")

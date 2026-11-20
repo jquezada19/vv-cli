@@ -29,7 +29,9 @@ next release is MAJOR unless they are judged defect repairs.
   `---` directly followed by `---` was not recognised as frontmatter, so
   `set k v` wrote `---`/`k: v`/`---` above the existing pair. The key is now
   written inside the block, in the block's own line-terminator style, on both
-  engines, including when a later `---` appears in the body. `new` with such
+  engines, including when a later `---` appears in the body. `unset` on an
+  empty block now answers `no key` where it answered `no frontmatter` (exit 1
+  either way). `new` with such
   a template dropped the property; it now writes it.
 - **`new --KEY VALUE` rewrote a template body line.** The property was matched
   anywhere in the template, so a body line starting `KEY:` was replaced and no
@@ -47,8 +49,8 @@ next release is MAJOR unless they are judged defect repairs.
   exit 1); such a note could previously be planned and moved unread.
 - **`search --k` / `--w` with a missing or non-numeric value.** The python
   entry died in a traceback; the native entry silently used the default. Both
-  now answer `usage: search --k takes a non-negative integer … — next: vv
-  search --help`, exit 1. The accepted spelling is an optional `+` and ASCII
+  now answer `usage: search --k takes a non-negative integer of at most 18
+  digits … — next: vv search --help`, exit 1. The accepted spelling is an optional `+` and ASCII
   digits with at most 18 significant digits, identical in both engines. *Native: success → refusal.*
 
 ## [3.2.0] — 2026-10-10

@@ -663,12 +663,9 @@ def _fm_parts(text):
     bom, eol1 (after the opening ---), fm_lines (split on \\n, elements keep
     their \\r), eol2 (before the closing ---), tail (after the closing ---),
     body. _fm_join(*parts) == text for any note that has frontmatter."""
-    # An EMPTY block (`---` directly followed by an exact `---` line) is
-    # frontmatter with no lines: fm_lines == [] and eol2 == "", so _fm_join
-    # still reproduces the text and a writer inserts into the block instead of
-    # stacking a second one on top of it. Checked FIRST: split_fm_full would
-    # run on to a later `---` in the body and call everything between them
-    # frontmatter.
+    # An empty block (`---` then an exact `---` line) is frontmatter with no
+    # lines: fm_lines == [] and eol2 == "". Checked before split_fm_full,
+    # which would run on to a later `---` in the body.
     bom = BOM if text.startswith(BOM) else ""
     m = re.match(r"---(\r?\n)---(\r?\n|\Z)", text[len(bom):])
     if m:
@@ -1193,10 +1190,8 @@ def cmd_new(*args):
             names = " | ".join(os.path.basename(h)[:-3] for h in hits[:5])
             die(f"ambiguous: template '{template}' matches {names}", nxt="vv templates")
         content = read_raw(hits[0])
-    # a property is a line of the FRONTMATTER: matching the whole template let
-    # `--status done` rewrite a body line that happened to start `status:`.
-    # One key at a time against the current text, so a line an earlier VALUE
-    # introduced is visible to a later key.
+    # a property is a line of the frontmatter, never of the body; keys are
+    # applied one at a time against the current text
     if kv and _fm_parts(content) is None and content.lstrip(BOM).split("\n", 1)[0].rstrip("\r") == "---":
         # an opening `---` that never closes: there is no block to write a
         # property into, and stacking a second one above it leaves two
@@ -1524,7 +1519,7 @@ def _parse_search_args(args):
             # ASCII digits whose value has at most 18 significant digits
             # (fits the native integer; leading zeros never reach int())
             if v is None or not re.fullmatch(r"\+?0*[0-9]{1,18}", v):
-                die(f"usage: search {a} takes a non-negative integer, got {_q(v, 'N') if v is not None else 'nothing'}",
+                die(f"usage: search {a} takes a non-negative integer of at most 18 digits, got {_q(v, 'N') if v is not None else 'nothing'}",
                     nxt="vv search --help")
             n = int(v.lstrip("+").lstrip("0") or "0")
             if a == "--k": k = n
