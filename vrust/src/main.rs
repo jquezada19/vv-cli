@@ -682,7 +682,16 @@ pub fn python_unavailable(python: &str) {
 /// every command the native path doesn't (or declines to) handle. Generic
 /// over the argument type so an argv that is not valid UTF-8 is handed over
 /// byte for byte.
+///
+/// Never back to a python that called us: with VV_FROM_PY set, python is the
+/// orchestrator and is waiting on this process, so handing off would start a
+/// second python that calls a second binary, without end. Whatever the reason
+/// for declining, the answer under VV_FROM_PY is a refusal.
 fn exec_python<S: AsRef<std::ffi::OsStr>>(argv: &[S]) -> ! {
+    if env::var_os("VV_FROM_PY").is_some() {
+        eprintln!("engine: the native scanner cannot answer this call for python — next: VV_ENGINE=python vv …");
+        exit(1);
+    }
     let Some((python, vv)) = python_launch() else {
         exit(1);
     };

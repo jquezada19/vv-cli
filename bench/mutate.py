@@ -47,10 +47,22 @@ MUTATIONS = [
      "if s.chars().any(is_ctl) || s.contains(SEP) {",
      "if s.contains(SEP) {",
      "tests/test_native_errors.py", "A2[a control character]"),
-    ("non-utf8-argv-not-handed-off", "vrust/src/main.rs",
+    ("non-utf8-argv-decoded-lossily", "vrust/src/main.rs",
      "None => exec_python(&raw),",
      "None => args.push(a.to_string_lossy().into_owned()),",
-     "tests/test_native_errors.py", "U2 python receives the argument byte for byte"),
+     "tests/test_native_errors.py", "U2 python receives each argument byte for byte"),
+    ("native-hands-back-to-python", "vrust/src/main.rs",
+     'if env::var_os("VV_FROM_PY").is_some() {\n        eprintln!("engine: the native scanner cannot answer this call for python',
+     'if false {\n        eprintln!("engine: the native scanner cannot answer this call for python',
+     "tests/test_native_errors.py", "U5 a binary that python called never hands the call back"),
+    ("python-delegates-undecodable-search", "src/vv_impl.py",
+     "    if use_rust() and _native_argv_ok(args):\n        import subprocess\n        # VV_FROM_PY tells",
+     "    if use_rust():\n        import subprocess\n        # VV_FROM_PY tells",
+     "tests/test_native_errors.py", "U4[one term]"),
+    ("patch-handoff-drops-the-body", "vrust/src/write.rs",
+     "let _ = si.write_all(body);",
+     "let _ = body;",
+     "tests/test_native_errors.py", "P1 the post-stdin hand-off reaches VV_PY_ENTRY"),
     ("patch-handoff-ignores-vv-python", "vrust/src/write.rs",
      "let child = Command::new(&python)",
      'let child = Command::new("python3")',
@@ -59,8 +71,21 @@ MUTATIONS = [
 
 
 def leftovers(root):
-    out = subprocess.run(["ps", "-eo", "pid=,command="], capture_output=True, text=True).stdout
+    ps = subprocess.run(["ps", "-eo", "pid=,command="], capture_output=True, text=True)
+    if ps.returncode != 0 or not ps.stdout.strip():
+        return ["(could not list processes)"]
+    out = ps.stdout
     return [l.strip() for l in out.splitlines() if root in l and "bench/mutate.py" not in l]
+
+
+def baseline(suites):
+    """The unmutated suites must pass here first: a check that is already red
+    on this host would otherwise be credited to whatever mutation names it."""
+    for suite in sorted(suites):
+        r = subprocess.run([sys.executable, suite], cwd=REPO, capture_output=True, text=True, timeout=TIMEOUT)
+        if r.returncode != 0:
+            return f"{suite} fails before any mutation"
+    return None
 
 
 def run_one(name, rel, old, new, suite, must_fail):
@@ -83,14 +108,14 @@ def run_one(name, rel, old, new, suite, must_fail):
             r = subprocess.run([sys.executable, suite], cwd=work, capture_output=True, text=True, timeout=TIMEOUT)
         except subprocess.TimeoutExpired as e:
             return f"did not finish within {TIMEOUT}s: {e.cmd}"
+        stray = leftovers(work)
+        if stray:
+            return f"{len(stray)} process(es) still running from the mutated copy: {stray[0][:120]}"
         failed = [l[5:] for l in r.stdout.splitlines() if l.startswith("FAIL ")]
         if r.returncode == 0 or not failed:
             return f"{suite} stayed green: nothing pins this line"
         if not any(f.startswith(must_fail) for f in failed):
             return f"{suite} went red, but not on `{must_fail}`: {failed[:3]}"
-        stray = leftovers(work)
-        if stray:
-            return f"{len(stray)} process(es) still running from the mutated copy: {stray[0][:120]}"
         return None
     finally:
         shutil.rmtree(work, True)
@@ -101,6 +126,10 @@ def main():
     unknown = want - {m[0] for m in MUTATIONS}
     if unknown:
         print("FAIL no such mutation: " + ", ".join(sorted(unknown)))
+        sys.exit(1)
+    problem = baseline({m[4] for m in MUTATIONS if not want or m[0] in want})
+    if problem:
+        print("FAIL " + problem)
         sys.exit(1)
     bad = 0
     for m in MUTATIONS:

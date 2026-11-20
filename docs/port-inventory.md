@@ -221,14 +221,14 @@ r"(?<!\\)\|"    <- _table_pipe_findings
 
 ## Every function has a stage
 
-135 top-level functions in `src/vv_impl.py`, whether or not they use a facility above:
+136 top-level functions in `src/vv_impl.py`, whether or not they use a facility above:
 
 - **partly native today:** 68
 - **1 errors and writes:** 22
 - **2 output modes and reads:** 12
 - **3 relocation and journal:** 19
 - **4 lint, index, doctor:** 13
-- **5 cutover:** 1
+- **5 cutover:** 2
 
 Unassigned functions: 0
 Stage entries naming no function: 0

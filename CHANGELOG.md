@@ -34,11 +34,15 @@ next release is MAJOR unless they are judged defect repairs.
 - **`vv read` with the wrong number of operands is answered natively.** The
   refusal (`usage: read takes 1-3 positional args, got N — next: vv outline
   …`, exit 1) used to cost a hand-off to python; the native entry now prints
-  the same bytes itself. With `--vault` or `--limit` on the command line the
-  call still hands off, because python validates those first. This is the
+  the same bytes itself. With a well-formed `--vault` or `--limit` on the
+  command line the call still hands off, because python validates those
+  first. This is the
   first refusal the native entry words itself.
 - **An argument that is not valid UTF-8 no longer crashes the native entry.**
-  It is handed to python byte for byte.
+  It is handed to python byte for byte, and python answers such a call itself
+  instead of delegating the scan back. A native process that python started
+  never hands a call back to python; it refuses, so the two engines cannot
+  call each other without end.
 - **The post-stdin `patch` hand-off finds python like every other hand-off.**
   It honours `VV_PYTHON` and the packaged layout, prints the `engine:` line
   when the interpreter cannot be started, and no longer falls back to a

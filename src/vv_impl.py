@@ -172,6 +172,18 @@ def die(msg, code=1, nxt=None):
     sys.exit(code)
 
 
+def _native_argv_ok(args):
+    """True when every argument can be given to the native binary. An operand
+    python read with surrogate escapes (bytes that are not UTF-8) is one the
+    binary declines, and it declines by handing the call back to python: this
+    process answers such a call itself."""
+    try:
+        for a in args:
+            a.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
+
 def use_rust():
     """Engine selection: VV_ENGINE=rust|python forces a path (tests run the suite
     under BOTH so the fallback is never the untested one — sqlx's per-backend test
@@ -1631,7 +1643,7 @@ def _phrase_hint(terms):
     # zero-hit multi-word query ~230 ms against ~36 ms for a hit — the hint cost
     # 6x the search it was explaining. VV_FROM_PY stops the engine handing back.
     n = None
-    if use_rust():
+    if use_rust() and _native_argv_ok(split):
         import subprocess
         try:
             r = subprocess.run([VRUST, "search", *split, "--k", "0", "--w", "1"],
@@ -1672,7 +1684,7 @@ def cmd_search(*args):
         h = _phrase_hint(terms)
         if h: out(h)
         return
-    if use_rust():
+    if use_rust() and _native_argv_ok(args):
         import subprocess
         # VV_FROM_PY tells the engine that PYTHON is the orchestrator here, so
         # the zero-hit phrase hint below is ours to add. Without it the engine
@@ -1848,7 +1860,7 @@ def scan_links(needle=None):
     if h is not None:
         yield from h.links(needle)
         return
-    if use_rust():
+    if use_rust() and _native_argv_ok([needle or ""]):
         cmd = [VRUST, "linkscan"] + (["--grep", needle] if needle else [])
         import subprocess
         r = subprocess.run(cmd, capture_output=True, text=True)

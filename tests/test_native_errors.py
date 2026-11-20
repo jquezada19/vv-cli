@@ -16,7 +16,7 @@ U  An argument that is not valid UTF-8 is handed to python byte for byte
 P  The post-stdin `patch` hand-off finds python the way every other hand-off
    does (VV_PYTHON, VV_PY_ENTRY) and says so when it cannot.
 """
-import json, os, shutil, stat, subprocess, sys, tempfile, atexit, hashlib
+import json, os, shlex, shutil, stat, subprocess, sys, tempfile, atexit, hashlib
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
@@ -39,11 +39,14 @@ if not os.path.exists(VRUST):
     print("FAIL vrust/target/release/vrust is not built")
     sys.exit(1)
 
-# A python entry that proves it was started: it appends its argv to a file.
+# A python entry that proves it was started: it appends what it was handed
+# (each argument's bytes, and a hash of its stdin) to a file.
 MARKED = os.path.join(mkdtemp("vv-nerr-entry-"), "entry.py")
 with open(MARKED, "w") as f:
-    f.write("import json, os, sys\n"
-            "open(os.environ['VV_NERR_MARK'], 'ab').write((json.dumps(os.fsencode(' '.join(sys.argv[1:])).hex()) + '\\n').encode())\n"
+    f.write("import hashlib, json, os, sys\n"
+            "rec = {'argv': [os.fsencode(a).hex() for a in sys.argv[1:]],\n"
+            "       'stdin': hashlib.sha256(sys.stdin.buffer.read()).hexdigest()}\n"
+            "open(os.environ['VV_NERR_MARK'], 'a').write(json.dumps(rec) + '\\n')\n"
             "sys.stderr.write('HANDOFF\\n'); sys.exit(42)\n")
 
 class Box:
@@ -67,6 +70,12 @@ class Box:
 
     def started(self):
         return os.path.exists(self.mark)
+
+    def handed(self):
+        """What each python start received: [(argv as bytes, stdin sha256)]."""
+        if not self.started():
+            return []
+        return [([bytes.fromhex(a) for a in r["argv"]], r["stdin"]) for r in map(json.loads, open(self.mark))]
 
     def rows(self):
         p = os.path.join(self.home, ".claude", "metrics", "vv.jsonl")
@@ -104,7 +113,8 @@ for label, argv in (("--limit", ["--limit", "2", "read"]), ("--vault", ["read", 
                     ("--vault value-less", ["read", "a", "b", "c", "d", "--vault"])):
     b = Box()
     got = b.run(argv)
-    check(f"G1[{label}] python answers when a global flag is present", b.started() and got[0] == 42, got)
+    check(f"G1[{label}] python answers when a global flag is present, with the whole argv",
+          got[0] == 42 and [a for a, _ in b.handed()] == [[x.encode() for x in argv]], (got, b.handed()))
 
 # ---- M: the metrics row of a native refusal ----
 b = Box(metrics=True)
@@ -133,11 +143,45 @@ if os.name == "posix":
     except (UnicodeEncodeError, ValueError, OSError) as ex:
         got, ok = repr(ex), False
     check("U1 an undecodable argument does not crash the binary", ok and got[0] == 42 and b"panicked" not in got[2], got)
-    if ok and b.started():
-        seen = [bytes.fromhex(json.loads(l)) for l in open(b.mark, "rb")]
-        check("U2 python receives the argument byte for byte", seen == [b"outline x\xffy"], seen)
-    else:
-        check("U2 python receives the argument byte for byte", False, "python was not started")
+    check("U2 python receives each argument byte for byte",
+          [a for a, _ in b.handed()] == [[b"outline", b"x\xffy"]], b.handed())
+
+    # A search is the one command python delegates BACK to the binary, so an
+    # argument the binary declines must not start a second round. A wrapper
+    # interpreter counts the starts and refuses past a cap, so a regression
+    # is a red check, never a process storm.
+    cap_dir = mkdtemp("vv-nerr-cap-")
+    counter, capped = os.path.join(cap_dir, "count"), os.path.join(cap_dir, "py")
+    with open(capped, "w") as f:
+        f.write(f'#!/bin/sh\necho x >> {shlex.quote(counter)}\n'
+                f'if [ "$(wc -l < {shlex.quote(counter)})" -gt 4 ]; then exit 99; fi\n'
+                f'exec {shlex.quote(sys.executable)} "$@"\n')
+    os.chmod(capped, 0o755)
+    def starts():
+        n = len(open(counter).read().split()) if os.path.exists(counter) else 0
+        if os.path.exists(counter):
+            os.remove(counter)
+        return n
+    for label, argv in (("one term", ["search", bad]), ("with a plain term", ["search", "alpha", bad]),
+                        ("with a flag", ["search", bad, "--files"])):
+        b = Box()
+        want = oracle(b, argv)
+        got = b.run(argv, VV_PY_ENTRY=VV, VV_PYTHON=capped)
+        n = starts()
+        check(f"U3[{label}] a non-UTF-8 search term is answered once, with python's answer",
+              got == want and n == 1, (got, want, n))
+        got = b.run(argv, entry=[capped, VV])
+        n = starts()
+        check(f"U4[{label}] and the python launcher answers it without delegating",
+              got == want and n == 1, (got, want, n))
+    b = Box()
+    got = b.run(["search", bad], VV_FROM_PY="1")
+    check("U5 a binary that python called never hands the call back",
+          got[0] == 1 and got[2].startswith(b"engine: ") and not b.started(), got)
+    b = Box()
+    got = b.run(["search", "zzqq xxyy"], VV_FROM_PY="1")
+    check("U6 (control) under VV_FROM_PY an ordinary miss is still answered",
+          got[0] == 0 and got[1] == b"(0 of 0 matches)\n" and not b.started(), got)
 
 # ---- P: the post-stdin patch hand-off uses the shared launcher ----
 # A patch whose body is not valid UTF-8 passes every pre-stdin check natively,
@@ -147,22 +191,27 @@ def patch_handoff(**env):
     b = Box()
     rc, out, _ = b.run(["outline", "Hub.md"])
     sha = [l.split("\t")[-1] for l in out.decode().splitlines() if l.startswith("H2\t")][0]
-    got = b.run(["patch", "Hub.md", "H2", sha], stdin=b"## Details\n\n\xff\n", **env)
-    return b, got
+    got = b.run(["patch", "Hub.md", "H2", sha], stdin=BODY, **env)
+    return b, got, sha
 
-b, got = patch_handoff()
-check("P1 the post-stdin hand-off reaches VV_PY_ENTRY", b.started() and got[0] == 42, got)
+BODY = b"## Details\n\n\xff\n"
+b, got, sha = patch_handoff()
+want_argv = [b"--vault", os.fsencode(b.vault), b"patch", b"Hub.md", b"H2", sha.encode()]
+check("P1 the post-stdin hand-off reaches VV_PY_ENTRY with the consumed body and the vault",
+      got[0] == 42 and b.handed() == [(want_argv, hashlib.sha256(BODY).hexdigest())], (got, b.handed()))
 wrapper = os.path.join(mkdtemp("vv-nerr-wrap-"), "py")
 with open(wrapper, "w") as f:
-    f.write(f"#!/bin/sh\necho wrapped >> \"$VV_NERR_MARK.wrap\"\nexec {sys.executable} \"$@\"\n")
+    f.write(f"#!/bin/sh\necho wrapped >> \"$VV_NERR_MARK.wrap\"\nexec {shlex.quote(sys.executable)} \"$@\"\n")
 os.chmod(wrapper, os.stat(wrapper).st_mode | stat.S_IXUSR)
-b, got = patch_handoff(VV_PYTHON=wrapper)
+b, got, sha = patch_handoff(VV_PYTHON=wrapper)
 check("P2 and honours VV_PYTHON", os.path.exists(b.mark + ".wrap") and b.started() and got[0] == 42, got)
-b, got = patch_handoff(VV_PYTHON="/nonexistent/python")
-check("P3 an unrunnable interpreter is an `engine:` refusal, exit 1",
-      got[0] == 1 and got[2].startswith(b"engine: python engine unavailable (/nonexistent/python not runnable)"), got)
-b, got = patch_handoff(VV_PY_ENTRY=os.path.join(mkdtemp("vv-nerr-skew-"), "src", "vv.py"))
-check("P4 (control) the entry path is passed through as given", got[0] != 0 and not b.started(), got)
+missing = os.path.join(mkdtemp("vv-nerr-nopy-"), "python")
+b, got, sha = patch_handoff(VV_PYTHON=missing)
+check("P3 an unrunnable interpreter is the `engine:` refusal with its next step, exit 1",
+      got[0] == 1 and got[2].decode() == f"engine: python engine unavailable ({missing} not runnable) \u2014 next: install python3, or set VV_PYTHON\n"
+      and not b.started(), got)
+check("P4 the vault is untouched when the hand-off cannot start",
+      open(os.path.join(b.vault, "Hub.md"), "rb").read() == fixture.NOTES["Hub.md"].encode(), "Hub.md changed")
 
 print(f"\n{len(fails)} failures" if fails else "\nALL PASS (native errors)")
 sys.exit(1 if fails else 0)
