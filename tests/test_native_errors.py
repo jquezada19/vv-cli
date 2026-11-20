@@ -202,6 +202,245 @@ for label, argv in (("bare", ["search"]), ("--files", ["search", "--files"]), ("
     got = b.run(argv, entry=[sys.executable, VV])
     check(f"B7[{label}] and through the python launcher with the scanner built", got == want, (got, want))
 
+# ---- R: resolver refusals, differentially ----
+# A vault with the shapes a reference can fail on: duplicate basenames,
+# duplicate ids, names that need quoting or escaping, symlinks that leave the
+# vault (typed, found by name, found by id, through a directory), dangling and
+# looping links, and, in the "locked" variant, directories that cannot be
+# listed. Python decides the answer; an `escape:`, `ambiguous:` or
+# `refused: cannot prove` answer must come from the native entry itself with
+# the same bytes and the same files, whatever else the native entry answers
+# without python must match too, and a call it hands off must reach python
+# with nothing printed and nothing written.
+R_LOCKED = ("Locked", "Zed", os.path.join("Deep", "a", "Shut"), "Zz")
+
+def r_extend(box, locked):
+    vault = box.vault
+    outside = os.path.join(box.base, "outside")
+    os.makedirs(outside)
+    with open(os.path.join(outside, "secret.md"), "w") as f_:
+        f_.write("# secret\n\n## S\n\nx\n")
+    def w(rel_, txt="# t\n\n## S\n\nbody\n"):
+        os.makedirs(os.path.dirname(os.path.join(vault, rel_)), exist_ok=True)
+        with open(os.path.join(vault, rel_), "w") as f_:
+            f_.write(txt)
+    for d in ("Many", "Many1", "Many2", "Many3", "Many4", "Many5"):
+        w(d + "/Dupe.md")
+        w(d + "/606 - n.md")
+    for n in ("alpha one", "alpha two", "alpha three", "alphabet"):
+        w(f"Sub/{n}.md")
+    w("Two/aa1.md"); w("Two/aa2.md")                       # two names contain `aa`: python ranks by similarity
+    w("Three/bb1.md"); w("Three/bb2.md"); w("Three/bb3.md")  # three contain `bb`: it does not
+    w("Ord/xo.md"); w("Ord-/xo.md")                        # `Ord-/` sorts before `Ord/` as a string, after it as a path
+    w("Ord/007 - x.md"); w("Ord-/007 - x.md")
+    for n in ("gamma1", "gamma22", "gamma333", "gamma4444"):
+        w(f"Sug/{n}.md")
+    os.symlink("missing.md", os.path.join(vault, "Sug", "gamm0.md"))     # shortest name containing `gamm`, and not a note
+    for n in ("zq\u00e9\u00e9", "zqxyz", "zqxyzw", "zqxyzwv"):            # ranked by characters, not bytes
+        w(f"Sug/{n}.md")
+    for n in ("ctq\x01a", "ctq\x01b", "ctq\x01c"):                       # a control character in a suggestion
+        w(f"Sug/{n}.md")
+    w(".hidden/Solo.md"); w(".obsidian/Solo.md")                        # never walked: `Solo` stays unique
+    w("Dbl.md.md")                                                      # `Dbl.md` is not also tried as `Dbl.md.md`
+    w("Nas/\u00dcber.md")                                               # reachable only by name, and not ASCII
+    w("Kel/\u212a1.md"); w("Kel2/k1.md")                                # the Kelvin sign folds to `k`: `k1` names both
+    w("Sub/it's.md"); w("Sub2/it's.md")
+    w("Ctl/new\nline.md"); w("Ctl2/new\nline.md")
+    w("Sep/a — next: b.md"); w("Sep2/a — next: b.md")
+    w("Ids/777 - one.md"); w("Ids/888 - a.md"); w("Ids2/888 - b.md")
+    w("#555.md"); w("Ids/556 - hash.md"); w("557.md")
+    os.symlink("missing.md", os.path.join(vault, "Ids", "777 - gone.md"))  # not a note: 777 stays unique
+    secret = os.path.join(outside, "secret.md")
+    os.symlink(secret, os.path.join(vault, "Esc.md"))
+    os.symlink(secret, os.path.join(vault, "Sub", "EscName.md"))
+    os.symlink(secret, os.path.join(vault, "Ids", "444 - esc.md"))
+    os.symlink(outside, os.path.join(vault, "OutDir"))
+    os.symlink("/nonexistent/zzz.md", os.path.join(vault, "Dangling.md"))
+    os.symlink("missing.md", os.path.join(vault, "Sub", "Gone.md"))   # dangling, and inside the vault
+    os.symlink("Loop.md", os.path.join(vault, "Loop.md"))
+    os.symlink("Hub.md", os.path.join(vault, "InLink.md"))
+    os.symlink("Area", os.path.join(vault, "AreaLink"))
+    os.symlink("Area", os.path.join(vault, "DirNote.md"))
+    if locked:
+        w("Locked/in/x.md")
+        for d in R_LOCKED:
+            os.makedirs(os.path.join(vault, d), exist_ok=True)
+
+def r_lock(box):
+    for d in R_LOCKED:
+        os.chmod(os.path.join(box.vault, d), 0)
+
+def r_unlock(box):
+    for d in R_LOCKED:
+        if os.path.isdir(os.path.join(box.vault, d)):
+            os.chmod(os.path.join(box.vault, d), 0o755)
+
+def r_snapshot(box):
+    """Every file and link under the box's vault and its outside directory."""
+    out = {}
+    for top in (box.vault, os.path.join(box.base, "outside")):
+        for d, ds, fs in os.walk(top):
+            for n in ds + fs:
+                p_ = os.path.join(d, n)
+                key = os.path.relpath(p_, box.base)
+                if os.path.islink(p_):
+                    out[key] = ("link", os.readlink(p_).replace(box.base, "<BOX>"))
+                elif os.path.isfile(p_):
+                    out[key] = open(p_, "rb").read()
+    return out
+
+def r_run(box, argv, engine, stdin=b"new body\n"):
+    if engine == "python":
+        e = dict(box.env, VV_ENGINE="python", VV_NO_METRICS="1")
+        r = subprocess.run([sys.executable, VV] + argv, input=stdin, capture_output=True, env=e, timeout=120, cwd=box.base)
+        out_ = (r.returncode, r.stdout, r.stderr)
+    else:
+        out_ = box.run(argv, stdin=stdin)
+    return tuple(x.replace(box.base.encode(), b"<BOX>") if isinstance(x, bytes) else x for x in out_)
+
+R_REFS = ["k1", "\u00fcber", "gamm", "zq", "ctq", "Nope/gamm", "Dbl.md", "./Hub", "Hub", "hub", "Twin", "twin.md", "Dupe", "Solo", "nope", "Nope/zzz", "alpha", "alph", "aa", "bb", "xo", "it's", "new\nline",
+          "a — next: b", "777", "#777", "888", "#888", "007", "#007", "606", "#555", "#556", "557", "#557", "#557.md", "0", "#",
+          "#x", "１２３", "101", "202", "303", "#303", "444", "#444", "Esc", "Esc.md", "EscName", "OutDir/secret",
+          "OutDir/nope", "../x", "../outside/secret.md", "../vault/Hub.md", "/etc/hosts", "/etc/nope", "Dangling", "Dangling.md",
+          "Gone", "Loop", "InLink", "AreaLink/Solo", "AreaLink/../Hub", "DirNote", "", ".", "..", "Area", "Area/../Hub",
+          "Area/../../x", "Hub.md/x", "Locked/in/x", "Zed", "x\x01y"]
+R_CMDS = {"resolve": lambda r: ["resolve", r], "outline": lambda r: ["outline", r], "head": lambda r: ["head", r],
+          "read": lambda r: ["read", r, "H1"], "show": lambda r: ["show", r], "links": lambda r: ["links", r],
+          "backlinks": lambda r: ["backlinks", r], "set": lambda r: ["set", r, "k", "v"], "unset": lambda r: ["unset", r, "k"],
+          "append": lambda r: ["append", r, "txt"], "appendsec": lambda r: ["appendsec", r, "H1", "txt"],
+          "patch": lambda r: ["patch", r, "H1", "deadbeef"]}
+
+def one_resolver_case(job):
+    locked, cmd, ref = job
+    argv = R_CMDS[cmd](ref)
+    res = []
+    for engine in ("python", "native"):
+        b_ = Box()
+        r_extend(b_, locked)
+        before = r_snapshot(b_)
+        if locked:
+            r_lock(b_)
+        try:
+            out_ = r_run(b_, argv, engine)
+        finally:
+            if locked:
+                r_unlock(b_)
+        res.append((out_, r_snapshot(b_), b_.started(), before))
+    return locked, cmd, ref, res
+
+r_jobs = ([(False, c, r) for c in ("resolve", "set") for r in R_REFS]
+          + [(False, c, R_REFS[i]) for n, c in enumerate(c for c in R_CMDS if c not in ("resolve", "set"))
+             for i in range(n % 5, len(R_REFS), 5)]
+          + [(True, c, r) for c in ("resolve", "set", "patch") for r in R_REFS[::3]]
+          + [(True, "set", "nope")]
+          + [(True, c, r) for c in R_CMDS if c not in ("resolve", "set", "patch")
+             for r in ("Solo", "twin.md", "nope", "888", "Hub", "Esc")])
+r_jobs = list(dict.fromkeys(r_jobs))
+r_kinds = {}
+r_warned = [0, 0]
+r_served = {}
+with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool_:
+    for locked, cmd, ref, ((want, want_files, _, _), (got, got_files, started, before)) in pool_.map(one_resolver_case, r_jobs):
+        err_ = want[2].decode("utf-8", "replace")
+        kind = err_.split(":")[0] if want[0] else "ok"
+        if kind == "refused" and "cannot prove" not in err_:
+            kind = "refused-other"
+        label = f"{'locked ' if locked else ''}{cmd} {ref!r}"
+        r_kinds.setdefault(kind, [0, 0])[1 if started else 0] += 1
+        r_served[(locked, cmd, ref)] = (not started, want)
+        if want[2].startswith(b"warning:"):
+            r_warned[1 if started else 0] += 1
+        if started:
+            # a bare name outside ASCII, or one that collides with a name that
+            # only folds to it, is matched by python (R7c, R7d)
+            if kind == "escape" or (kind in ("ambiguous", "refused") and ref.isascii() and ref != "k1"):
+                check(f"R1x[{label}] the native entry words python's {kind}: refusal itself", False, (got, want))
+            if got != (42, b"", b"HANDOFF\n") or got_files != before:
+                check(f"R8x[{label}] a hand-off prints nothing and writes nothing first", False, got)
+        elif (got, got_files) != (want, want_files):
+            check(f"R2x[{label}] what the native entry answers without python is python's answer", False, (got, want))
+check("R1 every escape:, ambiguous: and cannot-prove refusal python gives is answered natively "
+      f"({ {k: v[0] for k, v in r_kinds.items()} })",
+      not any(f.startswith("R1x") for f in fails)
+      and all(r_kinds.get(k, [0, 0])[0] >= n for k, n in (("escape", 20), ("ambiguous", 15), ("refused", 10))), r_kinds)
+check("R2 and every native answer equals python's, bytes and files", not any(f.startswith("R2x") for f in fails), r_kinds)
+native_, want_ = r_served[(False, "resolve", "bb")]
+check("R3 a not-found with three names containing the miss is answered natively",
+      native_ and want_[2] == b"not-found: no note matches 'bb'\ndid you mean: bb1 | bb2 | bb3\n", want_)
+native_, want_ = r_served[(False, "resolve", "aa")]
+check("R3b with two, python ranks the rest by similarity and the call is handed off",
+      not native_ and want_[2].startswith(b"not-found: no note matches 'aa'\ndid you mean: aa1 | aa2"), want_)
+for ref_, sugg_ in (("gamm", b"gamma1 | gamma22 | gamma333"), ("Nope/gamm", b"gamma1 | gamma22 | gamma333"),
+                    ("zq", "zq\u00e9\u00e9 | zqxyz | zqxyzw".encode()), ("ctq", b"ctq\\x01a | ctq\\x01b | ctq\\x01c")):
+    native_, want_ = r_served[(False, "resolve", ref_)]
+    check(f"R3c[{ref_}] suggestions skip a dangling link, rank by characters, use the last path part, and are escaped",
+          native_ and want_[2].endswith(b"\ndid you mean: " + sugg_ + b"\n"), want_)
+native_, want_ = r_served[(False, "resolve", "Dbl.md")]
+check("R3d a reference ending .md is not also tried with a second .md", want_[0] == 1, want_)
+check("R4 (control) references that resolve are still served natively", r_kinds.get("ok", [0, 0])[0] >= 20, r_kinds)
+check("R5 a read over a directory that cannot be listed is still python's (it warns and answers)",
+      r_warned[0] == 0 and r_warned[1] >= 3, r_warned)
+check("R6 a name, an id and the #id spelling each resolve without python",
+      all(r_served[(False, "resolve", r)][0] and r_served[(False, "resolve", r)][1][0] == 0
+          for r in ("Solo", "777", "#777", "#557", "#555")), [r_served[(False, "resolve", r)] for r in ("Solo", "#777")])
+native_, want_ = r_served[(False, "resolve", "xo")]
+check("R7 an ambiguous list is in python's order (path strings, not path components)",
+      native_ and want_[2].startswith(b"ambiguous: Ord-/xo.md | Ord/xo.md"), want_)
+native_, want_ = r_served[(True, "set", "nope")]
+check("R7b a write refusal names the first three unreadable directories in python's order",
+      native_ and want_[2].count(b", ") == 2 and b"unreadable: " in want_[2], want_)
+native_, want_ = r_served[(False, "resolve", "\u00fcber")]
+check("R7c a bare name outside ASCII is matched by python, whose case folding is the reference",
+      not native_ and want_[0] == 0, want_)
+native_, want_ = r_served[(False, "resolve", "k1")]
+check("R7d an ASCII name that collides with one that only folds to it is python's ambiguity",
+      not native_ and want_[2].startswith(b"ambiguous: "), want_)
+check("R8 a hand-off prints nothing and writes nothing first", not any(f.startswith("R8x") for f in fails))
+# the vault root itself cannot be listed
+outs = []
+for engine in ("python", "native"):
+    b = Box()
+    os.chmod(b.vault, 0)
+    try:
+        outs.append((r_run(b, ["set", "nope", "k", "v"], engine), b.started()))
+    finally:
+        os.chmod(b.vault, 0o755)
+check("R11 a write when the vault root cannot be listed is python's refusal, given natively",
+      outs[0][0] == outs[1][0] and not outs[1][1] and b"unreadable: . " in outs[0][0][2], outs)
+# the metrics row of a refusal reached through a name
+b = Box(metrics=True)
+r_extend(b, False)
+got = b.run(["resolve", "EscName"])
+row = (b.rows() or [{}])[-1]
+check("R12 a walk-found escape logs the kind and that the note was addressed by name",
+      got[0] == 1 and (row.get("op"), row.get("exit"), row.get("kind"), row.get("ref")) == ("resolve", 1, "escape", "name"), row)
+# a patch that succeeds, through a reference only the walk can resolve
+shas = []
+for engine in ("python", "native"):
+    b = Box()
+    r_extend(b, False)
+    sha = r_run(b, ["read", "#777", "H1"], "python")[1].rsplit(b"--sha8:", 1)[-1].strip().decode()
+    out_ = r_run(b, ["patch", "#777", "H1", sha], engine, stdin=b"# t\n\nreplaced\n")
+    shas.append((out_, r_snapshot(b), b.started()))
+check("R9 a patch through an #id reference succeeds natively with python's bytes and files",
+      shas[0][:2] == shas[1][:2] and shas[0][0][0] == 0 and not shas[1][2], shas[1][0])
+# the journal gate still comes first, for a vault named in another case
+b = Box()
+r_extend(b, False)
+shout = os.path.join(os.path.dirname(b.vault), "VAULT")
+if os.path.isdir(shout):                       # a case-insensitive volume: the same directory, spelled differently
+    import hashlib
+    jroot = os.path.join(b.base, "journals")
+    os.makedirs(os.path.join(jroot, hashlib.sha256(os.path.realpath(shout).encode()).hexdigest()[:12], "pending"))
+    e = dict(VV_VAULT=shout, VV_JOURNAL_ROOT=jroot)
+    r = subprocess.run([sys.executable, VV, "patch", "../x", "H1", "deadbeef"], input=b"x", capture_output=True,
+                       env=dict(b.env, VV_ENGINE="python", VV_NO_METRICS="1", **e), timeout=120, cwd=b.base)
+    got = b.run(["patch", "../x", "H1", "deadbeef"], stdin=b"x", **e)
+    check("R10 a pending journal is found under python's key for the vault as spelled, before any resolver refusal",
+          r.returncode == 4 and b.started() and got[0] == 42, (r.returncode, r.stderr, got))
+else:
+    print("PASS R10 (skipped: this volume is case-sensitive, the two keys cannot differ)")
+
 # ---- W: a malformed global flag never reaches a native command ----
 # `--vault` with no value used to stay in the operand list, so
 # `append NOTE --vault` appended the literal text; an odd `--limit` value was
@@ -397,6 +636,17 @@ if os.name == "posix":
                            env=e, timeout=120, cwd=b.base)
         check("U9c a search in a vault with an undecodable path is answered from that vault",
               r.returncode == 0 and r.stdout == b"Only.md\n(1 of 1 matches)\n", (r.returncode, r.stdout, r.stderr))
+
+# A vault path that is not UTF-8: python keeps the bytes; the native entry
+# cannot, and used to fall back to the default vault and write there.
+b = Box()
+default_note = os.path.join(b.home, "Documents", "Obsidian Vault", "Area", "Solo.md")
+os.makedirs(os.path.dirname(default_note))
+with open(default_note, "w") as f:
+    f.write("default\n")
+got = b.run(["append", "Area/Solo.md", "x"], VV_VAULT=os.fsencode(b.base) + b"/x\xff/../vault")
+check("U10 a VV_VAULT that is not UTF-8 is handed to python, and the default vault is not written",
+      b.started() and got[0] == 42 and open(default_note).read() == "default\n", got)
 
 # ---- P: the post-stdin patch hand-off uses the shared launcher ----
 # A patch whose body is not valid UTF-8 passes every pre-stdin check natively,

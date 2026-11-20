@@ -32,7 +32,7 @@ mod write;
 /// the filesystem. components().collect() alone kept ".." — so a VV_VAULT of
 /// "/a/link/../vault" resolved through the symlink natively but lexically in
 /// python, and the two engines could address different vaults.
-fn normpath(p: &Path) -> PathBuf {
+pub fn normpath(p: &Path) -> PathBuf {
     use std::path::Component;
     let mut out: Vec<Component> = Vec::new();
     for c in p.components() {
@@ -760,6 +760,11 @@ fn main() {
         exit(0);
     }
     let orig: Vec<String> = args.clone();
+    // A vault path that is not UTF-8 is one python keeps byte for byte and
+    // this engine would replace with the default vault: python's to serve.
+    if env::var_os("VV_VAULT").is_some_and(|v| v.to_str().is_none()) {
+        exec_python(&orig);
+    }
     // --jsonl is python's surface entirely (one schema author); hand off
     // before any native handler can answer in TSV.
     if args.iter().any(|a| a == "--jsonl") {

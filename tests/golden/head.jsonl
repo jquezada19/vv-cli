@@ -5,4 +5,4 @@
 {"argv": ["head", "Nope"], "exit": 1, "files": {}, "id": "head/not-found", "served": "handoff", "stderr": "not-found: no note matches 'Nope'\n", "stdin": null, "stdout": ""}
 {"argv": ["head"], "exit": 1, "files": {}, "id": "head/arity-0", "served": "native", "stderr": "usage: head takes 1 positional args, got 0 — next: vv head NOTE\n", "stdin": null, "stdout": ""}
 {"argv": ["head", "Hub.md", "x"], "exit": 1, "files": {}, "id": "head/arity-2", "served": "native", "stderr": "usage: head takes 1 positional args, got 2 — next: vv head Hub.md\n", "stdin": null, "stdout": ""}
-{"argv": ["head", "202"], "exit": 1, "files": {}, "id": "head/note-ambiguous-id", "served": "handoff", "stderr": "ambiguous: 202 matches 2 notes: Other/202 - Dup two.md | Work/202 - Dup one.md — next: vv resolve 'Other/202 - Dup two.md'\n", "stdin": null, "stdout": ""}
+{"argv": ["head", "202"], "exit": 1, "files": {}, "id": "head/note-ambiguous-id", "served": "native", "stderr": "ambiguous: 202 matches 2 notes: Other/202 - Dup two.md | Work/202 - Dup one.md — next: vv resolve 'Other/202 - Dup two.md'\n", "stdin": null, "stdout": ""}

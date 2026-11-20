@@ -29,7 +29,9 @@ fn journal_root() -> PathBuf {
 }
 
 fn vault_journal_root(vault: &Path) -> PathBuf {
-    let real = fs::canonicalize(vault).unwrap_or_else(|_| vault.to_path_buf());
+    // python keys the journal on `os.path.realpath(VAULT)`, which keeps the
+    // typed spelling of a name the filesystem folds
+    let real = readpath::realpath_of(vault);
     let vid = &readpath::sha256_hex(real.to_string_lossy().as_bytes())[..12];
     journal_root().join(vid)
 }
@@ -477,11 +479,8 @@ fn splice(lines: &[&str], start: usize, end: usize, new_lines: &[String]) -> Str
 
 // ---------- helpers shared by the commands ----------
 
-fn rel_of<'a>(vault: &Path, fp: &'a Path) -> std::borrow::Cow<'a, str> {
-    match fp.strip_prefix(vault) {
-        Ok(r) => r.to_string_lossy(),
-        Err(_) => fp.to_string_lossy(),
-    }
+fn rel_of(vault: &Path, fp: &Path) -> String {
+    readpath::rel_shown(vault, fp)
 }
 
 // ---------- commands ----------
@@ -509,9 +508,9 @@ fn cmd_set(vault: &Path, args: &[String]) -> Outcome {
     let t0 = std::time::Instant::now();
     let (ref_, key, raw_value) = (&args[0], &args[1], &args[2]);
     let value = yaml_scalar(raw_value);
-    let fp = match readpath::resolve(vault, ref_) {
-        Some(f) => f,
-        None => return Outcome::Fallback,
+    let fp = match readpath::resolve(vault, ref_, "set") {
+        Ok(f) => f,
+        Err(o) => return o,
     };
     let cf = fs::metadata(&fp).map(|m| m.len()).unwrap_or(0);
     let sig = match file_sig(&fp) {
@@ -590,9 +589,9 @@ fn cmd_unset(vault: &Path, args: &[String]) -> Outcome {
     }
     let t0 = std::time::Instant::now();
     let (ref_, key) = (&args[0], &args[1]);
-    let fp = match readpath::resolve(vault, ref_) {
-        Some(f) => f,
-        None => return Outcome::Fallback,
+    let fp = match readpath::resolve(vault, ref_, "unset") {
+        Ok(f) => f,
+        Err(o) => return o,
     };
     let cf = fs::metadata(&fp).map(|m| m.len()).unwrap_or(0);
     let sig = match file_sig(&fp) {
@@ -657,9 +656,9 @@ fn cmd_append(vault: &Path, args: &[String]) -> Outcome {
     }
     let t0 = std::time::Instant::now();
     let (ref_, text_arg) = (&args[0], &args[1]);
-    let fp = match readpath::resolve(vault, ref_) {
-        Some(f) => f,
-        None => return Outcome::Fallback,
+    let fp = match readpath::resolve(vault, ref_, "append") {
+        Ok(f) => f,
+        Err(o) => return o,
     };
     let cf = fs::metadata(&fp).map(|m| m.len()).unwrap_or(0);
     let sig = match file_sig(&fp) {
@@ -697,9 +696,9 @@ fn cmd_appendsec(vault: &Path, args: &[String]) -> Outcome {
     }
     let t0 = std::time::Instant::now();
     let (ref_, sid, text_arg) = (&args[0], &args[1], &args[2]);
-    let fp = match readpath::resolve(vault, ref_) {
-        Some(f) => f,
-        None => return Outcome::Fallback,
+    let fp = match readpath::resolve(vault, ref_, "appendsec") {
+        Ok(f) => f,
+        Err(o) => return o,
     };
     let cf = fs::metadata(&fp).map(|m| m.len()).unwrap_or(0);
     let sig = match file_sig(&fp) {
@@ -787,9 +786,9 @@ fn cmd_patch(vault: &Path, args: &[String]) -> Outcome {
         return Outcome::Fallback; // python emits the canonical exit-4 text
     }
     let (ref_, sid, expect) = (&args[0], &args[1], &args[2]);
-    let fp = match crate::readpath::resolve(vault, ref_) {
-        Some(f) => f,
-        None => return Outcome::Fallback,
+    let fp = match crate::readpath::resolve(vault, ref_, "patch") {
+        Ok(f) => f,
+        Err(o) => return o,
     };
     let cf = fs::metadata(&fp).map(|m| m.len()).unwrap_or(0);
     let sig = match file_sig(&fp) {
@@ -845,11 +844,7 @@ fn cmd_patch(vault: &Path, args: &[String]) -> Outcome {
     if !atomic_write(&fp, &new_text, Some(sig)) {
         return exec_python_with_stdin(vault, args, &raw);
     }
-    let rel = fp
-        .strip_prefix(vault)
-        .unwrap_or(&fp)
-        .to_string_lossy()
-        .into_owned();
+    let rel = rel_of(vault, &fp);
     let n = crate::readpath::emit(&format!(
         "patched {} in {} ({}B -> {}B)\n",
         s.id,

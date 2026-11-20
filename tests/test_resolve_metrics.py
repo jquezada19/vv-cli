@@ -140,7 +140,8 @@ if HAVE_NATIVE:
     rc, out, err = solo.run("outline", "24995")
     check("I8 and reads through it", rc == 0 and "H1" in out, (rc, out, err))
     rc, out, err = solo.run("resolve", "31000")
-    check("I9 (control) several candidates are python's to word", rc != 0 and "vv.py" in err, (rc, out, err))
+    check("I9 several candidates are refused by the native entry itself, in python's words",
+          rc == 1 and err.startswith("ambiguous: 31000 matches 2 notes: ") and "vv.py" not in err, (rc, out, err))
     rc, out, err = solo.run("resolve", "42")
     check("I10 (control) an exact basename still resolves natively", rc == 0 and out.strip() == "Work/42.md", (rc, out, err))
     outside = mkdtemp("vv-resm-solo-outside-")
@@ -180,7 +181,7 @@ if HAVE_NATIVE:
 
     # a hand-off: python writes the row, flagged, timed from the native start
     n0 = len(m.rows())
-    rc, out, err = m.run("resolve", "31000")              # ambiguous: python's answer
+    rc, out, err = m.run("resolve", "zzqq-no-such-note")  # a miss with no name containing it: python ranks suggestions
     new = m.rows()[n0:]
     check("M8 a hand-off writes exactly one row, by python, flagged fb",
           len(new) == 1 and new[0].get("engine") == "python" and new[0].get("fb") == 1, new)

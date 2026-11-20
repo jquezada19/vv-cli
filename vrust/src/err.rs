@@ -61,9 +61,24 @@ pub fn die(op: &str, msg: &str, next: Option<&str>, code: i32) -> Outcome {
         Some(n) => format!("{}{}{}\n", msg, SEP, neutralise(esc(n))),
         None => format!("{}\n", msg),
     };
+    finish(op, &wire, code)
+}
+
+/// A refusal followed by python's `did you mean:` line. The two parts are
+/// escaped apart and neutralised joined, because the suggestion line's own
+/// leading space can complete a separator across the join.
+pub fn die_suggest(op: &str, msg: &str, suggestions: &str, code: i32) -> Outcome {
+    let wire = format!(
+        "{}\n",
+        neutralise(format!("{}\ndid you mean: {}", esc(msg), esc(suggestions)))
+    );
+    finish(op, &wire, code)
+}
+
+fn finish(op: &str, wire: &str, code: i32) -> Outcome {
     eprint!("{}", wire);
     // the kind is the message's first word when it ends in a colon
-    let first = msg
+    let first = wire
         .split('\n')
         .next()
         .unwrap_or("")

@@ -404,9 +404,9 @@ fn cmd_show(args: &[String], vault: &Path, t0: Instant) -> Outcome {
             _ => {} // python's for/if-elif silently ignores any other token
         }
     }
-    let fp = match readpath::resolve(vault, ref_) {
-        Some(f) => f,
-        None => return Outcome::Fallback,
+    let fp = match readpath::resolve(vault, ref_, "show") {
+        Ok(f) => f,
+        Err(o) => return o,
     };
     let cf = fs::metadata(&fp).map(|m| m.len()).unwrap_or(0);
     let bytes = match fs::read(&fp) {
