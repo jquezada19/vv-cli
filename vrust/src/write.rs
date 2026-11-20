@@ -759,6 +759,7 @@ fn exec_python_with_stdin(vault: &Path, args: &[String], body: &[u8]) -> Outcome
         .arg("--vault")
         .arg(vault)
         .args(&argv)
+        .env("VV_NATIVE_T0_NS", crate::readpath::start_ns())
         .stdin(Stdio::piped())
         .spawn();
     let mut child = match child {

@@ -317,7 +317,15 @@ fn cmd_search(args: &[String], orig: &[String]) -> ! {
     // the inner call returns normally instead of handing off again. Forcing
     // VV_ENGINE=python here also terminated, but made a zero-hit search 360 ms
     // (vs 36 ms for a hit) by rescanning with the pure python scanner.
-    if hits.is_empty() && std::env::var_os("VV_FROM_PY").is_none() {
+    // The hint can only arise for a QUOTED multi-word argument, so hand off
+    // only then — and tell python the scan already came back empty
+    // (VV_NATIVE_ZERO), so it goes straight to the hint instead of scanning
+    // the vault again to rediscover the zero.
+    if hits.is_empty()
+        && std::env::var_os("VV_FROM_PY").is_none()
+        && terms.iter().any(|t| t.split_whitespace().count() > 1)
+    {
+        std::env::set_var("VV_NATIVE_ZERO", "1");
         exec_python(orig);
     }
     let shown = hits.len().min(k);
@@ -647,9 +655,12 @@ fn exec_python(argv: &[String]) -> ! {
         }
     }
     let python = std::env::var("VV_PYTHON").unwrap_or_else(|_| "python3".into());
+    // when this process started: python times its row from here, so a
+    // fallback's `ms` is the whole invocation, not python's share of it
     match std::process::Command::new(&python)
         .arg(&vv)
         .args(argv)
+        .env("VV_NATIVE_T0_NS", readpath::start_ns())
         .status()
     {
         Ok(s) => exit(s.code().unwrap_or(1)),
@@ -667,6 +678,12 @@ fn exec_python(argv: &[String]) -> ! {
 const VERSION: &str = include_str!("../../VERSION");
 
 fn main() {
+    let _ = readpath::START_NS.set(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0),
+    );
     let mut args: Vec<String> = env::args().skip(1).collect();
     if matches!(
         args.first().map(String::as_str),

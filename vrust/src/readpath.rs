@@ -388,12 +388,14 @@ pub fn contain(vault: &Path, rel: &str) -> Option<PathBuf> {
 pub fn resolve(vault: &Path, ref_: &str) -> Option<PathBuf> {
     if let Some(fp) = contain(vault, ref_) {
         if fp.is_file() {
+            let _ = REF_KIND.set("path");
             return Some(fp);
         }
     }
     if !ref_.ends_with(".md") {
         if let Some(fp) = contain(vault, &format!("{}.md", ref_)) {
             if fp.is_file() {
+                let _ = REF_KIND.set("path");
                 return Some(fp);
             }
         }
@@ -420,13 +422,43 @@ pub fn resolve(vault: &Path, ref_: &str) -> Option<PathBuf> {
         let real = fs::canonicalize(hits[0]).ok()?;
         let vreal = fs::canonicalize(vault).ok()?;
         if real == vreal || real.starts_with(&vreal) {
+            let _ = REF_KIND.set("name");
             Some(hits[0].clone())
         } else {
             None // escaping symlink: python refuses with `escape:`
         }
+    } else if hits.is_empty() {
+        resolve_id(vault, &want, &files)
     } else {
-        None
-    } // 0 or 2+: python
+        None // 2+: python words the `ambiguous:` refusal
+    }
+}
+
+/// The id rule, on the SAME completed walk: bare digits name the one note
+/// whose basename starts `<digits> - ` (mirrors `_resolve_id_prefix`). Zero or
+/// several candidates, a `#`-prefixed spelling, and an escaping symlink are
+/// python's to answer.
+fn resolve_id(vault: &Path, want: &str, files: &[PathBuf]) -> Option<PathBuf> {
+    if want.is_empty() || !want.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let prefix = format!("{} - ", want);
+    let mut cands = files.iter().filter(|p| {
+        p.file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.starts_with(&prefix))
+    });
+    let only = cands.next()?;
+    if cands.next().is_some() {
+        return None;
+    }
+    let real = fs::canonicalize(only).ok()?;
+    let vreal = fs::canonicalize(vault).ok()?;
+    if real.is_file() && real.starts_with(&vreal) {
+        let _ = REF_KIND.set("id");
+        return Some(only.clone());
+    }
+    None
 }
 
 // ---------- metrics (mirror _log in vv_impl.py) ----------
@@ -439,14 +471,7 @@ pub fn log_metrics(op: &str, t0: std::time::Instant, out_bytes: usize, cf: u64, 
         Some(h) => PathBuf::from(h).join(".claude/metrics/vv.jsonl"),
         None => return,
     };
-    // local-time ISO seconds, matching datetime.now().isoformat(timespec="seconds")
-    let now = std::process::Command::new("date")
-        .arg("+%Y-%m-%dT%H:%M:%S")
-        .output();
-    let ts = now
-        .ok()
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .unwrap_or_default();
+    let ts = local_ts();
     let ms = t0.elapsed().as_millis();
     // Provenance label (VV_METRICS_SRC) so the pilot report can separate
     // benchmark traffic from usage instead of guessing from the arrival rate.
@@ -463,10 +488,13 @@ pub fn log_metrics(op: &str, t0: std::time::Instant, out_bytes: usize, cf: u64, 
     } else {
         format!(", \"src\": \"{}\"", src)
     };
-    let sel_field = match sel {
+    let mut sel_field = match sel {
         Some(s) => format!(", \"sel\": \"{}\"", s),
         None => String::new(),
     };
+    if let Some(k) = REF_KIND.get() {
+        sel_field.push_str(&format!(", \"ref\": \"{}\"", k));
+    }
     let rec = format!(
         "{{\"ts\": \"{}\", \"op\": \"{}\", \"ms\": {}, \"out_bytes\": {}, \"exit\": 0, \"cf_bytes\": {}, \"engine\": \"native\", \"ver\": \"{}\"{}{}}}\n",
         ts, op, ms, out_bytes, cf, env!("CARGO_PKG_VERSION"), src_field, sel_field);
@@ -479,6 +507,109 @@ pub fn log_metrics(op: &str, t0: std::time::Instant, out_bytes: usize, cf: u64, 
 /// Global --limit N, stripped from argv in main(). Enumerators honor it via
 /// push_limited; absent = unlimited.
 pub static LIMIT: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+
+/// Wall-clock nanoseconds at process start, set first thing in `main` and
+/// handed to python on a fallback (`VV_NATIVE_T0_NS`) so the row it logs
+/// covers the whole invocation: the native share and interpreter start-up.
+pub static START_NS: std::sync::OnceLock<u128> = std::sync::OnceLock::new();
+
+pub fn start_ns() -> String {
+    START_NS.get().copied().unwrap_or(0).to_string()
+}
+
+/// How the NOTE operand was addressed, for the metrics row: "path" (a typed
+/// vault-relative path), "name" (a unique basename) or "id" (the id rule).
+pub static REF_KIND: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
+
+/// Days since 1970-01-01 -> (year, month, day), proleptic Gregorian.
+fn civil_from_days(z: i64) -> (i64, i64, i64) {
+    let z = z + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    (yoe + era * 400 + i64::from(m <= 2), m, d)
+}
+
+/// `+HHMM` / `-HHMM` -> seconds east of UTC.
+fn parse_utc_offset(s: &str) -> Option<i64> {
+    let s = s.trim();
+    let (sign, d) = match s.as_bytes().first()? {
+        b'+' => (1, &s[1..]),
+        b'-' => (-1, &s[1..]),
+        _ => return None,
+    };
+    if d.len() != 4 || !d.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let (h, m): (i64, i64) = (d[..2].parse().ok()?, d[2..].parse().ok()?);
+    (h <= 14 && m < 60).then_some(sign * (h * 3600 + m * 60))
+}
+
+/// The local UTC offset, asked of `date +%z` at most once per quarter hour.
+/// Every zone's transitions fall on a quarter-hour UTC boundary, so an offset
+/// read inside a quarter is valid to its end; the answer is kept beside the
+/// index cache as `<valid-until-epoch> <offset-secs> <TZ value>`. Any doubt
+/// (no HOME, unreadable or foreign entry, a different TZ) asks again.
+fn utc_offset_secs(now: i64) -> Option<i64> {
+    let tz = std::env::var("TZ").unwrap_or_default();
+    let file = std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache/vv/tzoffset"));
+    if let Some(text) = file.as_ref().and_then(|f| fs::read_to_string(f).ok()) {
+        let mut it = text.trim_end_matches('\n').splitn(3, ' ');
+        let until = it.next().and_then(|v| v.parse::<i64>().ok());
+        let off = it.next().and_then(|v| v.parse::<i64>().ok());
+        if let (Some(until), Some(off), Some(t)) = (until, off, it.next()) {
+            if t == tz && now < until && until - now <= 900 && off.abs() <= 14 * 3600 {
+                return Some(off);
+            }
+        }
+    }
+    let out = std::process::Command::new("date")
+        .arg("+%z")
+        .output()
+        .ok()?;
+    let off = parse_utc_offset(&String::from_utf8_lossy(&out.stdout))?;
+    if let Some(f) = file {
+        if let Some(dir) = f.parent() {
+            let _ = fs::create_dir_all(dir);
+        }
+        // private temp name, atomic publish: a concurrent writer never tears it
+        let tmp = f.with_extension(format!("{}.tmp", std::process::id()));
+        let until = (now.div_euclid(900) + 1) * 900;
+        if fs::write(&tmp, format!("{} {} {}\n", until, off, tz)).is_ok() {
+            let _ = fs::rename(&tmp, &f);
+        }
+    }
+    Some(off)
+}
+
+/// Local-time ISO seconds, matching python's
+/// `datetime.now().isoformat(timespec="seconds")`. Empty when the offset
+/// cannot be established.
+pub fn local_ts() -> String {
+    let now = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        Ok(d) => d.as_secs() as i64,
+        Err(_) => return String::new(),
+    };
+    let Some(off) = utc_offset_secs(now) else {
+        return String::new();
+    };
+    let t = now + off;
+    let (y, mo, d) = civil_from_days(t.div_euclid(86_400));
+    let s = t.rem_euclid(86_400);
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}",
+        y,
+        mo,
+        d,
+        s / 3600,
+        s % 3600 / 60,
+        s % 60
+    )
+}
 
 /// Entry lines + count trailer for an enumerator. The K-of-M trailer appears
 /// ONLY when --limit actually truncated — `total` may exceed entries.len()
