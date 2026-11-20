@@ -402,6 +402,12 @@ fn cmd_backlinks(ref_: &str, vault: &Path, t0: Instant) -> Outcome {
         Ok(f) => f,
         Err(o) => return o,
     };
+    // A typed path that is not in normal form (`./Hub`, `Area/../Hub`) names
+    // the note, but python then compares it as a STRING against walked paths
+    // and gets a different list (the note's own links count): python's.
+    if crate::normpath(&fp).as_os_str() != fp.as_os_str() {
+        return Outcome::Fallback;
+    }
     let cf = fs::metadata(&fp).map(|m| m.len()).unwrap_or(0);
     let tgt_base = match basename_noext_lower(&fp) {
         Some(b) => b,

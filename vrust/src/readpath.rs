@@ -715,9 +715,10 @@ pub fn resolve(vault: &Path, ref_: &str, op: &str) -> Result<PathBuf, Outcome> {
         hits = name_hits(&want)?;
     }
     if hits.len() == 1 {
-        let fp = contained(hits[0])?;
+        // set before the containment test, as python does: its refusal row
+        // says the note was addressed by name
         let _ = REF_KIND.set("name");
-        return Ok(fp);
+        return contained(hits[0]);
     }
     if hits.len() > 1 {
         // Two names are one name here when they lowercase alike, and the two
@@ -814,8 +815,9 @@ pub fn resolve(vault: &Path, ref_: &str, op: &str) -> Result<PathBuf, Outcome> {
 
 // ---------- metrics (mirror _log in vv_impl.py) ----------
 /// The row for a refusal the native entry worded itself (mirrors python's
-/// `die` → `_log`): the exit code and the kind; no `cf_bytes`, `ref` or `sel`,
-/// which python records on success only. Timed from process start.
+/// `die` → `_log`): the exit code, the kind, and how the note was addressed when
+/// it had been resolved by then; no `cf_bytes` or `sel`, which python records
+/// on success only. Timed from process start.
 pub fn log_error(op: &str, kind: Option<&str>, code: i32, out_bytes: usize) {
     if std::env::var_os("VV_JOURNAL_ROOT").is_some() || std::env::var_os("VV_NO_METRICS").is_some()
     {
@@ -840,6 +842,9 @@ pub fn log_error(op: &str, kind: Option<&str>, code: i32, out_bytes: usize) {
     let mut tail = String::new();
     if !src.is_empty() {
         tail.push_str(&format!(", \"src\": \"{}\"", src));
+    }
+    if let Some(k) = REF_KIND.get() {
+        tail.push_str(&format!(", \"ref\": \"{}\"", k));
     }
     // a kind is a bare word from our own message text; anything else is dropped
     if let Some(k) =

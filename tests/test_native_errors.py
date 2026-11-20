@@ -233,11 +233,21 @@ def r_extend(box, locked):
     w("Three/bb1.md"); w("Three/bb2.md"); w("Three/bb3.md")  # three contain `bb`: it does not
     w("Ord/xo.md"); w("Ord-/xo.md")                        # `Ord-/` sorts before `Ord/` as a string, after it as a path
     w("Ord/007 - x.md"); w("Ord-/007 - x.md")
+    for n in ("gamma1", "gamma22", "gamma333", "gamma4444"):
+        w(f"Sug/{n}.md")
+    os.symlink("missing.md", os.path.join(vault, "Sug", "gamm0.md"))     # shortest name containing `gamm`, and not a note
+    for n in ("zq\u00e9\u00e9", "zqxyz", "zqxyzw", "zqxyzwv"):            # ranked by characters, not bytes
+        w(f"Sug/{n}.md")
+    for n in ("ctq\x01a", "ctq\x01b", "ctq\x01c"):                       # a control character in a suggestion
+        w(f"Sug/{n}.md")
+    w(".hidden/Solo.md"); w(".obsidian/Solo.md")                        # never walked: `Solo` stays unique
+    w("Dbl.md.md")                                                      # `Dbl.md` is not also tried as `Dbl.md.md`
     w("Sub/it's.md"); w("Sub2/it's.md")
     w("Ctl/new\nline.md"); w("Ctl2/new\nline.md")
     w("Sep/a — next: b.md"); w("Sep2/a — next: b.md")
     w("Ids/777 - one.md"); w("Ids/888 - a.md"); w("Ids2/888 - b.md")
     w("#555.md"); w("Ids/556 - hash.md"); w("557.md")
+    os.symlink("missing.md", os.path.join(vault, "Ids", "777 - gone.md"))  # not a note: 777 stays unique
     secret = os.path.join(outside, "secret.md")
     os.symlink(secret, os.path.join(vault, "Esc.md"))
     os.symlink(secret, os.path.join(vault, "Sub", "EscName.md"))
@@ -286,7 +296,7 @@ def r_run(box, argv, engine, stdin=b"new body\n"):
         out_ = box.run(argv, stdin=stdin)
     return tuple(x.replace(box.base.encode(), b"<BOX>") if isinstance(x, bytes) else x for x in out_)
 
-R_REFS = ["Hub", "hub", "Twin", "twin.md", "Dupe", "Solo", "nope", "Nope/zzz", "alpha", "alph", "aa", "bb", "xo", "it's", "new\nline",
+R_REFS = ["gamm", "zq", "ctq", "Nope/gamm", "Dbl.md", "./Hub", "Hub", "hub", "Twin", "twin.md", "Dupe", "Solo", "nope", "Nope/zzz", "alpha", "alph", "aa", "bb", "xo", "it's", "new\nline",
           "a — next: b", "777", "#777", "888", "#888", "007", "#007", "606", "#555", "#556", "557", "#557", "#557.md", "0", "#",
           "#x", "１２３", "101", "202", "303", "#303", "444", "#444", "Esc", "Esc.md", "EscName", "OutDir/secret",
           "OutDir/nope", "../x", "../outside/secret.md", "../vault/Hub.md", "/etc/hosts", "/etc/nope", "Dangling", "Dangling.md",
@@ -319,7 +329,9 @@ def one_resolver_case(job):
 r_jobs = ([(False, c, r) for c in ("resolve", "set") for r in R_REFS]
           + [(False, c, R_REFS[i]) for n, c in enumerate(c for c in R_CMDS if c not in ("resolve", "set"))
              for i in range(n % 5, len(R_REFS), 5)]
-          + [(True, c, r) for c in ("resolve", "set", "patch") for r in R_REFS[::3]])
+          + [(True, c, r) for c in ("resolve", "set", "patch") for r in R_REFS[::3]]
+          + [(True, c, r) for c in R_CMDS if c not in ("resolve", "set", "patch")
+             for r in ("Solo", "twin.md", "nope", "888", "Hub", "Esc")])
 r_kinds = {}
 r_warned = [0, 0]
 r_served = {}
@@ -353,6 +365,13 @@ check("R3 a not-found with three names containing the miss is answered natively"
 native_, want_ = r_served[(False, "resolve", "aa")]
 check("R3b with two, python ranks the rest by similarity and the call is handed off",
       not native_ and want_[2].startswith(b"not-found: no note matches 'aa'\ndid you mean: aa1 | aa2"), want_)
+for ref_, sugg_ in (("gamm", b"gamma1 | gamma22 | gamma333"), ("Nope/gamm", b"gamma1 | gamma22 | gamma333"),
+                    ("zq", "zq\u00e9\u00e9 | zqxyz | zqxyzw".encode()), ("ctq", b"ctq\\x01a | ctq\\x01b | ctq\\x01c")):
+    native_, want_ = r_served[(False, "resolve", ref_)]
+    check(f"R3c[{ref_}] suggestions skip a dangling link, rank by characters, use the last path part, and are escaped",
+          native_ and want_[2].endswith(b"\ndid you mean: " + sugg_ + b"\n"), want_)
+native_, want_ = r_served[(False, "resolve", "Dbl.md")]
+check("R3d a reference ending .md is not also tried with a second .md", want_[0] == 1, want_)
 check("R4 (control) references that resolve are still served natively", r_kinds.get("ok", [0, 0])[0] >= 20, r_kinds)
 check("R5 a read over a directory that cannot be listed is still python's (it warns and answers)",
       r_warned[0] == 0 and r_warned[1] >= 3, r_warned)
@@ -369,6 +388,24 @@ native_, want_ = r_served[(False, "resolve", "a \u2014 next: b")]
 check("R7c an ambiguity between names outside ASCII is handed to python",
       not native_ and want_[2].startswith(b"ambiguous: "), want_)
 check("R8 a hand-off prints nothing and writes nothing first", not any(f.startswith("R8x") for f in fails))
+# the vault root itself cannot be listed
+outs = []
+for engine in ("python", "native"):
+    b = Box()
+    os.chmod(b.vault, 0)
+    try:
+        outs.append((r_run(b, ["set", "nope", "k", "v"], engine), b.started()))
+    finally:
+        os.chmod(b.vault, 0o755)
+check("R11 a write when the vault root cannot be listed is python's refusal, given natively",
+      outs[0][0] == outs[1][0] and not outs[1][1] and b"unreadable: . " in outs[0][0][2], outs)
+# the metrics row of a refusal reached through a name
+b = Box(metrics=True)
+r_extend(b, False)
+got = b.run(["resolve", "EscName"])
+row = (b.rows() or [{}])[-1]
+check("R12 a walk-found escape logs the kind and that the note was addressed by name",
+      got[0] == 1 and (row.get("op"), row.get("exit"), row.get("kind"), row.get("ref")) == ("resolve", 1, "escape", "name"), row)
 # a patch that succeeds, through a reference only the walk can resolve
 shas = []
 for engine in ("python", "native"):
