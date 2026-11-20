@@ -206,6 +206,23 @@ for label, argv in (("bare", ["search"]), ("--files", ["search", "--files"]), ("
 # `--vault` with no value used to stay in the operand list, so
 # `append NOTE --vault` appended the literal text; an odd `--limit` value was
 # read natively where python refuses it. Both now reach python untouched.
+def w_box():
+    """A box with a note where each misread vault would look for one: the
+    default vault (an empty value), a directory named `~` in the working
+    directory, and the directory `link/../notes` names when the link is
+    followed before the `..` is applied. A native write lands in one of them."""
+    b_ = Box()
+    os.makedirs(os.path.join(b_.base, "real", "sub"))
+    os.symlink(os.path.join(b_.base, "real", "sub"), os.path.join(b_.base, "lnk"))
+    b_.decoys = [os.path.join(top, "Area", "Solo.md") for top in (
+        os.path.join(b_.home, "Documents", "Obsidian Vault"), os.path.join(b_.base, "~"),
+        os.path.join(b_.base, "real", "notes"))]
+    for d in b_.decoys:
+        os.makedirs(os.path.dirname(d))
+        with open(d, "w") as f_:
+            f_.write("decoy\n")
+    return b_
+
 for label, argv in (("--vault with no value", ["append", "Area/Solo.md", "--vault"]),
                     ("--limit +1", ["--limit", "+1", "append", "Area/Solo.md", "x"]),
                     ("--limit with no value", ["append", "Area/Solo.md", "x", "--limit"]),
@@ -218,14 +235,19 @@ for label, argv in (("--vault with no value", ["append", "Area/Solo.md", "--vaul
                     ("--vault tilde", ["--vault", "~", "append", "Area/Solo.md", "x"]),
                     ("--vault tilde-slash", ["--vault", "~/nowhere-vv-test", "append", "Area/Solo.md", "x"]),
                     ("--vault not a directory", ["--vault", "/nonexistent-vv-vault", "tags"]),
-                    ("--vault a file", ["--vault", "Hub.md", "tags"])):
-    b = Box()
+                    ("--vault a file", ["--vault", "Hub.md", "tags"]),
+                    ("--vault through a link and ..", ["--vault", "{base}/lnk/../notes", "append", "Area/Solo.md", "x"])):
+    b = w_box()
+    argv = [a.replace("{base}", b.base) for a in argv]
     before = open(os.path.join(b.vault, "Area", "Solo.md"), "rb").read()
     got = b.run(argv)
     check(f"W1[{label}] the call is handed to python with its argv intact, nothing written",
           got[0] == 42 and [a for a, _ in b.handed()] == [[x.encode() for x in argv]]
-          and open(os.path.join(b.vault, "Area", "Solo.md"), "rb").read() == before, (got, b.handed()))
-    b = Box()
+          and open(os.path.join(b.vault, "Area", "Solo.md"), "rb").read() == before
+          and all(open(d).read() == "decoy\n" for d in b.decoys), (got, b.handed()))
+    argv = [a.replace(b.base, "{base}") for a in argv]
+    b = w_box()
+    argv = [a.replace("{base}", b.base) for a in argv]
     want = oracle(b, argv)
     got = b.run(argv, VV_PY_ENTRY=VV)
     check(f"W2[{label}] and the caller gets python's answer", got == want, (got, want))

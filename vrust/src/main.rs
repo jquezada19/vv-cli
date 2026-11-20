@@ -796,8 +796,10 @@ fn main() {
         // the default vault), any `~` form (python expands more of them than
         // we would), and a path that is not a directory (python refuses; a
         // native walk of it answers an empty success) are all python's.
+        // The directory test is on the normalised path, the one python uses:
+        // `link/../notes` as written can name a different directory.
         match args.get(i + 1) {
-            Some(v) if !v.is_empty() && !v.starts_with('~') && Path::new(v).is_dir() => {
+            Some(v) if !v.is_empty() && !v.starts_with('~') && normpath(Path::new(v)).is_dir() => {
                 std::env::set_var("VV_VAULT", v);
                 args.drain(i..=i + 1);
             }
