@@ -42,7 +42,9 @@ next release is MAJOR unless they are judged defect repairs.
   `trash` hashed the files that link to the note but not the note itself, so
   `--apply <digest>` accepted a plan after the note's bytes had changed. The
   source bytes are now part of the digest. Plan ids differ from 3.2.0 for the
-  same vault state. *Success → refusal (exit 3) for a drifted source.*
+  same vault state. *Success → refusal (exit 3) for a drifted source.* A
+  source that cannot be read for the digest is refused (`unreadable: …`,
+  exit 1); such a note could previously be planned and moved unread.
 - **`search --k` / `--w` with a missing or non-numeric value.** The python
   entry died in a traceback; the native entry silently used the default. Both
   now answer `usage: search --k takes a non-negative integer … — next: vv

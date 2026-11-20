@@ -66,9 +66,9 @@ class Engine:
     def has(self, relp):
         return os.path.exists(os.path.join(self.vault, relp))
 
-    def run(self, *args, stdin=None):
+    def run(self, *args, stdin=None, env=None):
         e = dict(os.environ, VV_VAULT=self.vault, VV_NO_METRICS="1", VV_INDEX_ROOT=self.index,
-                 VV_JOURNAL_ROOT=self.journals, **self.env)
+                 VV_JOURNAL_ROOT=self.journals, **self.env, **(env or {}))
         # bounded: a hang must be a red check, never a stuck gate
         r = subprocess.run(self.entry + list(args), capture_output=True, text=True, env=e, input=stdin, timeout=120)
         return r.returncode, r.stdout, r.stderr
@@ -197,13 +197,17 @@ for e in ENGINES:
         check(f"D2[{n},{cmd}] (control) a fresh digest applies", rc == 0 and not e.has("A/Src.md"), (rc, out, err))
 
     if os.name == "posix" and os.geteuid() != 0:
-        for cmd, args in (("rename", ("A/Src.md", "Dst")), ("trash", ("A/Src.md",))):
-            e.fresh({"A/Src.md": "alpha\n"})
-            os.chmod(os.path.join(e.vault, "A/Src.md"), 0)
-            rc, out, err = e.run(cmd, *args)
-            os.chmod(os.path.join(e.vault, "A/Src.md"), 0o644)
-            check(f"D3[{n},{cmd}] (control) an unreadable source is a clean refusal, not a traceback",
-                  rc == 1 and "Traceback" not in err and e.has("A/Src.md"), (rc, out, err[:300]))
+        # a note in a dot-folder is outside every corpus scan, so with the
+        # index off nothing reads it before the digest does
+        for cmd, args in (("rename", (".hidden/Src.md", "Dst")), ("move", (".hidden/Src.md", "A")),
+                          ("trash", (".hidden/Src.md",))):
+            e.fresh({".hidden/Src.md": "alpha\n", "A/keep.md": "k\n"})
+            os.chmod(os.path.join(e.vault, ".hidden/Src.md"), 0)
+            rc, out, err = e.run(cmd, *args, env={"VV_NO_INDEX": "1"})
+            os.chmod(os.path.join(e.vault, ".hidden/Src.md"), 0o644)
+            check(f"D3[{n},{cmd}] an unreadable source is a refusal with a next step",
+                  rc == 1 and err.startswith("unreadable: .hidden/Src.md") and "Traceback" not in err
+                  and e.has(".hidden/Src.md"), (rc, out, err[:300]))
 
     # ---- S: search numeric flags ----
     e.fresh({"A.md": "alpha beta\n"})
