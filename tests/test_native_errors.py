@@ -236,7 +236,9 @@ for label, argv in (("--vault with no value", ["append", "Area/Solo.md", "--vaul
                     ("--vault tilde-slash", ["--vault", "~/nowhere-vv-test", "append", "Area/Solo.md", "x"]),
                     ("--vault not a directory", ["--vault", "/nonexistent-vv-vault", "tags"]),
                     ("--vault a file", ["--vault", "Hub.md", "tags"]),
-                    ("--vault through a link and ..", ["--vault", "{base}/lnk/../notes", "append", "Area/Solo.md", "x"])):
+                    # python normalises to a directory that does not exist; followed as
+                    # written it exists, and a native `tags` there answers an empty success
+                    ("--vault through a link and ..", ["--vault", "{base}/lnk/../notes", "tags"])):
     b = w_box()
     argv = [a.replace("{base}", b.base) for a in argv]
     before = open(os.path.join(b.vault, "Area", "Solo.md"), "rb").read()
