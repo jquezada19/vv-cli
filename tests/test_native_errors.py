@@ -592,6 +592,17 @@ if os.name == "posix":
         check("U9c a search in a vault with an undecodable path is answered from that vault",
               r.returncode == 0 and r.stdout == b"Only.md\n(1 of 1 matches)\n", (r.returncode, r.stdout, r.stderr))
 
+# A vault path that is not UTF-8: python keeps the bytes; the native entry
+# cannot, and used to fall back to the default vault and write there.
+b = Box()
+default_note = os.path.join(b.home, "Documents", "Obsidian Vault", "Area", "Solo.md")
+os.makedirs(os.path.dirname(default_note))
+with open(default_note, "w") as f:
+    f.write("default\n")
+got = b.run(["append", "Area/Solo.md", "x"], VV_VAULT=os.fsencode(b.base) + b"/x\xff/../vault")
+check("U10 a VV_VAULT that is not UTF-8 is handed to python, and the default vault is not written",
+      b.started() and got[0] == 42 and open(default_note).read() == "default\n", got)
+
 # ---- P: the post-stdin patch hand-off uses the shared launcher ----
 # A patch whose body is not valid UTF-8 passes every pre-stdin check natively,
 # then hands the consumed bytes to python: the one path through

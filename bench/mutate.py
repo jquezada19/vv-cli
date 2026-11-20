@@ -199,6 +199,22 @@ MUTATIONS = [
      '        crate::normpath(&abs)\n',
      '        abs\n',
      "tests/test_native_errors.py", "R2x[resolve 'Area/../Hub']"),
+    ('undecodable-vault-replaced-by-default', 'vrust/src/main.rs',
+     'if env::var_os("VV_VAULT").is_some_and(|v| v.to_str().is_none()) {',
+     'if false {',
+     "tests/test_native_errors.py", 'U10'),
+    ('journal-keyed-on-the-canonical-path', 'vrust/src/write.rs',
+     '    let real = readpath::realpath_of(vault);',
+     '    let real = fs::canonicalize(vault).unwrap_or_else(|_| vault.to_path_buf());',
+     "tests/test_native_errors.py", 'R10'),
+    ('ambiguous-sorted-by-component', 'vrust/src/readpath.rs',
+     '        hits.sort_by(|a, b| a.as_os_str().cmp(b.as_os_str()));',
+     '        hits.sort();',
+     "tests/test_native_errors.py", 'R2x'),
+    ('non-ascii-ambiguity-judged-natively', 'vrust/src/readpath.rs',
+     '        if !want.is_ascii()',
+     '        if false && !want.is_ascii()',
+     "tests/test_native_errors.py", 'R7c'),
 ]
 
 

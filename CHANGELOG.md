@@ -26,6 +26,13 @@ next release is MAJOR unless they are judged defect repairs.
   `#id` spelling resolves natively. A `not-found:` whose suggestions need
   similarity ranking, and a read over an unreadable directory (which answers
   with a warning), are still python's.
+- **A `VV_VAULT` that is not valid UTF-8 no longer redirects native commands
+  to the default vault.** The native entry dropped such a value and used
+  `~/Documents/Obsidian Vault`, so a write could land in the wrong vault. The
+  call is now python's, which keeps the path byte for byte.
+- **The pending-journal gate uses python's key on a case-insensitive volume.**
+  With the vault named in a different case than on disk, the native entry
+  looked for journals under another key and could write past a pending one.
 - **A typed path with `..` in it is shown as python shows it.** `vv resolve
   Area/../Hub` printed `Area/../Hub.md` natively and `Hub.md` in python; `set`,
   `unset`, `append`, `appendsec` and `patch` echoed the same unnormalised
