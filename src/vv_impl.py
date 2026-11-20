@@ -183,6 +183,11 @@ def _native_argv_ok(args):
             a.encode("utf-8")
     except UnicodeEncodeError:
         return False
+    # Operands here are literal text (a search term, a link needle), but the
+    # binary parses its command line again: these would be read as global
+    # flags or a help request there, and answered as something else.
+    if any(a in ("--limit", "--vault", "--jsonl") for a in args) or args[:1] in (["--help"], ["-h"]):
+        return False
     return True
 
 def use_rust():
@@ -1685,7 +1690,9 @@ def cmd_search(*args):
         h = _phrase_hint(terms)
         if h: out(h)
         return
-    if use_rust() and _native_argv_ok(args):
+    # an empty query is refused below, by this process: the binary would
+    # have to hand that refusal back, which it never does for its caller
+    if use_rust() and terms and _native_argv_ok(args):
         import subprocess
         # VV_FROM_PY (our pid: the binary believes it only from its parent)
         # tells the engine that PYTHON is the orchestrator here, so

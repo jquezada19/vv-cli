@@ -716,20 +716,6 @@ pub fn run(cmd: &str, args: &[String], vault: &Path) -> Outcome {
         // rather than an unimplemented one: the budget line and the
         // continuation token are output this delegation keeps under a single
         // author, instead of two engines each wording it.
-        // python's `_check_arity`: read takes 1-3 operands, and the next step
-        // is the outline of the note the caller already named
-        "read" if (args.is_empty() || args.len() > 3) && GLOBAL_FLAG.get().is_none() => {
-            let next = match args.first() {
-                Some(a) => format!("vv outline {}", crate::err::q(a, "NOTE")),
-                None => "vv outline NOTE".to_string(),
-            };
-            crate::err::die(
-                "read",
-                &format!("usage: read takes 1-3 positional args, got {}", args.len()),
-                Some(&next),
-                1,
-            )
-        }
         "read" if args.len() == 2 || args.len() == 3 => {
             let (sid, hash_only, flagged) = if args.len() == 2 && !args[1].starts_with("--") {
                 (args[1].clone(), false, false)

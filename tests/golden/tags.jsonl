@@ -1,5 +1,5 @@
 {"argv": ["tags"], "exit": 0, "files": {}, "id": "tags/list", "served": "native", "stderr": "", "stdin": null, "stdout": "y\nx\nhub\nfixture\n(4 tags)\n"}
 {"argv": ["tags", "--counts"], "exit": 0, "files": {}, "id": "tags/counts", "served": "native", "stderr": "", "stdin": null, "stdout": "2\ty\n1\tx\n1\thub\n1\tfixture\n(4 tags)\n"}
-{"argv": ["tags", "--limit"], "exit": 1, "files": {}, "id": "tags/limit-missing-value", "served": "native", "stderr": "usage: --limit requires a positive integer\n", "stdin": null, "stdout": ""}
-{"argv": ["tags", "--limit", "0"], "exit": 1, "files": {}, "id": "tags/limit-zero", "served": "native", "stderr": "usage: --limit requires a positive integer\n", "stdin": null, "stdout": ""}
-{"argv": ["tags", "--vault"], "exit": 1, "files": {}, "id": "tags/vault-missing-value", "served": "divergent", "stderr": "usage: --vault requires a path\n", "stdin": null, "stdout": ""}
+{"argv": ["tags", "--limit"], "exit": 1, "files": {}, "id": "tags/limit-missing-value", "served": "handoff", "stderr": "usage: --limit requires a positive integer\n", "stdin": null, "stdout": ""}
+{"argv": ["tags", "--limit", "0"], "exit": 1, "files": {}, "id": "tags/limit-zero", "served": "handoff", "stderr": "usage: --limit requires a positive integer\n", "stdin": null, "stdout": ""}
+{"argv": ["tags", "--vault"], "exit": 1, "files": {}, "id": "tags/vault-missing-value", "served": "handoff", "stderr": "usage: --vault requires a path\n", "stdin": null, "stdout": ""}
