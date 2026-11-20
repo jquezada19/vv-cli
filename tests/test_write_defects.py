@@ -250,6 +250,13 @@ if os.path.exists(VRUST):
     check("X4 a delegated native search never hands an unparseable value back",
           r.returncode == 1 and r.stderr.startswith("engine: search --k") and "vv.py" not in r.stderr,
           (r.returncode, r.stdout, r.stderr))
+    # the python launcher with default engine selection DELEGATES the scan
+    env5 = {k_: v_ for k_, v_ in os.environ.items() if k_ != "VV_ENGINE"}
+    r = subprocess.run([sys.executable, VV, "search", "alpha", "--limit", "1" + "0" * 18],
+                       capture_output=True, text=True, timeout=60,
+                       env=dict(env5, VV_VAULT=v, VV_NO_METRICS="1", VV_INDEX_ROOT=mkdtemp("vv-wdef-idx-")))
+    check("X5 a 19-digit global --limit survives delegation to the native scanner",
+          r.returncode == 0 and "A.md" in r.stdout, (r.returncode, r.stdout[:80], r.stderr[:200]))
 
 print(f"\n{len(fails)} failures" if fails else "\nall write-defect checks passed")
 sys.exit(1 if fails else 0)
