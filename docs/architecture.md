@@ -15,43 +15,50 @@ contract; this page is for contributors and the curious.
 
 The native entry answers a call itself when it has a handler for it and is
 sure of the answer. Otherwise it starts `python3 src/vv.py` with the original
-arguments and passes the result through. A hand-off prints no command output
-of its own first. `VV_PYTHON` chooses the interpreter and `VV_PY_ENTRY` the
-script; without either, the binary looks for `src/vv.py` next to itself.
+arguments and passes the result through. (One exception: a `patch` that has
+already read its body from stdin resends the body and names the vault
+explicitly.) A hand-off prints no command output of its own first, though it
+can print a warning when the binary and the Python files report different
+versions. `VV_PYTHON` chooses the interpreter and `VV_PY_ENTRY` the script;
+without either, the binary looks for `src/vv.py` in the archive layout and the
+checkout layout.
 
-Python, in turn, uses the binary as a scanner for `search` and link scans when
-it is built (`VV_ENGINE=python` turns that off; `VV_ENGINE=rust` requires it).
-A native process that Python started never hands the call back, so the two
-cannot call each other in a loop.
+Python, in turn, can use a built binary in a checkout as a scanner for
+searches and for link scans that have no index (`VV_ENGINE=python` turns that
+off). A native process that Python started never hands the call back, so the
+two cannot call each other in a loop.
 
 ### What the native entry answers
 
 Success paths: `outline`, `read NOTE SEC`, `show`, `head`, `resolve`,
 `search`, `links`, `backlinks`, `orphans`, `deadends`, `board`, `tags`,
-`props`, `set`, `unset`, `append NOTE TEXT`, `appendsec` and `patch`. Some
-forms of these still go to Python, including `read NOTE` with no section and
-`append NOTE SEC TEXT`.
+`props`, `set`, `unset`, `append NOTE TEXT`, `appendsec` and `patch`, plus
+`--version` and a bare `vv`. Some forms of these still go to Python, including
+`read NOTE` with no section and `append NOTE SEC TEXT`.
 
-Refusals it words itself, in Python's exact bytes and exit codes:
+Refusals it words itself, in Python's exact bytes and exit codes, when the
+call carries no global flag:
 
 - a wrong operand count for any of those commands, and a search with no query;
 - a reference that leaves the vault (`escape:`), that names several notes
   (`ambiguous:`), or that a write cannot prove unique because a directory
   could not be listed (`refused:`);
-- a miss when three or more note names contain the missed one (`not-found:`
-  with a `did you mean:` line).
+- a miss when three or more distinct note names contain the last part of the
+  missed one (`not-found:` with a `did you mean:` line).
 
 Still Python's, by hand-off: every other command; a miss that needs
 similarity-ranked suggestions; section errors; `--jsonl`; `<command> --help`;
-any `--limit` or `--vault` that is not in its plainest form; a read over a
-directory that cannot be listed (it answers with a warning); and a bare note
-name outside ASCII. That last one exists because names are matched lowercased
+any `--limit` or `--vault` that is not in its plainest form; a note lookup by
+name over a directory that cannot be listed (it answers with a warning); and a
+bare note name outside ASCII. Native `search` is not in that list: it answers
+from the directories it could read. That last one exists because names are matched lowercased
 and the two engines' Unicode tables are different editions; exact paths
 compare nothing and stay native.
 
 The direction of travel is a single native engine with Python kept as the
-test oracle. Each slice is ported only where golden vectors show the bytes
-are Python's ([how it is tested](verification.md)).
+test oracle. Golden vectors classify each covered case as a native match, a
+hand-off, or an explicitly recorded native difference
+([how it is tested](verification.md)).
 
 ## The caches
 
@@ -62,12 +69,14 @@ them). They never read or write each other's.
 - The **native** graph handlers (`backlinks`, `orphans`, `deadends`) use a TSV
   link cache, `.vvidx`. Its format, its integrity footer and the reasoning
   behind it are in [cache-format.md](cache-format.md).
-- The **Python** indexed handlers (its graph and frontmatter commands and
-  `lint --quick`) use a SQLite index. `vv index` reports on it and
-  `vv index --rebuild` rebuilds it.
+- The **Python** indexed handlers (its graph and frontmatter queries and
+  `lint --quick`; `links` reads its one note directly) use a SQLite index.
+  `vv index` syncs it and reports on it, and `vv index --rebuild` recreates
+  it.
 
-Both follow the same freshness rule. On each call the vault is listed and
-each note's `(mtime_ns, size, inode)` is compared by equality with the cached
+Both follow the same freshness rule. A command that uses a cache lists the
+scope it needs (the vault, or one folder for a folder-scoped query) and
+compares each note's `(mtime_ns, size, inode)` by equality with the cached
 row; a note that is new or changed is parsed again, and a note stamped close
 to the cache's own commit time is re-hashed, the way git handles a "racily
 clean" file. Raw link targets are stored, not resolved destinations, because
@@ -75,18 +84,19 @@ which note a bare link names depends on which duplicate names exist now.
 
 A cache is an accelerator, not an authority. Metadata equality is a heuristic,
 and the footer detects accidental damage, not every possible inconsistency.
-When a cache cannot be read or does not check out, the command falls back to a
-live scan and the cache is rebuilt.
+When the native cache does not check out it is rebuilt on the spot. When the
+SQLite index fails, Python answers from a live scan for that run, sets the
+database aside, and a later successful sync builds a new one.
 
 ## Metrics
 
-By default each instrumented call appends one line to
-`~/.claude/metrics/vv.jsonl` when that directory exists:
-`{op, ms, out_bytes, exit}` plus, when they apply, `kind` (the refusal),
-`ref` (how the note was addressed), `sel` (how the section was addressed),
-`cf_bytes` (the size of the whole note, for comparison) and `fb` (Python was
-reached by a hand-off). `VV_NO_METRICS=1` turns it off. Nothing leaves the
-machine.
+By default an instrumented call appends a line, best effort, to
+`~/.claude/metrics/vv.jsonl` when that directory exists: `ts`, `ver`,
+`engine`, `op`, `ms`, `out_bytes` and `exit`, plus, when they apply, `kind`
+(the refusal), `ref` (how the note was addressed), `sel` (how the section was
+addressed), `cf_bytes` (the size of the notes the call resolved, for
+comparison), `fb` (Python was reached by a hand-off) and `src`.
+`VV_NO_METRICS=1` turns it off. Nothing leaves the machine.
 
 ## Design notes
 

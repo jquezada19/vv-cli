@@ -6,10 +6,11 @@ What stands behind the claims in the [README](../README.md).
 
 `./run_tests.sh` builds the native binary and runs about fifty suite
 invocations, including three fuzz seeds and a read-only verification pass over the
-configured vault. CI runs it on macOS and Linux against a generated fixture
-vault; [CONTRIBUTING.md](../CONTRIBUTING.md) has the exact recipe. The
-original suites run through the Python entry twice, once with the native
-scanner and once with `VV_ENGINE=python`.
+configured vault. CI runs it on macOS and Linux against a generated fixture vault, as
+shown in `.github/workflows/ci.yml`; [CONTRIBUTING.md](../CONTRIBUTING.md)
+explains running it against a scratch vault. The original suites run through
+the Python entry twice, once with the default scanner selection and once with
+`VV_ENGINE=python`.
 
 ## Link semantics
 
@@ -24,8 +25,10 @@ equal length, vv picks in lexicographic order where the app picks by cache
 insertion order.
 
 `tests/oracle_obsidian.py` is an opt-in test that compares sampled
-`vv backlinks` output with a running Obsidian, allowing the documented
-differences.
+`vv backlinks` sets with a running Obsidian. It leaves out a note's links to
+itself and tolerates two kinds of link vv counts and the app does not (some
+links inside frontmatter, and an alias pipe left unescaped in a table); any
+other mismatch is reported.
 
 ## The move to one engine
 
@@ -52,18 +55,22 @@ section by outline id where Python echoes the selector that was typed.
 
 ## Faults and crashes
 
-Property and fuzz tests assert that sections partition every file and that a
-fault injected at each rewrite index rolls back byte-identically. Fault
-injection covers two different kinds of failure. Catchable faults
-(`VV_FAULT_AFTER`, `VV_FAULT_KIND=exit`) exercise the in-process handler.
-`VV_FAULT_KILL_AFTER_RENAME` ends the process with `os._exit`, skipping
-handlers, `finally` blocks and `atexit`, which is the only way to reach the
-crash-recovery path.
+Fuzz tests check that a note's sections reassemble into the note (up to
+newline normalisation) and that a fault injected before each rewrite restores
+the original text; the real-vault pass checks that sections cover every line
+of each readable note. Fault injection covers two different kinds of failure.
+Catchable faults (`VV_FAULT_AFTER`, `VV_FAULT_KIND=exit`) exercise the
+in-process handler. `VV_FAULT_KILL_AFTER_RENAME` ends the process with
+`os._exit`, skipping handlers, `finally` blocks and `atexit`, so a journal is
+left behind after the rename; a later `vv doctor --rollback` is then checked
+to recover from it.
 
 ## Replaying real usage
 
 `bench/vault_ops_replay.py` samples the vault operations recorded in recent
-agent session transcripts and replays them against the current code. Reads
-run against the live vault; writes are directed at a disposable copy, so a
-replayed `set` or `rename` cannot touch a real note. It skips `patch` (which
-needs stdin and a live hash) and reports outcomes by exit code.
+agent session transcripts and replays the supported ones against the current
+code. The verbs it classes as reads run against the live vault; every other
+vv verb is directed at a disposable copy, so a replayed `set` or `rename`
+cannot touch a real note. It skips `patch` (which needs stdin and a live
+hash), gives some non-vv operations only an existence check, and reports
+outcomes by exit code along with what it skipped.
