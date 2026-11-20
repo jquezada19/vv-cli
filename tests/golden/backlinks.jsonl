@@ -1,0 +1,4 @@
+{"argv": ["backlinks", "Hub.md"], "exit": 0, "files": {}, "id": "backlinks/hub", "served": "native", "stderr": "", "stdin": null, "stdout": "Notes/Twin.md\nSolo.md\n(2 backlinks)\n"}
+{"argv": ["backlinks", "Solo"], "exit": 0, "files": {}, "id": "backlinks/by-name", "served": "native", "stderr": "", "stdin": null, "stdout": "Hub.md\n(1 backlinks)\n"}
+{"argv": ["backlinks", "Orphan.md"], "exit": 0, "files": {}, "id": "backlinks/none", "served": "native", "stderr": "", "stdin": null, "stdout": "(0 backlinks)\n"}
+{"argv": ["backlinks", "Nope"], "exit": 1, "files": {}, "id": "backlinks/not-found", "served": "handoff", "stderr": "not-found: no note matches 'Nope'\n", "stdin": null, "stdout": ""}

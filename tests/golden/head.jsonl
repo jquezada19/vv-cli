@@ -1,0 +1,6 @@
+{"argv": ["head", "Hub.md"], "exit": 0, "files": {}, "id": "head/frontmatter", "served": "native", "stderr": "", "stdin": null, "stdout": "type: moc\nstatus: open\ntags: [hub, fixture]\n"}
+{"argv": ["head", "Notes/Beta.md"], "exit": 0, "files": {}, "id": "head/block-value", "served": "native", "stderr": "", "stdin": null, "stdout": "type: note\nstatus: open\ntags:\n  - fixture\n  - beta\nsummary: |\n  a block\n  value\n"}
+{"argv": ["head", "Crlf.md"], "exit": 0, "files": {}, "id": "head/crlf", "served": "native", "stderr": "", "stdin": null, "stdout": "type: note\r\nstatus: open\n"}
+{"argv": ["head", "Plain.md"], "exit": 0, "files": {}, "id": "head/no-frontmatter", "served": "native", "stderr": "", "stdin": null, "stdout": "(no frontmatter)\n"}
+{"argv": ["head", "Nope"], "exit": 1, "files": {}, "id": "head/not-found", "served": "handoff", "stderr": "not-found: no note matches 'Nope'\n", "stdin": null, "stdout": ""}
+{"argv": ["head"], "exit": 1, "files": {}, "id": "head/arity-0", "served": "handoff", "stderr": "usage: head takes 1 positional args, got 0 — next: vv head NOTE\n", "stdin": null, "stdout": ""}

@@ -1,0 +1,4 @@
+{"argv": ["links", "Hub.md"], "exit": 0, "files": {}, "id": "links/hub", "served": "native", "stderr": "", "stdin": null, "stdout": "Solo\nNotes/Beta\nTwin\n(3 links)\n"}
+{"argv": ["links", "Notes/Beta.md"], "exit": 0, "files": {}, "id": "links/inert-links-ignored", "served": "native", "stderr": "", "stdin": null, "stdout": "(0 links)\n"}
+{"argv": ["links", "Orphan.md"], "exit": 0, "files": {}, "id": "links/none", "served": "native", "stderr": "", "stdin": null, "stdout": "(0 links)\n"}
+{"argv": ["links", "Nope"], "exit": 1, "files": {}, "id": "links/not-found", "served": "handoff", "stderr": "not-found: no note matches 'Nope'\n", "stdin": null, "stdout": ""}
