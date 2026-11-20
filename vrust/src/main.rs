@@ -20,6 +20,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::exit;
 mod cache;
+mod difflib;
 mod err;
 mod graph;
 mod query;
