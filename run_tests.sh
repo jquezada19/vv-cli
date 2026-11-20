@@ -108,6 +108,8 @@ run "link needle filter"  python3 tests/test_link_needle.py
 run "search entry points"  python3 tests/test_search_entry.py
 run "sweep guards"        python3 tests/test_sweepguard.py
 run "metrics provenance" python3 tests/test_metrics_provenance.py
+run "difflib vectors fresh" python3 tests/difflib/generate.py --check
+run "rust unit tests"    cargo test --quiet --manifest-path vrust/Cargo.toml
 run "port inventory"     python3 bench/port_inventory.py --check
 run "golden fresh"       python3 tests/golden/generate.py --check
 run "golden replay"      python3 tests/test_golden.py
