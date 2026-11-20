@@ -308,4 +308,6 @@ _extend("tags", [
 # CASES above.
 ORACLE_CRASHES = [
     ["show", "Hub.md", "--max-bytes", "x"],
+    ["show", "Hub.md", "--max-bytes"],
+    ["show", "Hub.md", "--from"],
 ]

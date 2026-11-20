@@ -23,7 +23,7 @@ native answer that differs is a pre-existing divergence between the engines: it
 is written to known-divergences.jsonl with both answers, and repairing it is a
 deliberate edit to that file.
 """
-import base64, hashlib, json, os, re, shutil, subprocess, sys, tempfile
+import base64, hashlib, json, os, re, shlex, shutil, subprocess, sys, tempfile, zlib
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
@@ -38,6 +38,20 @@ import fixture                      # noqa: E402
 from cases import CASES, ORACLE_CRASHES   # noqa: E402
 
 
+def binary_problem():
+    """Why the built binary cannot be trusted, or None. A binary older than a
+    source file answers for code that is no longer in the tree."""
+    if not os.path.exists(VRUST):
+        return "vrust/target/release/vrust is not built — next: (cd vrust && cargo build --release)"
+    built = os.path.getmtime(VRUST)
+    srcs = [os.path.join(REPO, "vrust", "Cargo.toml"), os.path.join(REPO, "VERSION")]
+    srcs += [os.path.join(d, n) for d, _, ns in os.walk(os.path.join(REPO, "vrust", "src")) for n in ns]
+    newer = [os.path.relpath(p, REPO) for p in srcs if os.path.getmtime(p) > built]
+    if newer:
+        return f"the built binary is older than {newer[0]} — next: (cd vrust && cargo build --release)"
+    return None
+
+
 def field(b):
     """Bytes as a JSON value: text when valid UTF-8, else base64."""
     try:
@@ -50,6 +64,18 @@ def unfield(v):
     return base64.b64decode(v["b64"]) if isinstance(v, dict) else v.encode("utf-8")
 
 
+class Symlink(bytes):
+    """A symlink's target: never equal to a regular file with the same bytes."""
+    def __eq__(self, other):
+        return isinstance(other, Symlink) and bytes(self) == bytes(other)
+    __hash__ = bytes.__hash__
+    def __ne__(self, other):
+        return not self.__eq__(other)
+
+
+CRASH = re.compile(rb'^Traceback \(most recent call last\):\n  File "', re.M)
+
+
 def snapshot(root):
     """Every file under the vault, dot-directories included (.trash is where a
     removal lands). A symlink is recorded as its target, never followed."""
@@ -60,7 +86,7 @@ def snapshot(root):
             p = os.path.join(d, n)
             rel = os.path.relpath(p, root)
             if os.path.islink(p):
-                out[rel] = b"symlink -> " + os.fsencode(os.readlink(p))
+                out[rel] = Symlink(os.fsencode(os.readlink(p)))
             elif os.path.isfile(p):
                 with open(p, "rb") as f:
                     out[rel] = f.read()
@@ -94,32 +120,51 @@ class Sandbox:
                            env=self.env(**env), timeout=TIMEOUT, cwd=self.base)
         sub = lambda b: b.replace(self.vault.encode(), b"{VAULT}")
         after = snapshot(self.vault)
-        files = {p: field(after[p]) for p in sorted(after) if self.before.get(p) != after[p]}
+        self.crashed = bool(CRASH.search(r.stderr))
+        show = lambda v: {"symlink": field(bytes(v))} if isinstance(v, Symlink) else field(v)
+        files = {p: show(after[p]) for p in sorted(after) if self.before.get(p) != after[p]}
         files.update({p: None for p in sorted(self.before) if p not in after})
         return {"exit": r.returncode, "stdout": field(sub(r.stdout)), "stderr": field(sub(r.stderr)), "files": files}
 
     def run_native(self, argv, stdin):
         """(result, handoff): the binary's result, and whether it handed off.
-        Raises SystemExit on a hand-off that is not clean."""
+        Raises SystemExit on a hand-off that is not clean.
+
+        Two markers. A `python3` shim placed first on PATH records every
+        interpreter start, whatever entry it was given: no start means the
+        binary answered by itself. The sentinel entry records what it was
+        handed: a start that did not reach it means the launcher ignored
+        VV_PY_ENTRY."""
+        shim_dir = os.path.join(self.base, "shim")
+        os.makedirs(shim_dir, exist_ok=True)
+        shim, started = os.path.join(shim_dir, "python3"), os.path.join(self.base, "python.started")
+        with open(shim, "w") as f:
+            f.write(f'#!/bin/sh\necho started >> {shlex.quote(started)}\nexec {shlex.quote(sys.executable)} "$@"\n')
+        os.chmod(shim, 0o755)
         mark = os.path.join(self.base, "handoff.mark")
-        got = self.run([VRUST], argv, stdin, VV_PY_ENTRY=SENTINEL, VV_GOLDEN_MARK=mark)
-        if not os.path.exists(mark):
+        code = 60 + zlib.crc32(" ".join(argv).encode("utf-8")) % 30      # per case: a constant exit cannot pass
+        got = self.run([VRUST], argv, stdin, VV_PY_ENTRY=SENTINEL, VV_GOLDEN_MARK=mark, VV_GOLDEN_EXIT=str(code),
+                       PATH=shim_dir + os.pathsep + os.environ.get("PATH", "/usr/bin:/bin"))
+        if not os.path.exists(started):
+            if os.path.exists(mark):
+                raise SystemExit("FAIL " + " ".join(argv) + ": the sentinel ran without the interpreter shim")
             return got, False
+        if not os.path.exists(mark):
+            raise SystemExit("FAIL " + " ".join(argv) + ": python was started, but not through VV_PY_ENTRY")
         seen = [json.loads(l) for l in open(mark, encoding="utf-8")]
         problems = []
         if len(seen) != 1:
             problems.append(f"python was started {len(seen)} times")
-        # the patch hand-off rebuilds argv as `--vault <vault> patch …`; a
-        # caller-side --vault pair is otherwise forwarded as given
-        strip = lambda a: [x for i, x in enumerate(a) if x != "--vault" and (i == 0 or a[i - 1] != "--vault")]
-        if strip(seen[0]["argv"]) != strip(argv):
+        # forwarded exactly as given; the one rebuilt form is the post-stdin
+        # patch hand-off, which prefixes `--vault <this vault>`
+        if seen[0]["argv"] != argv and not (argv[:1] == ["patch"] and seen[0]["argv"] == ["--vault", self.vault] + argv):
             problems.append(f"argv was not forwarded as given: {seen[0]['argv']}")
         if seen[0]["stdin_sha256"] != hashlib.sha256((stdin or "").encode("utf-8")).hexdigest():
             problems.append("stdin was not forwarded as given")
-        if os.path.realpath(seen[0]["vault"] or self.vault) != self.vault:
-            problems.append(f"the vault changed on the way: {seen[0]['vault']}")
-        if got["exit"] != 42 or got["stderr"] != "HANDOFF\n" or got["stdout"] != "":
-            problems.append(f"the native entry printed or exited on its own: {got['exit']} {got['stdout']!r} {got['stderr']!r}")
+        if seen[0]["vault"] != self.vault:
+            problems.append(f"the vault changed on the way: {seen[0]['vault']!r}")
+        if got["exit"] != code or got["stderr"] != "HANDOFF\n" or got["stdout"] != "":
+            problems.append(f"the native entry printed or exited on its own (want exit {code}): {got['exit']} {got['stdout']!r} {got['stderr']!r}")
         if got["files"]:
             problems.append(f"the vault was changed before the hand-off: {sorted(got['files'])}")
         if problems:
@@ -156,9 +201,10 @@ def record(cmd, cid, argv, stdin):
     sb = Sandbox()
     try:
         oracle = sb.run([sys.executable, VV], argv, stdin, VV_ENGINE="python")
+        crashed = sb.crashed
     finally:
         sb.close()
-    if "Traceback (most recent call last)" in str(oracle["stderr"]):
+    if crashed:
         raise SystemExit(f"FAIL {cmd}/{cid}: the python engine crashed on {argv} — a traceback is a defect, "
                          "not an answer to freeze; fix it or drop the case")
     sb = Sandbox()
@@ -180,8 +226,8 @@ def dump(rows):
 
 def generate():
     """{filename: text} for every golden file."""
-    if not os.path.exists(VRUST):
-        raise SystemExit("generate: vrust/target/release/vrust is not built — next: (cd vrust && cargo build --release)")
+    if binary_problem():
+        raise SystemExit("FAIL golden: " + binary_problem())
     notes = {}
     old = os.path.join(HERE, DIVERGENCES)
     if os.path.exists(old):
@@ -206,10 +252,11 @@ def generate():
     for argv in ORACLE_CRASHES:
         sb = Sandbox()
         try:
-            r = sb.run([sys.executable, VV], argv, None, VV_ENGINE="python")
+            sb.run([sys.executable, VV], argv, None, VV_ENGINE="python")
+            crashed = sb.crashed
         finally:
             sb.close()
-        if "Traceback (most recent call last)" not in str(r["stderr"]):
+        if not crashed:
             raise SystemExit(f"FAIL {argv} no longer crashes the python engine — next: move it from ORACLE_CRASHES into CASES")
     return files
 

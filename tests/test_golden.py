@@ -6,9 +6,10 @@ Every record in tests/golden/<command>.jsonl says how its case is served:
 
   native     the binary must give exactly the recorded stdout, stderr, exit
              code and resulting files, without handing off.
-  handoff    the binary must hand off cleanly: the sentinel's marker file
-             exists, argv and stdin arrived as given, the binary printed
-             nothing of its own and did not touch the vault first. Answering a case this
+  handoff    the binary must hand off cleanly: an interpreter was started and
+             reached the sentinel entry, argv, stdin and the vault arrived as
+             given, the entry's exit code came back unchanged, and the binary
+             printed nothing of its own and did not touch the vault first. Answering a case this
              suite expects to be handed off is a failure too: the port moves a
              case to `native` deliberately, in the record.
   divergent  the binary answers, but not with the python engine's bytes. Its
@@ -31,8 +32,8 @@ def check(name, cond, detail=""):
         print("FAIL " + name + (f"  [{str(detail)[:400]}]" if detail else ""))
         fails.append(name)
 
-if not os.path.exists(gen.VRUST):
-    print("FAIL vrust/target/release/vrust is not built — the replay has nothing to run")
+if gen.binary_problem():
+    print("FAIL golden replay: " + gen.binary_problem())
     sys.exit(1)
 
 divergent = {}

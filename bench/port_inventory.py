@@ -11,7 +11,7 @@ The doc is generated, so it cannot drift from src/vv_impl.py: the gate runs
 `unassigned`, and --check fails on it — a new python function has to be given a stage before it
 can land, whether or not it uses one of the listed facilities.
 """
-import collections, os, re, sys
+import ast, collections, os, re, sys
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SRC = os.path.join(REPO, "src", "vv_impl.py")
@@ -88,7 +88,8 @@ def scan():
             cur = "<module>"
         owner.append(cur)
     code = [(i, l) for i, l in enumerate(lines) if not l.lstrip().startswith("#")]
-    defs = [m.group(1) for l in lines if (m := re.match(r"def (\w+)", l))]
+    # parsed, not pattern-matched: `async def` and odd spacing count too
+    defs = [n.name for n in ast.parse("\n".join(lines)).body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
     sites = collections.OrderedDict()
     for name, (pat, _why) in FACILITIES.items():
         rx, hits = re.compile(pat), collections.OrderedDict()
