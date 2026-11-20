@@ -47,6 +47,27 @@ Two suites are opt-in and not part of CI because they need a running Obsidian
 app (`tests/oracle_obsidian.py`) or the author's own transcript history
 (`bench/vault_ops_replay.py`).
 
+## Golden vectors
+
+`tests/golden/` holds what the python engine answers for a fixed corpus of
+commands against a frozen fixture vault, and how the native entry serves each
+case today: `native` (same bytes, no hand-off), `handoff` (python answers), or
+`divergent` (the engines disagree; both answers are in
+`known-divergences.jsonl` with a note).
+
+```
+(cd vrust && cargo build --release)         # both tools run the built binary; build first
+python3 tests/golden/generate.py            # regenerate after a deliberate change
+python3 tests/golden/generate.py --check    # the gate's `golden fresh` line
+python3 tests/test_golden.py                # the gate's `golden replay` line
+```
+
+Porting a case to the native entry is a one-word edit to its record
+(`handoff` → `native`) that the replay then enforces. A diff to a `.jsonl`
+file is a change to what vv prints, exits with, or writes: review it as one.
+An input that crashes the python engine is listed in `ORACLE_CRASHES` in
+`tests/golden/cases.py` rather than frozen as an answer.
+
 ## What a good change looks like
 
 - **Correctness claims are pinned, not asserted.** New link-semantics behavior

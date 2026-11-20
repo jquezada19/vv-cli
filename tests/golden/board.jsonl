@@ -1,0 +1,13 @@
+{"argv": ["board", "Board"], "exit": 0, "files": {}, "id": "board/folder", "served": "native", "stderr": "", "stdin": null, "stdout": "open\ttask\ta\ndone\ttask\tb\nopen\ttask\tc\n(3 notes)\n"}
+{"argv": ["board", "Board", "status=open"], "exit": 0, "files": {}, "id": "board/filter-kv", "served": "native", "stderr": "", "stdin": null, "stdout": "open\ttask\ta\nopen\ttask\tc\n(2 notes)\n"}
+{"argv": ["board", "Board", "--status", "open"], "exit": 0, "files": {}, "id": "board/filter-flag", "served": "handoff", "stderr": "", "stdin": null, "stdout": "open\ttask\ta\nopen\ttask\tc\n(2 notes)\n"}
+{"argv": ["board", "Board", "--status=done"], "exit": 0, "files": {}, "id": "board/filter-flag-eq", "served": "handoff", "stderr": "", "stdin": null, "stdout": "done\ttask\tb\n(1 notes)\n"}
+{"argv": ["board", "Board", "status=nope"], "exit": 0, "files": {}, "id": "board/no-match", "served": "native", "stderr": "", "stdin": null, "stdout": "(0 notes)\n"}
+{"argv": ["board", "NoSuchFolder"], "exit": 1, "files": {}, "id": "board/missing-folder", "served": "handoff", "stderr": "not-found: no such folder: NoSuchFolder\n", "stdin": null, "stdout": ""}
+{"argv": ["board"], "exit": 1, "files": {}, "id": "board/arity-0", "served": "handoff", "stderr": "usage: board takes 1+ positional args, got 0 — next: vv board FOLDER\n", "stdin": null, "stdout": ""}
+{"argv": ["board", "Board", "status=open", "owner=ana"], "exit": 0, "files": {}, "id": "board/two-filters", "served": "native", "stderr": "", "stdin": null, "stdout": "open\ttask\ta\n(1 notes)\n"}
+{"argv": ["board", "Board", "--status"], "exit": 1, "files": {}, "id": "board/flag-missing-value", "served": "handoff", "stderr": "usage: board filter --status needs a value — next: vv board Board status=VALUE\n", "stdin": null, "stdout": ""}
+{"argv": ["board", "Board", "--", "open"], "exit": 1, "files": {}, "id": "board/flag-empty-key", "served": "handoff", "stderr": "usage: board filters are KEY=VALUE, got -- — next: vv board Board KEY=VALUE\n", "stdin": null, "stdout": ""}
+{"argv": ["board", "Board", "status"], "exit": 1, "files": {}, "id": "board/bare-malformed-filter", "served": "handoff", "stderr": "usage: board filters are KEY=VALUE, got status — next: vv board Board status=VALUE\n", "stdin": null, "stdout": ""}
+{"argv": ["board", "Hub.md"], "exit": 1, "files": {}, "id": "board/file-scope", "served": "handoff", "stderr": "not-found: Hub.md is a file, not a folder — next: vv outline Hub.md\n", "stdin": null, "stdout": ""}
+{"argv": ["board", ".."], "exit": 1, "files": {}, "id": "board/escape-scope", "served": "handoff", "stderr": "escape: path leaves the vault: ..\n", "stdin": null, "stdout": ""}

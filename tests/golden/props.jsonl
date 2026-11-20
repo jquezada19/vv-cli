@@ -1,0 +1,8 @@
+{"argv": ["props", "status"], "exit": 0, "files": {}, "id": "props/key", "served": "native", "stderr": "", "stdin": null, "stdout": "7\topen\n2\tdone\n1\tdraft\n1\tin-progress\n(11 notes with status)\n"}
+{"argv": ["props", "status", "Board"], "exit": 0, "files": {}, "id": "props/key-folder", "served": "native", "stderr": "", "stdin": null, "stdout": "2\topen\n1\tdone\n(3 notes with status)\n"}
+{"argv": ["props", "nokey"], "exit": 0, "files": {}, "id": "props/key-absent", "served": "native", "stderr": "", "stdin": null, "stdout": "(0 notes with nokey)\n"}
+{"argv": ["props"], "exit": 1, "files": {}, "id": "props/arity-0", "served": "handoff", "stderr": "usage: props takes 1-2 positional args, got 0 — next: vv props KEY\n", "stdin": null, "stdout": ""}
+{"argv": ["props", "status", "Board", "x"], "exit": 1, "files": {}, "id": "props/arity-3", "served": "handoff", "stderr": "usage: props takes 1-2 positional args, got 3 — next: vv props status\n", "stdin": null, "stdout": ""}
+{"argv": ["props", "status", "NoSuchFolder"], "exit": 1, "files": {}, "id": "props/missing-folder", "served": "handoff", "stderr": "not-found: no such folder: NoSuchFolder\n", "stdin": null, "stdout": ""}
+{"argv": ["props", "status", "Hub.md"], "exit": 1, "files": {}, "id": "props/file-scope", "served": "handoff", "stderr": "not-found: Hub.md is a file, not a folder — next: vv outline Hub.md\n", "stdin": null, "stdout": ""}
+{"argv": ["props", "status", ".."], "exit": 1, "files": {}, "id": "props/escape-scope", "served": "handoff", "stderr": "escape: path leaves the vault: ..\n", "stdin": null, "stdout": ""}
