@@ -202,6 +202,120 @@ for label, argv in (("bare", ["search"]), ("--files", ["search", "--files"]), ("
     got = b.run(argv, entry=[sys.executable, VV])
     check(f"B7[{label}] and through the python launcher with the scanner built", got == want, (got, want))
 
+# ---- R: resolver refusals, differentially ----
+# A vault with the shapes a reference can fail on: duplicate basenames,
+# duplicate ids, names that need quoting or escaping, symlinks that leave the
+# vault (typed, found by name, found by id, through a directory), dangling and
+# looping links, and, in the "locked" variant, directories that cannot be
+# listed. Python decides the answer; an `escape:`, `ambiguous:` or
+# `refused: cannot prove` answer must come from the native entry itself with
+# the same bytes and the same files, and whatever else the native entry
+# answers without python must match too.
+R_OUTSIDE = mkdtemp("vv-nerr-outside-")
+with open(os.path.join(R_OUTSIDE, "secret.md"), "w") as f:
+    f.write("# secret\n\n## S\n\nx\n")
+
+def r_extend(vault, locked):
+    def w(rel_, txt="# t\n\n## S\n\nbody\n"):
+        os.makedirs(os.path.dirname(os.path.join(vault, rel_)), exist_ok=True)
+        with open(os.path.join(vault, rel_), "w") as f_:
+            f_.write(txt)
+    for d in ("Many", "Many1", "Many2", "Many3", "Many4", "Many5"):
+        w(d + "/Dupe.md")
+    for n in ("alpha one", "alpha two", "alpha three", "alphabet"):
+        w(f"Sub/{n}.md")
+    w("Sub/it's.md"); w("Sub2/it's.md")
+    w("Ctl/new\nline.md"); w("Ctl2/new\nline.md")
+    w("Sep/a — next: b.md"); w("Sep2/a — next: b.md")
+    w("Ids/777 - one.md"); w("Ids/888 - a.md"); w("Ids2/888 - b.md")
+    w("#555.md"); w("Ids/556 - hash.md"); w("557.md")
+    secret = os.path.join(R_OUTSIDE, "secret.md")
+    os.symlink(secret, os.path.join(vault, "Esc.md"))
+    os.symlink(secret, os.path.join(vault, "Sub", "EscName.md"))
+    os.symlink(secret, os.path.join(vault, "Ids", "444 - esc.md"))
+    os.symlink(R_OUTSIDE, os.path.join(vault, "OutDir"))
+    os.symlink("/nonexistent/zzz.md", os.path.join(vault, "Dangling.md"))
+    os.symlink("Loop.md", os.path.join(vault, "Loop.md"))
+    os.symlink("Hub.md", os.path.join(vault, "InLink.md"))
+    os.symlink("Area", os.path.join(vault, "AreaLink"))
+    os.symlink("Area", os.path.join(vault, "DirNote.md"))
+    if locked:
+        w("Locked/in/x.md")
+        os.makedirs(os.path.join(vault, "Zed"))
+        os.chmod(os.path.join(vault, "Locked"), 0)
+        os.chmod(os.path.join(vault, "Zed"), 0)
+
+def r_snapshot(vault):
+    out = {}
+    for d, _ds, fs in os.walk(vault):
+        for n in fs:
+            p_ = os.path.join(d, n)
+            out[os.path.relpath(p_, vault)] = ("link", os.readlink(p_)) if os.path.islink(p_) else open(p_, "rb").read()
+    return out
+
+R_REFS = ["Hub", "hub", "Twin", "twin.md", "Dupe", "Solo", "nope", "Nope/zzz", "alpha", "alph", "it's", "new\nline",
+          "a — next: b", "777", "#777", "888", "#888", "#555", "#556", "557", "#557", "#557.md", "0", "#", "#x", "１２３",
+          "101", "202", "303", "#303", "444", "#444", "Esc", "Esc.md", "EscName", "OutDir/secret", "OutDir/nope",
+          "../x", "/etc/hosts", "/etc/nope", "Dangling", "Dangling.md", "Loop", "InLink", "AreaLink/Solo", "DirNote",
+          "", ".", "..", "Area", "Area/../Hub", "Area/../../x", "Hub.md/x", "Locked/in/x", "Zed", "x\x01y"]
+R_CMDS = {"resolve": lambda r: ["resolve", r], "read": lambda r: ["read", r, "H1"], "show": lambda r: ["show", r],
+          "links": lambda r: ["links", r], "set": lambda r: ["set", r, "k", "v"],
+          "appendsec": lambda r: ["appendsec", r, "H1", "txt"], "patch": lambda r: ["patch", r, "H1", "deadbeef"]}
+
+def one_resolver_case(job):
+    locked, cmd, ref = job
+    argv = R_CMDS[cmd](ref)
+    res = []
+    for engine in ("python", "native"):
+        b_ = Box()
+        r_extend(b_.vault, locked)
+        if engine == "python":
+            out_ = oracle(b_, argv)
+        else:
+            out_ = b_.run(argv, stdin=b"new body\n")
+        if locked:
+            os.chmod(os.path.join(b_.vault, "Locked"), 0o755)
+            os.chmod(os.path.join(b_.vault, "Zed"), 0o755)
+        res.append((tuple(x.replace(b_.base.encode(), b"<BOX>") if isinstance(x, bytes) else x for x in out_),
+                    r_snapshot(b_.vault), b_.started()))
+    return locked, cmd, ref, res
+
+r_jobs = ([(False, c, r) for c in ("resolve", "read", "set") for r in R_REFS]
+          + [(False, c, r) for c in ("show", "links", "appendsec", "patch") for r in R_REFS[::4]]
+          + [(True, c, r) for c in ("resolve", "set", "patch") for r in R_REFS[::3]])
+r_kinds = {}
+r_warned = [0, 0]
+r_native_ok = set()
+with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool_:
+    for locked, cmd, ref, ((want, want_files, _), (got, got_files, started)) in pool_.map(one_resolver_case, r_jobs):
+        err_ = want[2].decode("utf-8", "replace")
+        kind = err_.split(":")[0] if want[0] else "ok"
+        if kind == "refused" and "cannot prove" not in err_:
+            kind = "refused-other"
+        label = f"{'locked ' if locked else ''}{cmd} {ref!r}"
+        r_kinds.setdefault(kind, [0, 0])[1 if started else 0] += 1
+        if want[2].startswith(b"warning:"):
+            r_warned[1 if started else 0] += 1
+        if not started and not locked and cmd == "resolve" and want[0] == 0:
+            r_native_ok.add(ref)
+        if started:
+            if kind in ("escape", "ambiguous", "refused"):
+                check(f"R1x[{label}] the native entry words python's {kind}: refusal itself", False, (got, want))
+        elif (got, got_files) != (want, want_files):
+            check(f"R2x[{label}] what the native entry answers without python is python's answer", False, (got, want))
+check("R1 every escape:, ambiguous: and cannot-prove refusal python gives is answered natively "
+      f"({ {k: v[0] for k, v in r_kinds.items()} })",
+      not any(f.startswith("R1x") for f in fails)
+      and all(r_kinds.get(k, [0, 0])[0] >= n for k, n in (("escape", 20), ("ambiguous", 15), ("refused", 10))), r_kinds)
+check("R2 and every native answer equals python's, bytes and files", not any(f.startswith("R2x") for f in fails), r_kinds)
+check("R3 a not-found with three names containing the miss is native; the similarity tier still hands off",
+      r_kinds.get("not-found", [0, 0])[0] >= 3 and r_kinds.get("not-found", [0, 0])[1] >= 3, r_kinds)
+check("R4 (control) references that resolve are still served natively", r_kinds.get("ok", [0, 0])[0] >= 20, r_kinds)
+check("R6 a name, an id and the #id spelling each resolve without python",
+      {"Solo", "777", "#777", "#557", "#555"} <= r_native_ok, sorted(r_native_ok))
+check("R5 a read over a directory that cannot be listed is still python's (it warns and answers)",
+      r_warned[0] == 0 and r_warned[1] >= 3, r_warned)
+
 # ---- W: a malformed global flag never reaches a native command ----
 # `--vault` with no value used to stay in the operand list, so
 # `append NOTE --vault` appended the literal text; an odd `--limit` value was

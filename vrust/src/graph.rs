@@ -398,9 +398,9 @@ fn link_matches(
 // ---------------------------------------------------------------------------
 
 fn cmd_backlinks(ref_: &str, vault: &Path, t0: Instant) -> Outcome {
-    let fp = match readpath::resolve(vault, ref_) {
-        Some(f) => f,
-        None => return Outcome::Fallback,
+    let fp = match readpath::resolve(vault, ref_, "backlinks") {
+        Ok(f) => f,
+        Err(o) => return o,
     };
     let cf = fs::metadata(&fp).map(|m| m.len()).unwrap_or(0);
     let tgt_base = match basename_noext_lower(&fp) {
@@ -491,9 +491,9 @@ fn cmd_backlinks(ref_: &str, vault: &Path, t0: Instant) -> Outcome {
 }
 
 fn cmd_links(ref_: &str, vault: &Path, t0: Instant) -> Outcome {
-    let fp = match readpath::resolve(vault, ref_) {
-        Some(f) => f,
-        None => return Outcome::Fallback,
+    let fp = match readpath::resolve(vault, ref_, "links") {
+        Ok(f) => f,
+        Err(o) => return o,
     };
     let cf = fs::metadata(&fp).map(|m| m.len()).unwrap_or(0);
     // cmd_links calls read_raw(fp) directly (no try/except) — non-UTF-8

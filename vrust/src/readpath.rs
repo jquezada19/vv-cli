@@ -374,7 +374,7 @@ fn ends_at_break(title: &str, want: &str) -> bool {
     }
 }
 
-// ---------- resolve happy path ----------
+// ---------- resolve ----------
 pub fn contain(vault: &Path, rel: &str) -> Option<PathBuf> {
     let full = vault.join(rel);
     let real = fs::canonicalize(&full).ok()?;
@@ -386,91 +386,383 @@ pub fn contain(vault: &Path, rel: &str) -> Option<PathBuf> {
     }
 }
 
-pub fn resolve(vault: &Path, ref_: &str) -> Option<PathBuf> {
-    // Each typed form in python's order: a contained file is the answer; a
-    // form that EXISTS but fails containment (a symlink out of the vault) is
-    // python's `escape:` refusal, never a reason to go on to the next form
-    // or to match the same text as a basename or an id.
-    let md = format!("{}.md", ref_);
-    let forms: [Option<&str>; 2] = [Some(ref_), (!ref_.ends_with(".md")).then_some(md.as_str())];
-    for r in forms.into_iter().flatten() {
-        match contain(vault, r) {
-            Some(fp) if fp.is_file() => {
-                let _ = REF_KIND.set("path");
-                return Some(fp);
-            }
-            Some(_) => {}
-            None if vault.join(r).symlink_metadata().is_ok() => return None,
-            None => {}
-        }
-    }
-    let want = ref_.strip_suffix(".md").unwrap_or(ref_).to_lowercase();
-    let mut files = Vec::new();
-    if !crate::walk_checked(vault, &mut files, false, false) {
-        return None; // incomplete walk: uniqueness is unprovable — python refuses
-    }
-    let hits: Vec<&PathBuf> = files
-        .iter()
-        .filter(|p| {
-            p.file_name()
-                .and_then(|n| n.to_str())
-                .map(|n| n.strip_suffix(".md").unwrap_or(n).to_lowercase() == want)
-                .unwrap_or(false)
-        })
-        .collect();
-    if hits.len() == 1 {
-        // A walk-derived hit gets the same containment as a typed path: a
-        // symlinked note whose target is outside the vault must never be read
-        // or written through a bare name. Python's _contained() emits the
-        // `escape:` text; here the hit is simply not ours to answer.
-        let real = fs::canonicalize(hits[0]).ok()?;
-        let vreal = fs::canonicalize(vault).ok()?;
-        if real == vreal || real.starts_with(&vreal) {
-            let _ = REF_KIND.set("name");
-            Some(hits[0].clone())
-        } else {
-            None // escaping symlink: python refuses with `escape:`
-        }
-    } else if hits.is_empty() {
-        resolve_id(vault, &want, &files)
+/// python's `os.path.realpath` (non-strict), on bytes: every symlink that can
+/// be read is followed, a component that does not exist is kept as written,
+/// and a symlink loop is left unresolved.
+fn realpath(filename: &[u8]) -> Vec<u8> {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+    let split = |b: &[u8]| -> Vec<Option<Vec<u8>>> {
+        b.split(|c| *c == b'/')
+            .rev()
+            .map(|p| Some(p.to_vec()))
+            .collect()
+    };
+    // unresolved parts, last first; a `None` marks "the link below me is now resolved"
+    let mut rest = split(filename);
+    let mut part_count = rest.len();
+    let mut path: Vec<u8> = if filename.starts_with(b"/") {
+        b"/".to_vec()
     } else {
-        None // 2+: python words the `ambiguous:` refusal
+        std::env::current_dir()
+            .map(|d| d.as_os_str().as_bytes().to_vec())
+            .unwrap_or_else(|_| b"/".to_vec())
+    };
+    let mut seen: std::collections::HashMap<Vec<u8>, Option<Vec<u8>>> =
+        std::collections::HashMap::new();
+    while part_count > 0 {
+        let Some(name) = rest.pop().flatten() else {
+            if let Some(Some(link)) = rest.pop() {
+                seen.insert(link, Some(path.clone()));
+            }
+            continue;
+        };
+        part_count -= 1;
+        if name.is_empty() || name == b"." {
+            continue;
+        }
+        if name == b".." {
+            let cut = path.iter().rposition(|c| *c == b'/').unwrap_or(0);
+            path.truncate(cut.max(1));
+            continue;
+        }
+        let mut newpath = path.clone();
+        if path != b"/" {
+            newpath.push(b'/');
+        }
+        newpath.extend_from_slice(&name);
+        let is_link = fs::symlink_metadata(OsStr::from_bytes(&newpath))
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false);
+        if !is_link {
+            path = newpath;
+            continue;
+        }
+        if let Some(known) = seen.get(&newpath) {
+            // resolved before: reuse it; still open: a loop, kept as written
+            path = known.clone().unwrap_or(newpath);
+            continue;
+        }
+        match fs::read_link(OsStr::from_bytes(&newpath)) {
+            Ok(target) => {
+                let t = target.as_os_str().as_bytes();
+                if t.starts_with(b"/") {
+                    path = b"/".to_vec();
+                }
+                seen.insert(newpath.clone(), None);
+                rest.push(Some(newpath));
+                rest.push(None);
+                let parts = split(t);
+                part_count += parts.len();
+                rest.extend(parts);
+            }
+            Err(_) => path = newpath,
+        }
+    }
+    path
+}
+
+/// python's `real != _VAULT_REAL and not real.startswith(_VAULT_REAL + os.sep)`,
+/// negated.
+fn within(vault: &Path, full: &[u8]) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    let real = realpath(full);
+    let mut vreal = realpath(vault.as_os_str().as_bytes());
+    if real == vreal {
+        return true;
+    }
+    vreal.push(b'/');
+    real.starts_with(&vreal)
+}
+
+/// python's `contain` for a TYPED reference: the joined path, or `None` when
+/// it leaves the vault. Unlike `contain` above, a path that does not exist is
+/// judged by where it would be.
+fn typed(vault: &Path, rel: &str) -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStrExt;
+    let full = if rel.starts_with('/') {
+        PathBuf::from(rel)
+    } else {
+        let mut b = vault.as_os_str().as_bytes().to_vec();
+        if !b.ends_with(b"/") {
+            b.push(b'/');
+        }
+        b.extend_from_slice(rel.as_bytes());
+        PathBuf::from(std::ffi::OsStr::from_bytes(&b))
+    };
+    within(vault, full.as_os_str().as_bytes()).then_some(full)
+}
+
+/// python's `_WRITE_OPS`: a write through a name the walk could not prove
+/// unique is refused, where a read answers with a warning.
+const WRITE_OPS: [&str; 10] = [
+    "set",
+    "unset",
+    "append",
+    "appendsec",
+    "prepend",
+    "patch",
+    "rename",
+    "move",
+    "trash",
+    "batch",
+];
+
+/// The notes under the vault in `os.walk` order, the directories that could
+/// not be listed (vault-relative, in the order python records them), and
+/// whether anything was met that this engine reads differently from python
+/// (a name that is not UTF-8, an entry whose type could not be read).
+struct Notes {
+    files: Vec<PathBuf>,
+    unreadable: Vec<String>,
+    odd: bool,
+}
+
+fn walk_notes(vault: &Path, dir: &Path, w: &mut Notes) {
+    let rd = match fs::read_dir(dir) {
+        Ok(rd) => rd,
+        Err(_) => {
+            match dir.strip_prefix(vault).ok().and_then(|r| r.to_str()) {
+                Some("") => w.unreadable.push(".".to_string()),
+                Some(r) => w.unreadable.push(r.to_string()),
+                None => w.odd = true,
+            }
+            return;
+        }
+    };
+    // python lists a directory whole before descending into any of it
+    let mut subdirs = Vec::new();
+    for e in rd {
+        let Ok(e) = e else {
+            w.odd = true;
+            continue;
+        };
+        let Some(name) = e.file_name().to_str().map(str::to_string) else {
+            w.odd = true;
+            continue;
+        };
+        match e.file_type() {
+            // a symlink is never descended, as in os.walk(followlinks=False)
+            Ok(t) if t.is_dir() => {
+                if !name.starts_with('.') && !crate::SKIP_DIRS.contains(&name.as_str()) {
+                    subdirs.push(e.path());
+                }
+            }
+            Ok(_) if name.ends_with(".md") => w.files.push(e.path()),
+            Ok(_) => {}
+            Err(_) => w.odd = true,
+        }
+    }
+    for d in subdirs {
+        walk_notes(vault, &d, w);
     }
 }
 
-/// The id rule, on the SAME completed walk: bare digits name the one note
-/// whose basename starts `<digits> - ` (mirrors `_resolve_id_prefix`). Zero or
-/// several candidates, a `#`-prefixed spelling, and an escaping symlink are
-/// python's to answer.
-fn resolve_id(vault: &Path, want: &str, files: &[PathBuf]) -> Option<PathBuf> {
-    if want.is_empty() || !want.bytes().all(|b| b.is_ascii_digit()) {
-        return None;
+fn stem_lower(p: &Path) -> Option<String> {
+    let n = p.file_name()?.to_str()?;
+    Some(n.strip_suffix(".md").unwrap_or(n).to_lowercase())
+}
+
+fn rel_str(vault: &Path, p: &Path) -> String {
+    p.strip_prefix(vault)
+        .unwrap_or(p)
+        .to_string_lossy()
+        .to_string()
+}
+
+/// python's `rel` for a note a caller may have TYPED: `os.path.relpath`
+/// normalises lexically, so `Area/../Hub.md` is shown as `Hub.md`.
+pub fn rel_shown(vault: &Path, fp: &Path) -> String {
+    rel_str(vault, &crate::normpath(fp))
+}
+
+/// python's `resolve`: the note a reference names, or why not. `Err` carries
+/// the outcome to return: a refusal this engine worded (`escape:`,
+/// `ambiguous:`, `refused:`, and `not-found:` when its suggestions need no
+/// similarity ranking), or `Fallback` for what python still answers.
+pub fn resolve(vault: &Path, ref_: &str, op: &str) -> Result<PathBuf, Outcome> {
+    use crate::err::{die, die_suggest, q};
+    let escape = |shown: &str| {
+        die(
+            op,
+            &format!("escape: path leaves the vault: {}", shown),
+            None,
+            1,
+        )
+    };
+    // A typed form, in python's order: contained and a file is the answer;
+    // one that leaves the vault is refused, never passed over for the next.
+    let typed_file = |r: &str| -> Result<Option<PathBuf>, Outcome> {
+        match typed(vault, r) {
+            None => Err(escape(r)),
+            Some(fp) => Ok(fp.is_file().then_some(fp)),
+        }
+    };
+    let as_path = |fp: PathBuf| {
+        let _ = REF_KIND.set("path");
+        Ok(fp)
+    };
+    if let Some(fp) = typed_file(ref_)? {
+        return as_path(fp);
     }
-    // a name this engine cannot read as text may be a second candidate that
-    // python does count: uniqueness is then python's to judge
-    if files
+    if !ref_.ends_with(".md") {
+        if let Some(fp) = typed_file(&format!("{}.md", ref_))? {
+            return as_path(fp);
+        }
+    }
+    let mut want = ref_.strip_suffix(".md").unwrap_or(ref_).to_lowercase();
+    let mut w = Notes {
+        files: Vec::new(),
+        unreadable: Vec::new(),
+        odd: false,
+    };
+    walk_notes(vault, vault, &mut w);
+    let writing = WRITE_OPS.contains(&op);
+    if w.odd || (!w.unreadable.is_empty() && !writing) {
+        // a read over an incomplete walk answers with a warning: python's
+        return Err(Outcome::Fallback);
+    }
+    let partial = !w.unreadable.is_empty();
+    let cannot_prove = |claim: String| {
+        die(
+            op,
+            &format!(
+                "refused: cannot prove {} — unreadable: {}",
+                claim,
+                w.unreadable
+                    .iter()
+                    .take(3)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            Some("vv doctor"),
+            1,
+        )
+    };
+    // a dangling symlink is walk-visible but not a note: never a hit
+    let name_hits = |want: &str| -> Result<Vec<&PathBuf>, Outcome> {
+        let mut hits: Vec<&PathBuf> = w
+            .files
+            .iter()
+            .filter(|p| stem_lower(p).as_deref() == Some(want) && p.is_file())
+            .collect();
+        if !hits.is_empty() && partial {
+            return Err(cannot_prove(format!("'{}' is unique", want)));
+        }
+        hits.sort();
+        Ok(hits)
+    };
+    // a note chosen from the walk gets the containment a typed path gets
+    let contained = |p: &PathBuf| -> Result<PathBuf, Outcome> {
+        use std::os::unix::ffi::OsStrExt;
+        if within(vault, p.as_os_str().as_bytes()) {
+            Ok(p.clone())
+        } else {
+            Err(escape(&rel_str(vault, p)))
+        }
+    };
+    let is_id = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    let mut hits = name_hits(&want)?;
+    if hits.is_empty() && want.starts_with('#') && is_id(&want[1..]) {
+        // `#NNNNN` once a literal `#NNNNN` note has missed: exact path, exact
+        // basename, then the id rule, all against this one walk
+        let bare = &ref_[1..];
+        if let Some(fp) = typed_file(bare)? {
+            return as_path(fp);
+        }
+        if let Some(fp) = typed_file(&format!("{}.md", bare))? {
+            return as_path(fp);
+        }
+        want.remove(0);
+        hits = name_hits(&want)?;
+    }
+    if hits.len() == 1 {
+        let fp = contained(hits[0])?;
+        let _ = REF_KIND.set("name");
+        return Ok(fp);
+    }
+    if hits.len() > 1 {
+        let rels: Vec<String> = hits.iter().map(|h| rel_str(vault, h)).collect();
+        return Err(die(
+            op,
+            &format!("ambiguous: {}", rels[..rels.len().min(5)].join(" | ")),
+            Some(&format!("vv resolve {}", q(&rels[0], "NOTE"))),
+            1,
+        ));
+    }
+    if is_id(&want) {
+        // the id rule: the one note whose basename starts `<digits> - `
+        let prefix = format!("{} - ", want);
+        let mut cands: Vec<&PathBuf> = w
+            .files
+            .iter()
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with(&prefix))
+                    && p.is_file()
+            })
+            .collect();
+        cands.sort();
+        if partial {
+            // zero visible candidates is not "none"
+            return Err(cannot_prove(format!("id {} is unique", want)));
+        }
+        if cands.len() > 1 {
+            let rels: Vec<String> = cands.iter().map(|c| rel_str(vault, c)).collect();
+            return Err(die(
+                op,
+                &format!(
+                    "ambiguous: {} matches {} notes: {}",
+                    want,
+                    cands.len(),
+                    rels[..rels.len().min(5)].join(" | ")
+                ),
+                Some(&format!("vv resolve {}", q(&rels[0], "NOTE"))),
+                1,
+            ));
+        }
+        if let Some(only) = cands.first() {
+            let fp = contained(only)?;
+            let _ = REF_KIND.set("id");
+            return Ok(fp);
+        }
+    }
+    if partial {
+        return Err(cannot_prove(format!("'{}' is absent", ref_)));
+    }
+    // Suggestions: names containing the missed one, shortest first. When
+    // fewer than three contain it python fills the list by similarity, which
+    // this engine does not rank yet.
+    let base = want.rsplit('/').next().unwrap_or("");
+    let mut names: Vec<(usize, String, &PathBuf)> = w
+        .files
         .iter()
-        .any(|p| p.file_name().is_some_and(|n| n.to_str().is_none()))
-    {
-        return None;
+        .filter_map(|p| {
+            let n = p.file_name()?.to_str()?;
+            let stem = &n[..n.len() - 3];
+            stem.to_lowercase()
+                .contains(base)
+                .then(|| (stem.chars().count(), stem.to_string(), p))
+        })
+        .collect();
+    names.sort();
+    let mut sugg: Vec<String> = Vec::new();
+    for (_, stem, p) in &names {
+        if !sugg.contains(stem) && p.is_file() {
+            sugg.push(stem.clone());
+            if sugg.len() == 3 {
+                return Err(die_suggest(
+                    op,
+                    &format!("not-found: no note matches '{}'", ref_),
+                    &sugg.join(" | "),
+                    1,
+                ));
+            }
+        }
     }
-    let prefix = format!("{} - ", want);
-    let mut cands = files.iter().filter(|p| {
-        p.file_name()
-            .and_then(|n| n.to_str())
-            .is_some_and(|n| n.starts_with(&prefix))
-    });
-    let only = cands.next()?;
-    if cands.next().is_some() {
-        return None;
-    }
-    let real = fs::canonicalize(only).ok()?;
-    let vreal = fs::canonicalize(vault).ok()?;
-    if real.starts_with(&vreal) {
-        let _ = REF_KIND.set("id");
-        return Some(only.clone());
-    }
-    None
+    Err(Outcome::Fallback)
 }
 
 // ---------- metrics (mirror _log in vv_impl.py) ----------
@@ -637,20 +929,19 @@ pub fn run(cmd: &str, args: &[String], vault: &Path) -> Outcome {
     let t0 = std::time::Instant::now();
     match cmd {
         "resolve" if args.len() == 1 => {
-            let fp = match resolve(vault, &args[0]) {
-                Some(f) => f,
-                None => return Outcome::Fallback,
+            let fp = match resolve(vault, &args[0], cmd) {
+                Ok(f) => f,
+                Err(o) => return o,
             };
             let cf = fs::metadata(&fp).map(|m| m.len()).unwrap_or(0);
-            let rel = fp.strip_prefix(vault).unwrap_or(&fp);
-            let n = emit(&format!("{}\n", rel.display()));
+            let n = emit(&format!("{}\n", rel_shown(vault, &fp)));
             log_metrics("resolve", t0, n, cf, None);
             Outcome::Done(0)
         }
         "head" if args.len() == 1 => {
-            let fp = match resolve(vault, &args[0]) {
-                Some(f) => f,
-                None => return Outcome::Fallback,
+            let fp = match resolve(vault, &args[0], cmd) {
+                Ok(f) => f,
+                Err(o) => return o,
             };
             let cf = fs::metadata(&fp).map(|m| m.len()).unwrap_or(0);
             let bytes = match fs::read(&fp) {
@@ -672,9 +963,9 @@ pub fn run(cmd: &str, args: &[String], vault: &Path) -> Outcome {
             Outcome::Done(0)
         }
         "outline" if args.len() == 1 => {
-            let fp = match resolve(vault, &args[0]) {
-                Some(f) => f,
-                None => return Outcome::Fallback,
+            let fp = match resolve(vault, &args[0], cmd) {
+                Ok(f) => f,
+                Err(o) => return o,
             };
             let cf = fs::metadata(&fp).map(|m| m.len()).unwrap_or(0);
             let bytes = match fs::read(&fp) {
@@ -725,9 +1016,9 @@ pub fn run(cmd: &str, args: &[String], vault: &Path) -> Outcome {
                     None => return Outcome::Fallback, // python words the refusal
                 }
             };
-            let fp = match resolve(vault, &args[0]) {
-                Some(f) => f,
-                None => return Outcome::Fallback,
+            let fp = match resolve(vault, &args[0], cmd) {
+                Ok(f) => f,
+                Err(o) => return o,
             };
             let cf = fs::metadata(&fp).map(|m| m.len()).unwrap_or(0);
             let bytes = match fs::read(&fp) {

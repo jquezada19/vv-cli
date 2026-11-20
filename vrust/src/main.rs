@@ -32,7 +32,7 @@ mod write;
 /// the filesystem. components().collect() alone kept ".." — so a VV_VAULT of
 /// "/a/link/../vault" resolved through the symlink natively but lexically in
 /// python, and the two engines could address different vaults.
-fn normpath(p: &Path) -> PathBuf {
+pub fn normpath(p: &Path) -> PathBuf {
     use std::path::Component;
     let mut out: Vec<Component> = Vec::new();
     for c in p.components() {

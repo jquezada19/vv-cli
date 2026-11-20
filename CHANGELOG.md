@@ -17,6 +17,19 @@ next release is MAJOR unless they are judged defect repairs.
 
 ### Changed
 
+- **A reference that cannot be resolved is refused without starting python.**
+  `escape:` (a typed path, or a note found by name or id, that leaves the
+  vault), `ambiguous:` (a duplicated basename or id), and the write refusal
+  `refused: cannot prove … — unreadable: …` over a directory that cannot be
+  listed are now worded by the native entry, byte for byte as python words
+  them; so is `not-found:` when three note names contain the missed one. The
+  `#id` spelling resolves natively. A `not-found:` whose suggestions need
+  similarity ranking, and a read over an unreadable directory (which answers
+  with a warning), are still python's.
+- **A typed path with `..` in it is shown as python shows it.** `vv resolve
+  Area/../Hub` printed `Area/../Hub.md` natively and `Hub.md` in python; `set`,
+  `unset`, `append`, `appendsec` and `patch` echoed the same unnormalised
+  path. All print the normalised path now.
 - **A bare ticket id no longer costs a second engine.** `vv outline 24995`
   found no exact basename natively, handed the call to python, and python
   walked the vault again. The native entry now applies the id rule on its own
