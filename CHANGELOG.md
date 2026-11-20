@@ -40,9 +40,15 @@ next release is MAJOR unless they are judged defect repairs.
   first refusal the native entry words itself.
 - **An argument that is not valid UTF-8 no longer crashes the native entry.**
   It is handed to python byte for byte, and python answers such a call itself
-  instead of delegating the scan back. A native process that python started
-  never hands a call back to python; it refuses, so the two engines cannot
-  call each other without end.
+  instead of delegating the scan back (the same when the vault's own path is
+  not valid UTF-8). A native process that python started never hands a call
+  back to python; it refuses, so the two engines cannot call each other
+  without end. `VV_FROM_PY` now carries python's pid and is believed only
+  from the parent process.
+- **`patch` refuses a body it could not read.** A read error on stdin used to
+  forward whatever bytes had arrived, which python could apply as a shorter
+  section; it is now `io: could not read the replacement body from stdin`,
+  exit 1, with the note untouched.
 - **The post-stdin `patch` hand-off finds python like every other hand-off.**
   It honours `VV_PYTHON` and the packaged layout, prints the `engine:` line
   when the interpreter cannot be started, and no longer falls back to a

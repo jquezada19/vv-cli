@@ -175,10 +175,11 @@ def die(msg, code=1, nxt=None):
 def _native_argv_ok(args):
     """True when every argument can be given to the native binary. An operand
     python read with surrogate escapes (bytes that are not UTF-8) is one the
-    binary declines, and it declines by handing the call back to python: this
-    process answers such a call itself."""
+    binary declines, so this process answers such a call itself."""
     try:
-        for a in args:
+        # the vault too: the binary takes it from VV_VAULT, and an
+        # undecodable value there makes it fall back to its default vault
+        for a in (*args, VAULT):
             a.encode("utf-8")
     except UnicodeEncodeError:
         return False
@@ -1648,7 +1649,7 @@ def _phrase_hint(terms):
         try:
             r = subprocess.run([VRUST, "search", *split, "--k", "0", "--w", "1"],
                                capture_output=True, text=True,
-                               env=dict(os.environ, VV_FROM_PY="1"), timeout=60)
+                               env=dict(os.environ, VV_FROM_PY=str(os.getpid())), timeout=60)
             if r.returncode == 0:
                 m = re.search(r"\(\d+ of (\d+) matches\)", r.stdout)
                 if m:
@@ -1686,10 +1687,11 @@ def cmd_search(*args):
         return
     if use_rust() and _native_argv_ok(args):
         import subprocess
-        # VV_FROM_PY tells the engine that PYTHON is the orchestrator here, so
+        # VV_FROM_PY (our pid: the binary believes it only from its parent)
+        # tells the engine that PYTHON is the orchestrator here, so
         # the zero-hit phrase hint below is ours to add. Without it the engine
         # hands off to python itself on zero hits and the hint prints TWICE.
-        env = dict(os.environ, VV_FROM_PY="1")
+        env = dict(os.environ, VV_FROM_PY=str(os.getpid()))
         # k already folds in an explicit --k OR the globally-stripped --limit;
         # re-state it for the child, which never saw the stripped flag. A
         # duplicate --k is harmless (same value, last-wins parse).
@@ -1863,7 +1865,8 @@ def scan_links(needle=None):
     if use_rust() and _native_argv_ok([needle or ""]):
         cmd = [VRUST, "linkscan"] + (["--grep", needle] if needle else [])
         import subprocess
-        r = subprocess.run(cmd, capture_output=True, text=True)
+        r = subprocess.run(cmd, capture_output=True, text=True,
+                           env=dict(os.environ, VV_FROM_PY=str(os.getpid())))
         if r.returncode == 0:
             for line in r.stdout.split("\n"):
                 if not line:

@@ -170,18 +170,50 @@ if os.name == "posix":
         n = starts()
         check(f"U3[{label}] a non-UTF-8 search term is answered once, with python's answer",
               got == want and n == 1, (got, want, n))
-        got = b.run(argv, entry=[capped, VV])
+        # VV_PYTHON too: a binary this python started would count its own hand-off
+        got = b.run(argv, entry=[capped, VV], VV_PYTHON=capped)
         n = starts()
         check(f"U4[{label}] and the python launcher answers it without delegating",
               got == want and n == 1, (got, want, n))
+    # The marker means "python started this process" only when it names the
+    # parent's pid; this suite IS the parent of the binaries it runs.
+    me = str(os.getpid())
     b = Box()
-    got = b.run(["search", bad], VV_FROM_PY="1")
+    got = b.run(["search", bad], VV_FROM_PY=me)
     check("U5 a binary that python called never hands the call back",
           got[0] == 1 and got[2].startswith(b"engine: ") and not b.started(), got)
     b = Box()
-    got = b.run(["search", "zzqq xxyy"], VV_FROM_PY="1")
-    check("U6 (control) under VV_FROM_PY an ordinary miss is still answered",
+    got = b.run(["outline", "Nope"], VV_FROM_PY=me)
+    check("U6 whatever the reason for declining", got[0] == 1 and got[2].startswith(b"engine: ") and not b.started(), got)
+    b = Box()
+    got = b.run(["search", "zzqq xxyy"], VV_FROM_PY=me)
+    check("U7 (control) an ordinary miss is still answered for python",
           got[0] == 0 and got[1] == b"(0 of 0 matches)\n" and not b.started(), got)
+    for label, value in (("another pid", "1"), ("empty", "")):
+        b = Box()
+        got = b.run(["outline", "Nope"], VV_FROM_PY=value)
+        check(f"U8[{label}] a marker that does not name the parent changes nothing",
+              got[0] == 42 and b.started(), got)
+
+    # A vault whose path is not valid UTF-8: the binary cannot take it from
+    # VV_VAULT, so python must scan it itself rather than let the binary
+    # search its default vault.
+    odd = os.path.join(mkdtemp("vv-nerr-oddvault-").encode(), b"v\xffault")
+    try:
+        os.makedirs(os.path.join(odd, b".obsidian"))
+        with open(os.path.join(odd, b"Only.md"), "w") as f:
+            f.write("# Only\n\nunique-token-here\n")
+        made = True
+    except OSError:
+        made = False                    # a filesystem that refuses such a name
+    if made:
+        b = Box()
+        e = dict(b.env, VV_VAULT=os.fsdecode(odd), VV_NO_METRICS="1")
+        e.pop("VV_PY_ENTRY")
+        r = subprocess.run([sys.executable, VV, "search", "unique-token-here", "--files"], capture_output=True,
+                           env=e, timeout=120, cwd=b.base)
+        check("U9 a search in a vault with an undecodable path is answered from that vault",
+              r.returncode == 0 and r.stdout == b"Only.md\n(1 of 1 matches)\n", (r.returncode, r.stdout, r.stderr))
 
 # ---- P: the post-stdin patch hand-off uses the shared launcher ----
 # A patch whose body is not valid UTF-8 passes every pre-stdin check natively,
@@ -212,6 +244,27 @@ check("P3 an unrunnable interpreter is the `engine:` refusal with its next step,
       and not b.started(), got)
 check("P4 the vault is untouched when the hand-off cannot start",
       open(os.path.join(b.vault, "Hub.md"), "rb").read() == fixture.NOTES["Hub.md"].encode(), "Hub.md changed")
+b, got, sha = patch_handoff(VV_FROM_PY=str(os.getpid()))
+check("P5 the post-stdin launcher does not hand back to a python parent either",
+      got[0] == 1 and got[2].startswith(b"engine: ") and not b.started(), got)
+if os.name == "posix":
+    # A read error part-way: a non-blocking pipe with some bytes in it and the
+    # writer still open gives the bytes, then EAGAIN instead of end-of-file.
+    b = Box()
+    rc, out, _ = b.run(["outline", "Hub.md"])
+    sha = [l.split("\t")[-1] for l in out.decode().splitlines() if l.startswith("H2\t")][0]
+    rd, wr = os.pipe()
+    os.set_blocking(rd, False)
+    os.write(wr, b"## Details\n\nonly the first half")
+    try:
+        r = subprocess.run([VRUST, "patch", "Hub.md", "H2", sha], stdin=rd, capture_output=True, env=b.env,
+                           timeout=120, cwd=b.base)
+    finally:
+        os.close(rd); os.close(wr)
+    check("P6 a body that could not be read whole is refused, never applied or forwarded short",
+          r.returncode == 1 and r.stderr.startswith(b"io: could not read the replacement body") and not b.started()
+          and open(os.path.join(b.vault, "Hub.md"), "rb").read() == fixture.NOTES["Hub.md"].encode(),
+          (r.returncode, r.stdout, r.stderr))
 
 print(f"\n{len(fails)} failures" if fails else "\nALL PASS (native errors)")
 sys.exit(1 if fails else 0)

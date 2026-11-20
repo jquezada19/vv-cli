@@ -744,6 +744,10 @@ fn cmd_appendsec(vault: &Path, args: &[String]) -> Outcome {
 // empty pipe and silently patch an empty body).
 fn exec_python_with_stdin(vault: &Path, args: &[String], body: &[u8]) -> Outcome {
     use std::process::{Command, Stdio};
+    if crate::readpath::from_py() {
+        crate::refuse_hand_back();
+        return Outcome::Done(1);
+    }
     // the same entry and interpreter as every other hand-off
     let Some((python, vv)) = crate::python_launch() else {
         return Outcome::Done(1);
@@ -815,7 +819,14 @@ fn cmd_patch(vault: &Path, args: &[String]) -> Outcome {
     // ---- point of no return: consume stdin ----
     let mut raw = Vec::new();
     if std::io::Read::read_to_end(&mut std::io::stdin(), &mut raw).is_err() {
-        return exec_python_with_stdin(vault, args, &raw);
+        // a body that could not be read whole is not a body: forwarding the
+        // bytes that did arrive would let python patch a truncated section
+        return crate::err::die(
+            "patch",
+            "io: could not read the replacement body from stdin",
+            Some("re-run with the body on stdin"),
+            1,
+        );
     }
     let body_str = match String::from_utf8(raw.clone()) {
         Ok(b) => b,

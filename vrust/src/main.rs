@@ -238,7 +238,7 @@ fn cmd_search(args: &[String], orig: &[String]) -> ! {
                     (_, None) => {
                         // python delegated this search (VV_FROM_PY): handing
                         // back would bounce between the engines without bound
-                        if std::env::var_os("VV_FROM_PY").is_some() {
+                        if readpath::from_py() {
                             eprintln!(
                                 "engine: search {} value is not one the native scanner parses",
                                 a
@@ -326,7 +326,7 @@ fn cmd_search(args: &[String], orig: &[String]) -> ! {
     // on U+001C..U+001F, which char::is_whitespace does not count.
     let py_space = |c: char| c.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&c);
     if hits.is_empty()
-        && std::env::var_os("VV_FROM_PY").is_none()
+        && !readpath::from_py()
         && terms
             .iter()
             .any(|t| t.split(py_space).filter(|w| !w.is_empty()).count() > 1)
@@ -360,7 +360,7 @@ fn cmd_search(args: &[String], orig: &[String]) -> ! {
     // own row at exit (cmd_search in vv_impl.py) -- logging here too would
     // double the row. _phrase_hint also runs an internal search this way
     // (VV_FROM_PY set, k=0) that must not count as user activity either.
-    if std::env::var_os("VV_FROM_PY").is_none() {
+    if !readpath::from_py() {
         readpath::log_metrics("search", t0, n, 0, None);
     }
     exit(0);
@@ -670,6 +670,13 @@ pub fn python_launch() -> Option<(String, String)> {
     Some((python, vv))
 }
 
+/// The line both launchers print instead of handing a call back to python.
+pub fn refuse_hand_back() {
+    eprintln!(
+        "engine: the native entry cannot answer this call for the python engine that started it"
+    );
+}
+
 /// The line both launchers print when the interpreter cannot be started.
 pub fn python_unavailable(python: &str) {
     eprintln!(
@@ -683,13 +690,13 @@ pub fn python_unavailable(python: &str) {
 /// over the argument type so an argv that is not valid UTF-8 is handed over
 /// byte for byte.
 ///
-/// Never back to a python that called us: with VV_FROM_PY set, python is the
-/// orchestrator and is waiting on this process, so handing off would start a
-/// second python that calls a second binary, without end. Whatever the reason
-/// for declining, the answer under VV_FROM_PY is a refusal.
+/// Never back to a python that called us: when python started this process
+/// (`readpath::from_py`) it is the orchestrator and is waiting on us, so
+/// handing off would start a second python that calls a second binary,
+/// without end. Whatever the reason for declining, the answer is a refusal.
 fn exec_python<S: AsRef<std::ffi::OsStr>>(argv: &[S]) -> ! {
-    if env::var_os("VV_FROM_PY").is_some() {
-        eprintln!("engine: the native scanner cannot answer this call for python — next: VV_ENGINE=python vv …");
+    if readpath::from_py() {
+        refuse_hand_back();
         exit(1);
     }
     let Some((python, vv)) = python_launch() else {

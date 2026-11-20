@@ -250,7 +250,7 @@ if os.path.exists(VRUST):
     v = mkdtemp("vv-wdef-frompy-")
     open(os.path.join(v, "A.md"), "w").write("alpha\n")
     r = subprocess.run([VRUST, "search", "alpha", "--k", "-1"], capture_output=True, text=True, timeout=60,
-                       env=dict(os.environ, VV_VAULT=v, VV_NO_METRICS="1", VV_FROM_PY="1",
+                       env=dict(os.environ, VV_VAULT=v, VV_NO_METRICS="1", VV_FROM_PY=str(os.getpid()),
                                 VV_PY_ENTRY="/nonexistent/vv.py"))
     check("X4 a delegated native search never hands an unparseable value back",
           r.returncode == 1 and r.stderr.startswith("engine: search --k") and "vv.py" not in r.stderr,

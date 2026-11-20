@@ -580,6 +580,20 @@ pub fn start_ns() -> String {
     START_NS.get().copied().unwrap_or(0).to_string()
 }
 
+/// True when the python engine started THIS process to do part of its work.
+/// Python sets VV_FROM_PY to its own pid; the value must name our parent, so
+/// a marker merely inherited from some outer environment (or an empty one)
+/// changes nothing.
+pub fn from_py() -> bool {
+    match std::env::var("VV_FROM_PY") {
+        #[cfg(unix)]
+        Ok(v) => v == std::os::unix::process::parent_id().to_string(),
+        #[cfg(not(unix))]
+        Ok(v) => !v.is_empty(),
+        Err(_) => false,
+    }
+}
+
 /// Process start on the monotonic clock: a refusal's row is timed from here.
 pub static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
 
