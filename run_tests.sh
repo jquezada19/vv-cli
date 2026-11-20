@@ -108,6 +108,7 @@ run "link needle filter"  python3 tests/test_link_needle.py
 run "search entry points"  python3 tests/test_search_entry.py
 run "sweep guards"        python3 tests/test_sweepguard.py
 run "metrics provenance" python3 tests/test_metrics_provenance.py
+run "port inventory"     python3 bench/port_inventory.py --check
 run "resolve + metrics"  python3 tests/test_resolve_metrics.py
 run "pilot report"       python3 bench/test_pilot_report.py
 run "jsonl surface"      python3 tests/test_jsonl.py
