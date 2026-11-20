@@ -12,7 +12,7 @@ a different non-zero exit, or a success that becomes a refusal, is MAJOR.
 
 ## [Unreleased]
 
-Four entries below turn an exit 0 into a refusal; under the rule above the
+Several entries below turn an exit 0 into a refusal; under the rule above the
 next release is MAJOR unless they are judged defect repairs.
 
 ### Changed
@@ -50,8 +50,17 @@ next release is MAJOR unless they are judged defect repairs.
   `vv append NOTE --vault` (no value) appended the literal text `--vault` to
   the note and exited 0, and a `--limit` value python refuses (`+1`) was read
   natively, so the command ran. Both are now python's usage refusal, exit 1,
-  with nothing written. Any `--limit` value that is not plain ASCII digits is
-  python's to judge. *Success → refusal.*
+  with nothing written. The native entry now takes only a `--limit` of 1 to
+  18 plain ASCII digits and a `--vault` that names an existing directory as
+  written; an empty or `~` vault path, a path that is not a directory, and
+  any other `--limit` spelling are python's to judge. That also ends three
+  wrong answers: `--vault ''` used the default vault instead of the working
+  directory, `--vault '~'` was not expanded, and a `--vault` that does not
+  exist answered an empty success. *Success → refusal.*
+- **A search term that looks like a flag stays a search term.** Through the
+  python entry with the scanner built, a term or split phrase word spelled
+  `--limit`, `--vault` or `--jsonl` (or a leading `--help`) was re-read as a
+  flag by the scanner; python now runs such a search itself.
 - **`vv search` with no query says what python says.** The native entry
   printed `error: no query`; it now prints `usage: search needs a query —
   next: vv search <terms> [--k N] [--w CHARS]`, exit 1 as before.

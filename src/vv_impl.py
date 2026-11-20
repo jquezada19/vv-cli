@@ -183,6 +183,11 @@ def _native_argv_ok(args):
             a.encode("utf-8")
     except UnicodeEncodeError:
         return False
+    # Operands here are literal text (a search term, a link needle), but the
+    # binary parses its command line again: these would be read as global
+    # flags or a help request there, and answered as something else.
+    if any(a in ("--limit", "--vault", "--jsonl") for a in args) or args[:1] in (["--help"], ["-h"]):
+        return False
     return True
 
 def use_rust():

@@ -767,14 +767,14 @@ fn main() {
     // --limit N before dispatch, mirroring vv.py (orig keeps it: a python
     // fallback re-parses the full argv itself)
     if let Some(i) = args.iter().position(|a| a == "--limit") {
-        // Only a plain positive ASCII-digit value is taken here. Everything
-        // else (missing, signed, non-ASCII digits, too large) is python's to
-        // judge: it accepts some of those and refuses others, and a value
-        // this parser read differently could let a command run that python
-        // would have refused.
+        // Only a plain positive value of 1 to 18 ASCII digits is taken here.
+        // Everything else (missing, signed, non-ASCII digits, longer) is
+        // python's to judge: it accepts some of those and refuses others,
+        // and a value this parser read differently could let a command run
+        // that python would have refused.
         let ok = args
             .get(i + 1)
-            .filter(|v| !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit()))
+            .filter(|v| (1..=18).contains(&v.len()) && v.bytes().all(|b| b.is_ascii_digit()))
             .and_then(|v| v.parse::<usize>().ok())
             .filter(|n| *n >= 1);
         match ok {
@@ -789,22 +789,19 @@ fn main() {
     // --vault PATH before dispatch, mirroring vv.py
     if let Some(i) = args.iter().position(|a| a == "--vault") {
         let _ = readpath::GLOBAL_FLAG.set(());
-        if i + 1 >= args.len() {
-            // `--vault` with no value is python's usage refusal. Left in the
-            // operand list it became an operand: `append NOTE --vault` wrote
-            // the literal text into the note.
-            exec_python(&orig);
-        }
-        if i + 1 < args.len() {
-            let mut v = args[i + 1].clone();
-            if let Some(rest) = v.strip_prefix("~/") {
-                // expanduser, like python
-                if let Ok(h) = env::var("HOME") {
-                    v = format!("{}/{}", h, rest);
-                }
+        // Only a value that names an existing directory as written is taken
+        // here. No value at all (left in the operand list it became an
+        // operand: `append NOTE --vault` wrote the literal text), an empty
+        // value (python means the working directory; `vault()` would mean
+        // the default vault), any `~` form (python expands more of them than
+        // we would), and a path that is not a directory (python refuses; a
+        // native walk of it answers an empty success) are all python's.
+        match args.get(i + 1) {
+            Some(v) if !v.is_empty() && !v.starts_with('~') && Path::new(v).is_dir() => {
+                std::env::set_var("VV_VAULT", v);
+                args.drain(i..=i + 1);
             }
-            std::env::set_var("VV_VAULT", &v);
-            args.drain(i..=i + 1);
+            _ => exec_python(&orig),
         }
     }
     // `<cmd> --help` is python's surface for every command (it prints that

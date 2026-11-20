@@ -210,8 +210,15 @@ for label, argv in (("--vault with no value", ["append", "Area/Solo.md", "--vaul
                     ("--limit +1", ["--limit", "+1", "append", "Area/Solo.md", "x"]),
                     ("--limit with no value", ["append", "Area/Solo.md", "x", "--limit"]),
                     ("--limit 0", ["--limit", "0", "set", "Area/Solo.md", "k", "v"]),
-                    ("--limit past 64 bits", ["--limit", "18446744073709551616", "outline"]),
-                    ("--limit non-ASCII digit", ["--limit", "\u0663", "outline"])):
+                    ("--limit past 64 bits", ["--limit", "18446744073709551616", "append", "Area/Solo.md", "x"]),
+                    ("--limit non-ASCII digit", ["--limit", "\u0663", "append", "Area/Solo.md", "x"]),
+                    ("--limit zero-padded past python's digit limit", ["--limit", "0" * 4400 + "1", "append", "Area/Solo.md", "x"]),
+                    ("--limit 19 digits", ["--limit", "1" * 19, "append", "Area/Solo.md", "x"]),
+                    ("--vault empty", ["--vault", "", "append", "Area/Solo.md", "x"]),
+                    ("--vault tilde", ["--vault", "~", "append", "Area/Solo.md", "x"]),
+                    ("--vault tilde-slash", ["--vault", "~/nowhere-vv-test", "append", "Area/Solo.md", "x"]),
+                    ("--vault not a directory", ["--vault", "/nonexistent-vv-vault", "tags"]),
+                    ("--vault a file", ["--vault", "Hub.md", "tags"])):
     b = Box()
     before = open(os.path.join(b.vault, "Area", "Solo.md"), "rb").read()
     got = b.run(argv)
@@ -224,7 +231,27 @@ for label, argv in (("--vault with no value", ["append", "Area/Solo.md", "--vaul
     check(f"W2[{label}] and the caller gets python's answer", got == want, (got, want))
 b = Box()
 got = b.run(["--limit", "2", "orphans"])
-check("W3 (control) a plain --limit is still taken natively", got[0] == 0 and not b.started(), got)
+check("W3 (control) a plain --limit is still taken natively, and applied",
+      got[0] == 0 and not b.started() and got == oracle(b, ["--limit", "2", "orphans"]), got)
+b = Box()
+got = b.run(["--vault", b.vault, "outline", "Hub.md"], VV_VAULT="/nonexistent-vv-vault")
+check("W4 (control) a --vault naming a real directory is still taken natively",
+      got[0] == 0 and not b.started() and got[1].startswith(b"H0\t"), got)
+
+# Operands are literal text to python, but the binary parses its command line
+# again: a term that looks like a global flag, or a leading help flag, must
+# stay in python rather than be re-read there.
+for label, argv in (("a term named --limit", ["--limit", "1", "search", "--limit"]),
+                    ("a second --limit pair", ["--limit", "1", "search", "alpha", "--limit", "1"]),
+                    ("a term named --vault", ["search", "alpha", "--vault"]),
+                    ("a phrase that splits into --limit 1 alpha", ["search", "--limit 1 alpha"]),
+                    ("a phrase that splits into --help alpha", ["search", "--help alpha"])):
+    b = Box()
+    want = oracle(b, argv)
+    got = b.run(argv, entry=[sys.executable, VV])
+    check(f"W5[{label}] the python launcher with the scanner built gives pure python's answer", got == want, (got, want))
+    got = b.run(argv, VV_PY_ENTRY=VV)
+    check(f"W6[{label}] and so does the native entry", got == want, (got, want))
 
 # ---- G: a global flag hands the refusal off ----
 for label, argv in (("--limit", ["--limit", "2", "read"]), ("--vault", ["read", "--vault", "/nonexistent-vault"]),
