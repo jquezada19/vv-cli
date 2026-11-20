@@ -242,6 +242,8 @@ def r_extend(box, locked):
         w(f"Sug/{n}.md")
     w(".hidden/Solo.md"); w(".obsidian/Solo.md")                        # never walked: `Solo` stays unique
     w("Dbl.md.md")                                                      # `Dbl.md` is not also tried as `Dbl.md.md`
+    w("Nas/\u00dcber.md")                                               # reachable only by name, and not ASCII
+    w("Kel/\u212a1.md"); w("Kel2/k1.md")                                # the Kelvin sign folds to `k`: `k1` names both
     w("Sub/it's.md"); w("Sub2/it's.md")
     w("Ctl/new\nline.md"); w("Ctl2/new\nline.md")
     w("Sep/a — next: b.md"); w("Sep2/a — next: b.md")
@@ -296,7 +298,7 @@ def r_run(box, argv, engine, stdin=b"new body\n"):
         out_ = box.run(argv, stdin=stdin)
     return tuple(x.replace(box.base.encode(), b"<BOX>") if isinstance(x, bytes) else x for x in out_)
 
-R_REFS = ["gamm", "zq", "ctq", "Nope/gamm", "Dbl.md", "./Hub", "Hub", "hub", "Twin", "twin.md", "Dupe", "Solo", "nope", "Nope/zzz", "alpha", "alph", "aa", "bb", "xo", "it's", "new\nline",
+R_REFS = ["k1", "\u00fcber", "gamm", "zq", "ctq", "Nope/gamm", "Dbl.md", "./Hub", "Hub", "hub", "Twin", "twin.md", "Dupe", "Solo", "nope", "Nope/zzz", "alpha", "alph", "aa", "bb", "xo", "it's", "new\nline",
           "a — next: b", "777", "#777", "888", "#888", "007", "#007", "606", "#555", "#556", "557", "#557", "#557.md", "0", "#",
           "#x", "１２３", "101", "202", "303", "#303", "444", "#444", "Esc", "Esc.md", "EscName", "OutDir/secret",
           "OutDir/nope", "../x", "../outside/secret.md", "../vault/Hub.md", "/etc/hosts", "/etc/nope", "Dangling", "Dangling.md",
@@ -330,8 +332,10 @@ r_jobs = ([(False, c, r) for c in ("resolve", "set") for r in R_REFS]
           + [(False, c, R_REFS[i]) for n, c in enumerate(c for c in R_CMDS if c not in ("resolve", "set"))
              for i in range(n % 5, len(R_REFS), 5)]
           + [(True, c, r) for c in ("resolve", "set", "patch") for r in R_REFS[::3]]
+          + [(True, "set", "nope")]
           + [(True, c, r) for c in R_CMDS if c not in ("resolve", "set", "patch")
              for r in ("Solo", "twin.md", "nope", "888", "Hub", "Esc")])
+r_jobs = list(dict.fromkeys(r_jobs))
 r_kinds = {}
 r_warned = [0, 0]
 r_served = {}
@@ -347,8 +351,9 @@ with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool_:
         if want[2].startswith(b"warning:"):
             r_warned[1 if started else 0] += 1
         if started:
-            # an ambiguity between names outside ASCII is python's to judge
-            if kind in ("escape", "refused") or (kind == "ambiguous" and ref.isascii()):
+            # a bare name outside ASCII, or one that collides with a name that
+            # only folds to it, is matched by python (R7c, R7d)
+            if kind == "escape" or (kind in ("ambiguous", "refused") and ref.isascii() and ref != "k1"):
                 check(f"R1x[{label}] the native entry words python's {kind}: refusal itself", False, (got, want))
             if got != (42, b"", b"HANDOFF\n") or got_files != before:
                 check(f"R8x[{label}] a hand-off prints nothing and writes nothing first", False, got)
@@ -384,8 +389,11 @@ check("R7 an ambiguous list is in python's order (path strings, not path compone
 native_, want_ = r_served[(True, "set", "nope")]
 check("R7b a write refusal names the first three unreadable directories in python's order",
       native_ and want_[2].count(b", ") == 2 and b"unreadable: " in want_[2], want_)
-native_, want_ = r_served[(False, "resolve", "a \u2014 next: b")]
-check("R7c an ambiguity between names outside ASCII is handed to python",
+native_, want_ = r_served[(False, "resolve", "\u00fcber")]
+check("R7c a bare name outside ASCII is matched by python, whose case folding is the reference",
+      not native_ and want_[0] == 0, want_)
+native_, want_ = r_served[(False, "resolve", "k1")]
+check("R7d an ASCII name that collides with one that only folds to it is python's ambiguity",
       not native_ and want_[2].startswith(b"ambiguous: "), want_)
 check("R8 a hand-off prints nothing and writes nothing first", not any(f.startswith("R8x") for f in fails))
 # the vault root itself cannot be listed

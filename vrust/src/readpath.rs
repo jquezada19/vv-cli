@@ -647,6 +647,13 @@ pub fn resolve(vault: &Path, ref_: &str, op: &str) -> Result<PathBuf, Outcome> {
         }
     }
     let mut want = ref_.strip_suffix(".md").unwrap_or(ref_).to_lowercase();
+    // Names are matched lowercased, and the two engines' Unicode tables are not
+    // the same edition: a letter one of them folds and the other does not
+    // would be a hit here and a miss there. Outside ASCII the match is
+    // python's to make; the typed forms above compare nothing.
+    if !want.is_ascii() {
+        return Err(Outcome::Fallback);
+    }
     let mut w = Notes {
         files: Vec::new(),
         unreadable: Vec::new(),
@@ -721,14 +728,9 @@ pub fn resolve(vault: &Path, ref_: &str, op: &str) -> Result<PathBuf, Outcome> {
         return contained(hits[0]);
     }
     if hits.len() > 1 {
-        // Two names are one name here when they lowercase alike, and the two
-        // engines' Unicode tables are not the same edition: outside ASCII
-        // python judges whether these really collide.
-        if !want.is_ascii()
-            || hits
-                .iter()
-                .any(|h| !stem_lower(h).is_some_and(|s| s.is_ascii()))
-        {
+        // an ASCII name can still collide with one that only FOLDS to it
+        // (the Kelvin sign): python judges whether those two are one name
+        if hits.iter().any(|h| !rel_str(vault, h).is_ascii()) {
             return Err(Outcome::Fallback);
         }
         let rels: Vec<String> = hits.iter().map(|h| rel_str(vault, h)).collect();
