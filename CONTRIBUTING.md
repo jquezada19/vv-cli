@@ -56,6 +56,7 @@ case today: `native` (same bytes, no hand-off), `handoff` (python answers), or
 `known-divergences.jsonl` with a note).
 
 ```
+(cd vrust && cargo build --release)         # both tools run the built binary; build first
 python3 tests/golden/generate.py            # regenerate after a deliberate change
 python3 tests/golden/generate.py --check    # the gate's `golden fresh` line
 python3 tests/test_golden.py                # the gate's `golden replay` line
@@ -63,7 +64,9 @@ python3 tests/test_golden.py                # the gate's `golden replay` line
 
 Porting a case to the native entry is a one-word edit to its record
 (`handoff` → `native`) that the replay then enforces. A diff to a `.jsonl`
-file is a change to what vv prints: review it as one.
+file is a change to what vv prints, exits with, or writes: review it as one.
+An input that crashes the python engine is listed in `ORACLE_CRASHES` in
+`tests/golden/cases.py` rather than frozen as an answer.
 
 ## What a good change looks like
 

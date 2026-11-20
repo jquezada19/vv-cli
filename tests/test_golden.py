@@ -6,8 +6,9 @@ Every record in tests/golden/<command>.jsonl says how its case is served:
 
   native     the binary must give exactly the recorded stdout, stderr, exit
              code and resulting files, without handing off.
-  handoff    the binary must hand off (the sentinel's exit 42 and `HANDOFF`)
-             and must not have touched the vault first. Answering a case this
+  handoff    the binary must hand off cleanly: the sentinel's marker file
+             exists, argv and stdin arrived as given, the binary printed
+             nothing of its own and did not touch the vault first. Answering a case this
              suite expects to be handed off is a failure too: the port moves a
              case to `native` deliberately, in the record.
   divergent  the binary answers, but not with the python engine's bytes. Its
@@ -48,13 +49,15 @@ for name in names:
     with open(os.path.join(GOLDEN, name), encoding="utf-8") as f:
         records = [json.loads(l) for l in f if l.strip()]
     for rec in records:
+        served, cid = rec["served"], rec["id"]
         sb = gen.Sandbox()
         try:
-            got = sb.run([gen.VRUST], rec["argv"], rec["stdin"], VV_PY_ENTRY=gen.SENTINEL)
+            got, handed_off = sb.run_native(rec["argv"], rec["stdin"])
+        except SystemExit as e:
+            check(f"{cid}: a hand-off is clean", False, e)
+            continue
         finally:
             sb.close()
-        handed_off = got["exit"] == 42 and got["stderr"] == "HANDOFF\n"
-        served, cid = rec["served"], rec["id"]
         counts[served] = counts.get(served, 0) + 1
         want = {k: rec[k] for k in ("exit", "stdout", "stderr", "files")}
         if served == "native":
@@ -64,10 +67,10 @@ for name in names:
                     check(f"{cid}: {k} equals the golden", got[k] == want[k], (got[k], want[k]))
         elif served == "handoff":
             check(f"{cid}: handed off", handed_off, got)
-            check(f"{cid}: the vault is untouched before a hand-off", not got["files"], got["files"])
         elif served == "divergent":
             d = divergent.get(cid)
             check(f"{cid}: listed in {gen.DIVERGENCES}", d is not None)
+            check(f"{cid}: a divergence is the binary's own answer, not a hand-off", not handed_off, got)
             if d:
                 check(f"{cid}: the native answer is still the recorded one", got == d["native"], (got, d["native"]))
                 check(f"{cid}: the recorded oracle answer matches the golden", d["oracle"] == want)
@@ -75,8 +78,15 @@ for name in names:
         else:
             check(f"{cid}: served is one of native/handoff/divergent", False, served)
 
-check("every divergence belongs to a golden case", set(divergent) <= {
-    json.loads(l)["id"] for n in names for l in open(os.path.join(GOLDEN, n), encoding="utf-8") if l.strip()})
+all_recs = [json.loads(l) for n in names for l in open(os.path.join(GOLDEN, n), encoding="utf-8") if l.strip()]
+ids = [r["id"] for r in all_recs]
+check("case ids are unique", len(ids) == len(set(ids)))
+check("the divergence file lists exactly the cases marked divergent",
+      set(divergent) == {r["id"] for r in all_recs if r["served"] == "divergent"},
+      (sorted(divergent), sorted(r["id"] for r in all_recs if r["served"] == "divergent")))
+from cases import CASES            # noqa: E402
+check("every case in cases.py has a record, and no record lacks a case",
+      sorted(ids) == sorted(f"{c}/{i}" for c, cs in CASES.items() for i, _a, _s in cs))
 
 total = sum(counts.values())
 print(f"\n{len(fails)} failures" if fails else

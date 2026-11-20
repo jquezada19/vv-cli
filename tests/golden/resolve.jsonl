@@ -1,12 +1,15 @@
 {"argv": ["resolve", "Notes/Beta.md"], "exit": 0, "files": {}, "id": "resolve/path", "served": "native", "stderr": "", "stdin": null, "stdout": "Notes/Beta.md\n"}
 {"argv": ["resolve", "Notes/Beta"], "exit": 0, "files": {}, "id": "resolve/path-no-ext", "served": "native", "stderr": "", "stdin": null, "stdout": "Notes/Beta.md\n"}
-{"argv": ["resolve", "Solo"], "exit": 0, "files": {}, "id": "resolve/bare-name", "served": "native", "stderr": "", "stdin": null, "stdout": "Solo.md\n"}
-{"argv": ["resolve", "solo"], "exit": 0, "files": {}, "id": "resolve/bare-name-case", "served": "native", "stderr": "", "stdin": null, "stdout": "solo.md\n"}
+{"argv": ["resolve", "Solo"], "exit": 0, "files": {}, "id": "resolve/bare-name", "served": "native", "stderr": "", "stdin": null, "stdout": "Area/Solo.md\n"}
+{"argv": ["resolve", "solo"], "exit": 0, "files": {}, "id": "resolve/bare-name-case", "served": "native", "stderr": "", "stdin": null, "stdout": "Area/Solo.md\n"}
 {"argv": ["resolve", "101"], "exit": 0, "files": {}, "id": "resolve/id", "served": "native", "stderr": "", "stdin": null, "stdout": "Work/101 - First ticket.md\n"}
 {"argv": ["resolve", "#101"], "exit": 0, "files": {}, "id": "resolve/hash-id", "served": "handoff", "stderr": "", "stdin": null, "stdout": "Work/101 - First ticket.md\n"}
 {"argv": ["resolve", "303"], "exit": 0, "files": {}, "id": "resolve/exact-basename-beats-id", "served": "native", "stderr": "", "stdin": null, "stdout": "Work/303.md\n"}
 {"argv": ["resolve", "Nope"], "exit": 1, "files": {}, "id": "resolve/not-found", "served": "handoff", "stderr": "not-found: no note matches 'Nope'\n", "stdin": null, "stdout": ""}
-{"argv": ["resolve", "Twin"], "exit": 0, "files": {}, "id": "resolve/ambiguous-name", "served": "native", "stderr": "", "stdin": null, "stdout": "Twin.md\n"}
+{"argv": ["resolve", "Twin"], "exit": 1, "files": {}, "id": "resolve/ambiguous-name", "served": "handoff", "stderr": "ambiguous: Area/Twin.md | Notes/Twin.md — next: vv resolve Area/Twin.md\n", "stdin": null, "stdout": ""}
 {"argv": ["resolve", "202"], "exit": 1, "files": {}, "id": "resolve/ambiguous-id", "served": "handoff", "stderr": "ambiguous: 202 matches 2 notes: Other/202 - Dup two.md | Work/202 - Dup one.md — next: vv resolve 'Other/202 - Dup two.md'\n", "stdin": null, "stdout": ""}
 {"argv": ["resolve", "999"], "exit": 1, "files": {}, "id": "resolve/id-no-candidate", "served": "handoff", "stderr": "not-found: no note matches '999'\n", "stdin": null, "stdout": ""}
 {"argv": ["resolve"], "exit": 1, "files": {}, "id": "resolve/arity-0", "served": "handoff", "stderr": "usage: resolve takes 1 positional args, got 0 — next: vv resolve NAME\n", "stdin": null, "stdout": ""}
+{"argv": ["resolve", "Hub", "x"], "exit": 1, "files": {}, "id": "resolve/arity-2", "served": "handoff", "stderr": "usage: resolve takes 1 positional args, got 2 — next: vv resolve Hub\n", "stdin": null, "stdout": ""}
+{"argv": ["resolve", "../outside.md"], "exit": 1, "files": {}, "id": "resolve/escape", "served": "handoff", "stderr": "escape: path leaves the vault: ../outside.md\n", "stdin": null, "stdout": ""}
+{"argv": ["resolve", "Sollo"], "exit": 1, "files": {}, "id": "resolve/near-miss-suggestion", "served": "handoff", "stderr": "not-found: no note matches 'Sollo'\ndid you mean: Solo\n", "stdin": null, "stdout": ""}

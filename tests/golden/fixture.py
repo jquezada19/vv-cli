@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """The frozen vault every golden case runs against.
 
+Notes addressed by bare name live in folders, never at the vault root: a root
+note is also a typed path, and whether `solo` finds `Solo.md` that way depends
+on the filesystem's case sensitivity.
+
 Dedicated to the goldens: nothing else builds it, so a change to another
 suite's fixture cannot invalidate a checked-in vector. A change HERE changes
 recorded bytes and shows up as a diff to tests/golden/*.jsonl.
@@ -15,8 +19,8 @@ NOTES = {
         "## Today (Tuesday)\n\n- first line\n\n## Today's plan\n\nlater\n\n"
         "## Dup\n\none\n\n## Dup\n\ntwo\n"
     ),
-    "Solo.md": "---\ntype: note\nstatus: draft\n---\n\n# Solo\n\nLinks back to [[Hub]].\n\n## Body\n\nalpha beta gamma\n",
-    "Twin.md": "# Twin at the root\n\nalpha\n",
+    "Area/Solo.md": "---\ntype: note\nstatus: draft\n---\n\n# Solo\n\nLinks back to [[Hub]].\n\n## Body\n\nalpha beta gamma\n",
+    "Area/Twin.md": "# Twin in Area\n\nalpha\n",
     "Notes/Twin.md": "# Twin in Notes\n\nSee [[Hub]].\n",
     "Notes/Beta.md": (
         "---\ntype: note\nstatus: open\ntags:\n  - fixture\n  - beta\nsummary: |\n  a block\n  value\n---\n\n"

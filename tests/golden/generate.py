@@ -10,9 +10,12 @@ environment (nothing inherited), twice:
 
   oracle  `python3 src/vv.py` with VV_ENGINE=python — never through the binary,
           so no recorded answer came from native code.
-  native  the built binary with VV_PY_ENTRY pointed at sentinel_entry.py. Exit
-          42 with `HANDOFF` on stderr means the native entry handed the call
-          off; any other result is its own answer.
+  native  the built binary with VV_PY_ENTRY pointed at sentinel_entry.py,
+          which records what it was handed in a marker file. The marker, not
+          the output, says a hand-off happened; a clean hand-off also forwards
+          the caller's argv and stdin unchanged, prints nothing of its own and
+          leaves the vault alone. Anything else is an error here, never a
+          recorded answer.
 
 `served` is what was OBSERVED: `handoff`, or `native` when the binary's own
 answer equals the oracle's in stdout, stderr, exit code and resulting files. A
@@ -20,7 +23,7 @@ native answer that differs is a pre-existing divergence between the engines: it
 is written to known-divergences.jsonl with both answers, and repairing it is a
 deliberate edit to that file.
 """
-import base64, json, os, re, shutil, subprocess, sys, tempfile
+import base64, hashlib, json, os, re, shutil, subprocess, sys, tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
@@ -32,7 +35,7 @@ TIMEOUT = 120
 
 sys.path.insert(0, HERE)
 import fixture                      # noqa: E402
-from cases import CASES             # noqa: E402
+from cases import CASES, ORACLE_CRASHES   # noqa: E402
 
 
 def field(b):
@@ -48,13 +51,20 @@ def unfield(v):
 
 
 def snapshot(root):
+    """Every file under the vault, dot-directories included (.trash is where a
+    removal lands). A symlink is recorded as its target, never followed."""
     out = {}
     for d, dirs, names in os.walk(root):
-        dirs[:] = sorted(x for x in dirs if not x.startswith("."))
-        for n in sorted(names):
+        dirs.sort()
+        for n in sorted(names + [x for x in dirs if os.path.islink(os.path.join(d, x))]):
             p = os.path.join(d, n)
-            with open(p, "rb") as f:
-                out[os.path.relpath(p, root)] = f.read()
+            rel = os.path.relpath(p, root)
+            if os.path.islink(p):
+                out[rel] = b"symlink -> " + os.fsencode(os.readlink(p))
+            elif os.path.isfile(p):
+                with open(p, "rb") as f:
+                    out[rel] = f.read()
+        dirs[:] = [x for x in dirs if not os.path.islink(os.path.join(d, x))]
     return out
 
 
@@ -79,13 +89,42 @@ class Sandbox:
         return e
 
     def run(self, entry, argv, stdin, **env):
+        # cwd is the sandbox: a relative write lands where it is thrown away
         r = subprocess.run(entry + argv, input=(stdin or "").encode("utf-8"), capture_output=True,
-                           env=self.env(**env), timeout=TIMEOUT)
+                           env=self.env(**env), timeout=TIMEOUT, cwd=self.base)
         sub = lambda b: b.replace(self.vault.encode(), b"{VAULT}")
         after = snapshot(self.vault)
         files = {p: field(after[p]) for p in sorted(after) if self.before.get(p) != after[p]}
         files.update({p: None for p in sorted(self.before) if p not in after})
         return {"exit": r.returncode, "stdout": field(sub(r.stdout)), "stderr": field(sub(r.stderr)), "files": files}
+
+    def run_native(self, argv, stdin):
+        """(result, handoff): the binary's result, and whether it handed off.
+        Raises SystemExit on a hand-off that is not clean."""
+        mark = os.path.join(self.base, "handoff.mark")
+        got = self.run([VRUST], argv, stdin, VV_PY_ENTRY=SENTINEL, VV_GOLDEN_MARK=mark)
+        if not os.path.exists(mark):
+            return got, False
+        seen = [json.loads(l) for l in open(mark, encoding="utf-8")]
+        problems = []
+        if len(seen) != 1:
+            problems.append(f"python was started {len(seen)} times")
+        # the patch hand-off rebuilds argv as `--vault <vault> patch …`; a
+        # caller-side --vault pair is otherwise forwarded as given
+        strip = lambda a: [x for i, x in enumerate(a) if x != "--vault" and (i == 0 or a[i - 1] != "--vault")]
+        if strip(seen[0]["argv"]) != strip(argv):
+            problems.append(f"argv was not forwarded as given: {seen[0]['argv']}")
+        if seen[0]["stdin_sha256"] != hashlib.sha256((stdin or "").encode("utf-8")).hexdigest():
+            problems.append("stdin was not forwarded as given")
+        if os.path.realpath(seen[0]["vault"] or self.vault) != self.vault:
+            problems.append(f"the vault changed on the way: {seen[0]['vault']}")
+        if got["exit"] != 42 or got["stderr"] != "HANDOFF\n" or got["stdout"] != "":
+            problems.append(f"the native entry printed or exited on its own: {got['exit']} {got['stdout']!r} {got['stderr']!r}")
+        if got["files"]:
+            problems.append(f"the vault was changed before the hand-off: {sorted(got['files'])}")
+        if problems:
+            raise SystemExit("FAIL dirty hand-off for " + " ".join(argv) + ": " + "; ".join(problems))
+        return got, True
 
     def close(self):
         shutil.rmtree(self.base, True)
@@ -101,13 +140,15 @@ def resolve_placeholders(argv):
                 r = sb.run([sys.executable, VV], ["outline", note], None, VV_ENGINE="python")
             finally:
                 sb.close()
+            if r["exit"] != 0:
+                raise SystemExit(f"generate: outline {note} failed: {r}")
             rows = [l.split("\t") for l in r["stdout"].splitlines()]
             hit = [c for c in rows if c and (c[0] == sec or (len(c) > 2 and c[2] == sec))]
             if len(hit) != 1:
                 raise SystemExit(f"generate: cannot resolve sha8 of {note} {sec}: {r}")
             _sha_cache[(note, sec)] = hit[0][-1]
         return _sha_cache[(note, sec)]
-    return [re.sub(r"\{sha8 (\S+) ([^}]+)\}", sha8, a) for a in argv]
+    return [re.sub(r"\{sha8 ([^ }]+) ([^}]+)\}", sha8, a) for a in argv]
 
 
 def record(cmd, cid, argv, stdin):
@@ -117,13 +158,15 @@ def record(cmd, cid, argv, stdin):
         oracle = sb.run([sys.executable, VV], argv, stdin, VV_ENGINE="python")
     finally:
         sb.close()
+    if "Traceback (most recent call last)" in str(oracle["stderr"]):
+        raise SystemExit(f"FAIL {cmd}/{cid}: the python engine crashed on {argv} — a traceback is a defect, "
+                         "not an answer to freeze; fix it or drop the case")
     sb = Sandbox()
     try:
-        native = sb.run([VRUST], argv, stdin, VV_PY_ENTRY=SENTINEL)
+        native, handed_off = sb.run_native(argv, stdin)
     finally:
         sb.close()
     rec = {"id": f"{cmd}/{cid}", "argv": argv, "stdin": stdin}
-    handed_off = native["exit"] == 42 and native["stderr"] == "HANDOFF\n" and not native["files"]
     if handed_off:
         return dict(rec, served="handoff", **oracle), None
     if native == oracle:
@@ -160,11 +203,23 @@ def generate():
                 divergent.append(div)
         files[f"{cmd}.jsonl"] = dump(rows)
     files[DIVERGENCES] = dump(divergent)
+    for argv in ORACLE_CRASHES:
+        sb = Sandbox()
+        try:
+            r = sb.run([sys.executable, VV], argv, None, VV_ENGINE="python")
+        finally:
+            sb.close()
+        if "Traceback (most recent call last)" not in str(r["stderr"]):
+            raise SystemExit(f"FAIL {argv} no longer crashes the python engine — next: move it from ORACLE_CRASHES into CASES")
     return files
 
 
 def main():
-    files = generate()
+    try:
+        files = generate()
+    except subprocess.TimeoutExpired as e:
+        print(f"FAIL golden: a case did not finish within {TIMEOUT}s: {e.cmd}")
+        sys.exit(1)
     if "--check" in sys.argv:
         bad = []
         for name, text in files.items():
