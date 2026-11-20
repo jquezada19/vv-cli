@@ -12,8 +12,15 @@ a different non-zero exit, or a success that becomes a refusal, is MAJOR.
 
 ## [Unreleased]
 
-Several entries below turn an exit 0 into a refusal; under the rule above the
-next release is MAJOR unless they are judged defect repairs.
+## [3.3.0] — 2026-11-20
+
+MINOR. No documented exit code moves. Several calls that exited 0 are now
+refused, and each is judged a defect repair, not a surface change: every one
+either wrote something the caller did not ask for or answered a question it
+had not understood (`append NOTE --vault` appended the text `--vault`;
+`--vault /does/not/exist tags` printed `(0 tags)`). The rest of the release
+moves refusals from the python engine to the native entry with their bytes
+and exit codes unchanged, and makes common lookups cheaper.
 
 ### Changed
 
@@ -102,6 +109,10 @@ next release is MAJOR unless they are judged defect repairs.
 
 ### Added
 
+- **A Rust port of `difflib.get_close_matches`** (`vrust/src/difflib.rs`),
+  matched against CPython on 2,571 recorded vectors. Nothing calls it yet: it
+  is groundwork for wording every `not-found:` suggestion natively, and has
+  no effect on this release's behaviour.
 - **Metrics row fields.** `ref` says how the NOTE operand was addressed
   (`path`, `name`, `id`). A row python writes after the native entry declined
   carries `fb: 1`, and its `ms` is measured from the native process start, so

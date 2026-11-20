@@ -189,9 +189,13 @@ Two implementations, one semantics: a std-only Rust binary (the default entry)
 answers the common commands natively, and a stdlib-only Python implementation
 remains the semantic authority — the native path execs it for everything it
 doesn't handle and for any input it is unsure about. The two are held to
-identical output by differential parity suites and to *correct* output by a
-hand-authored expected-vector corpus plus a live-Obsidian oracle, so a shared
-bug can't certify itself.
+identical output by differential parity suites and recorded golden vectors,
+and to *correct* output by a hand-authored expected-vector corpus plus a
+live-Obsidian oracle, so a shared bug can't certify itself.
+
+The native share is growing one slice at a time towards a single engine, with
+python kept as the test oracle. Each slice is proven byte-identical against
+python before it lands; nothing is ported on trust.
 
 ### Entry points
 
@@ -200,10 +204,24 @@ Since 2026-08-27 the default entry is the **native binary** (`vv` on PATH →
 frontmatter/query commands, and the common writes (`set`/`unset`/`append`/
 `appendsec`/`patch`) are answered natively in 3-26 ms; every other command —
 and any input the native path is unsure about — execs `python3 src/vv.py`
-with the original argv, so error text, suggestions, and exit codes are the
-Python implementation's, byte-for-byte. `python3 src/vv.py` remains a fully
-supported entry forever. Parity between the two is pinned by six differential
-suites (~300 checks) in the test gate.
+with the original argv. `python3 src/vv.py` remains a fully supported entry.
+
+Since 3.3.0 the native entry also words the most common refusals itself, in
+python's exact bytes and exit codes, without starting an interpreter:
+
+- a wrong operand count for any native command, and a search with no query;
+- a reference that leaves the vault (`escape:`), names several notes
+  (`ambiguous:`), or cannot be proven unique for a write because a directory
+  cannot be listed (`refused:`);
+- a miss when three or more note names contain the missed one (`not-found:`
+  with its `did you mean:` line).
+
+Everything else is still python's answer, reached by a hand-off that prints
+nothing first: a miss that needs similarity-ranked suggestions, section
+errors, `--jsonl`, per-command `--help`, a bare name outside ASCII (the two
+engines' Unicode tables are different editions), and any malformed global
+flag. A native process that python started never hands the call back, so the
+two engines cannot call each other in a loop.
 
 ### The caches
 
@@ -304,12 +322,24 @@ an expected-vector corpus (independent of both engines), an engine parity suite,
 and an opt-in oracle test (`tests/oracle_obsidian.py`) that diffs `vv backlinks`
 against the running app — clean across 1,400+ sampled note comparisons.
 
-The full gate (`./run_tests.sh`) runs eighteen suites — the originals on BOTH
-python engines, six native-vs-python differential suites (~300 checks), the
-phase-2 cache/patch pins, and three fuzz seeds — over 500 checks in all, with
-seeded property/fuzz invariants (sections must partition every file; crash
-injection at every write index must roll back byte-identically) and a read-only
-verification pass over the real vault.
+The full gate (`./run_tests.sh`) runs fifty suites — the originals on BOTH
+python engines, the native-vs-python differential suites, the cache/patch
+pins, and fuzz seeds — with seeded property/fuzz invariants (sections must
+partition every file; crash injection at every write index must roll back
+byte-identically) and a read-only verification pass over the real vault.
+
+The move to a single engine is measured by three instruments in that gate:
+
+- **Golden vectors** (`tests/golden/`): 214 recorded cases of what python
+  answers, each marked `native` (the binary must give the same bytes with no
+  interpreter started), `handoff` (it must hand the call to python untouched)
+  or a recorded divergence. Both directions are enforced, so porting a case is
+  a one-word edit that the replay then has to earn.
+- **A mutation runner** (`bench/mutate.py`): 54 single-line breakages of the
+  native guards, each of which must turn a named check red. A guard that can
+  be removed with the suite still green is the finding.
+- **Difflib vectors** (`tests/difflib/`): 2,571 answers from CPython's real
+  `difflib`, replayed through the Rust port by `cargo test`.
 
 Fault injection covers two different kinds of failure, because they exercise
 different code. Catchable faults (`VV_FAULT_AFTER`, `VV_FAULT_KIND=exit`) test
@@ -338,8 +368,9 @@ refused — the tool being right and unhelpful at the same time.
   `~/.claude/metrics/vv.jsonl` (best-effort, silent if absent).
 - Two implementations of one semantics is a standing drift risk — accepted
   deliberately and held in check by the differential suites, the expected
-  vectors, and the fallback contract (the native path answers only when sure;
-  python authors every error surface). The maintenance rule that follows: a
+  vectors, and the fallback contract (the native path answers only when sure,
+  and words a refusal itself only where golden vectors prove the bytes are
+  python's). The maintenance rule that follows: a
   semantic change lands twice or not at all, and the gate is what proves the
   twice matched.
 - Patterns adapted from [sqlx](https://github.com/transact-rs/sqlx) (validate
