@@ -109,6 +109,11 @@ and exit codes unchanged, and makes common lookups cheaper.
 
 ### Added
 
+- **`bench/bench.py` measures ripgrep too**, when it is installed, for the
+  search and backlinks rows: it is what most agent harnesses search with.
+  The README's benchmark table is re-measured with it, and the README is
+  reorganised (quick start, an agent section, engine and test detail moved to
+  `docs/architecture.md` and `docs/verification.md`).
 - **A Rust port of `difflib.get_close_matches`** (`vrust/src/difflib.rs`),
   matched against CPython on 2,571 recorded vectors. Nothing calls it yet: it
   is groundwork for wording every `not-found:` suggestion natively, and has

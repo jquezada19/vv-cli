@@ -3,19 +3,20 @@
 [![CI](https://github.com/jquezada19/vv-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/jquezada19/vv-cli/actions/workflows/ci.yml)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 
-`vv` (**Velocity Vault**) reads, writes, and edits an Obsidian vault headlessly,
-built for AI-agent workflows where **every output byte enters the model's
-context**. Output is terse by contract, edits are hash-anchored compare-and-swap,
-multi-file operations are journaled with classified rollback, and link semantics
-are verified against the Obsidian app's own metadata cache — not guessed from the
-docs.
+Use `vv` (**Velocity Vault**) to find a Markdown note, read one heading of it,
+and patch that section against the hash you read. It works directly on the
+vault's files: no running Obsidian app, no plugins. Renames, moves and trashes
+show a plan before they change anything.
 
-Reading one section of a note costs **11× fewer bytes** than opening it. Search
-returns **~1,200× fewer bytes** than `grep`. Flipping one frontmatter field costs
-35 bytes instead of a 16 KB read-modify-write. That is the whole point:
-[the numbers are below](#benchmarks), measured on a real 1,500-note vault.
+It is built for AI agents, where **every byte of output enters the model's
+context**. On a 1,634-note vault, reading one section returned 837 bytes
+instead of the 16 KB note, a search returned 3 KB instead of 1.3 MB of matching
+lines, and setting a frontmatter field returned 35 bytes
+([benchmarks](#benchmarks)).
 
 ## Demo
+
+An illustrative session (ids, sizes and hashes depend on the note):
 
 ```console
 $ vv outline Hub.md
@@ -34,10 +35,13 @@ Every query needs a tenant check before it runs.
 $ printf '## Details\n\nRewritten body.\n' | vv patch Hub.md H2 71a265ae
 patched H2 in Hub.md (61B -> 27B)
 
-$ printf 'again\n' | vv patch Hub.md H2 71a265ae     # someone else moved first
+$ printf 'again\n' | vv patch Hub.md H2 71a265ae     # retrying with the old hash
 stale: H2 is a658c3af, expected 71a265ae — re-outline
 $ echo $?
 3
+
+$ vv set Hub.md status active
+set status=active in Hub.md
 
 $ vv rename Beta.md "Beta Renamed"
 plan d351fd67: rename Beta.md -> Beta Renamed.md
@@ -46,360 +50,265 @@ files to rewrite: 1 (1 link occurrences)
 (dry-run — apply with: --apply, or --apply d351fd67 to bind to THIS plan)
 ```
 
-Read a section, patch it against the hash you read, and every writer refuses if
-the bytes moved underneath you. Refactors show their blast radius before they
-touch anything.
+Read a section, patch it against the hash you read, and the patch is refused
+if the section changed in between. Refactors list the files they will rewrite
+before they touch anything.
+
+## Benchmarks
+
+Median wall time and stdout bytes, for the four things an agent does to a
+vault. Reproduce on your own vault with `python3 bench/bench.py`.
+
+| task | `cat` / `grep` | ripgrep | Obsidian CLI | vv |
+|---|---|---|---|---|
+| read one section of a 16 KB note | 4 ms · 16,281 B (whole note) | — | 6 ms · 16,281 B (whole note) | 11 ms · **837 B** (`outline` + `read`) |
+| search a common word | 944 ms · 1,299,895 B (every matching line) | 89 ms · 1,299,895 B | 327 ms · 2,575,356 B | 107 ms · **3,140 B** (top five, ranked) |
+| set one frontmatter field | 32 ms · 16,282 B (read the note, write it back) | — | — | **13 ms** · **35 B** |
+| what links to this note | 449 ms · 12,195 B (files containing the text) | 82 ms · 12,195 B | **7 ms** · 267 B | 267 ms · 230 B (resolved links) |
+
+Measured 2026-11-20 on vv 3.3.0: 1,634 notes (33 MB of Markdown), Apple M4
+Pro, macOS 27, ripgrep 15.2, Obsidian 1.15, warm caches, median of 9 runs on a
+laptop in normal use, not an idle one. The Obsidian CLI needs the app running
+and answers for the vault the app has open, which here was a superset of the
+benchmarked notes (about twice as many), so its search bytes are not comparable
+with the other columns.
+
+What the table does and does not show:
+
+- **Bytes are the point.** A section read is about 19 times smaller than the
+  note. A search is about 400 times smaller than the matching lines, because
+  it returns five ranked snippets where `grep` and ripgrep return every hit.
+  They are answering different questions; an agent usually wants the first.
+- **vv is not the fastest at anything here.** `cat` wins a whole-file read,
+  ripgrep finds text faster, and the Obsidian CLI wins backlinks outright,
+  since the app holds the link graph in memory. vv's job is to be accurate and
+  cheap in context without the app.
+- **Backlinks pay for safety.** vv opens every note to prove it can read the
+  whole link graph before answering, so its time grows with the number of
+  files in the vault, including files that are not notes.
+- The `grep` and ripgrep backlink rows list files that contain the text
+  `[[Name`. They do not resolve links, so duplicate names, aliases, links
+  inside code fences and comments are all counted wrongly.
 
 ## Install
 
-Grab an archive from the [releases page](https://github.com/jquezada19/vv-cli/releases)
-(macOS arm64/x86_64, Linux x86_64/arm64 — the binary AND the python engine
-travel together; unpacking them apart loses most of the surface):
+Requirements: macOS or Linux, and **Python 3.12 or newer** on `PATH` (standard
+library only, no packages). Building from source also needs Rust (no crates).
 
-```
-tar xzf vv-*-<target>.tar.gz && cd vv-*/
-./vv --vault ~/path/to/YourVault outline "Some Note.md"
-# put it on PATH keeping the layout: ln -s "$PWD/vv" /opt/homebrew/bin/vv
+Download the archive for your platform from the
+[releases page](https://github.com/jquezada19/vv-cli/releases): Apple Silicon
+macOS, or GNU/Linux on x86_64 or arm64. Keep the unpacked directory together;
+the `vv` binary finds its Python half (`src/`) and `VERSION` next to itself.
+
+```console
+tar -xzf vv-3.3.0-aarch64-apple-darwin.tar.gz
+cd vv-3.3.0-aarch64-apple-darwin
+./vv --version
 ```
 
-Or build from a checkout:
+Run `./vv` from there, or symlink it into a directory on your `PATH`. On Intel
+macOS, build from source:
 
-```
+```console
 git clone https://github.com/jquezada19/vv-cli && cd vv-cli
 (cd vrust && cargo build --release)
-ln -s "$PWD/vrust/target/release/vrust" /opt/homebrew/bin/vv   # the native entry
-vv --vault ~/path/to/YourVault outline "Some Note.md"
+ln -s "$PWD/vrust/target/release/vrust" ~/.local/bin/vv
 ```
 
-No Python dependencies; no crates. Skipping the Rust build (or the symlink)
-leaves the pure-Python entry: `python3 src/vv.py ...` — same output on every
-command, held identical by the parity gate, just slower.
+Without the Rust build, `python3 src/vv.py …` is the same CLI, slower.
 
-Set `VV_VAULT` once (`export VV_VAULT=~/path/to/YourVault`) and drop the flag.
+### Quick start
+
+Nothing here writes to your vault:
+
+```console
+export VV_VAULT="/path/to/your/vault"     # or pass --vault PATH on each call
+vv doctor                                  # vault, engine and journal state
+vv search "project" --files                # paths of the best matches
+vv outline "path/from/search.md"           # sections, sizes and hashes
+vv read "path/from/search.md" H1           # one section, by the id outline printed
+vv rename "Some Note" "New Name"           # a dry run: the plan, nothing changed
+```
+
+## Using vv with an AI agent
+
+Paste this into the agent's instructions:
+
+> Use `vv` for the notes vault instead of reading whole files. Find notes with
+> `vv search <terms> --files`. Before editing, run `vv outline NOTE` and
+> `vv read NOTE Hn`. To change a section, send the complete replacement,
+> heading included, on stdin to `vv patch NOTE Hn SHA8`, using the hash `read`
+> printed. For one frontmatter field use `vv set NOTE KEY VALUE`. On exit 3
+> the note changed: read it again and reconcile before retrying. On exit 4 a
+> refactor was interrupted: stop writing and report `vv doctor`. For a rename
+> or move, run it without `--apply`, check the plan, then run it again with
+> `--apply <plan id>`.
+
+What a caller can rely on:
+
+- **Exit codes.** `0` ok. `1` a refusal: usage, a lookup that failed, or
+  findings from `lint --quick --check`. `3` a stale hash or a plan that
+  drifted. `4` a pending refactor journal. `5` a note that is not UTF-8.
+- **Errors go to stderr and start with a kind.** Most carry a runnable next
+  step; a failed lookup may add suggestions:
+
+  ```console
+  $ vv read Hubb H1
+  not-found: no note matches 'Hubb'
+  did you mean: Hub
+  $ vv resolve Twin
+  ambiguous: Area/Twin.md | Notes/Twin.md — next: vv resolve Area/Twin.md
+  $ vv set Hub.md
+  usage: set takes 3 positional args, got 1 — next: vv set Hub.md KEY VALUE
+  ```
+
+- **Default output is the terse form.** `--jsonl` gives JSON Lines from the
+  list commands (`backlinks`, `links`, `orphans`, `deadends`, `unresolved`,
+  `templates`, `changed`, `board`, `tags`, `props`), `search` and
+  `lint --quick`, and most errors as `{"kind","message","next","exit"}`. Not
+  every error is wrapped (a stale `patch` stays plain text), so check the exit
+  code first and parse second.
+- **`--limit N`** caps a list and says so in its trailer (`N of M`).
+- **`vv batch < ops.jsonl`** runs many read operations in one process, and
+  **`vv changed --since <time>`** lists what moved since a timestamp.
 
 ## Commands
 
-`NOTE` is a vault-relative path or a bare name (wikilink-style resolution — a
-failed lookup prints `did you mean:` suggestions), or a bare id: `24995` (quote
-the `#` form: `'#24995'`) names the unique note titled `24995 - …`. The id rule
-is a filename convention, exact and unique or refused — it never fuzzy-matches,
-and it does not change link resolution (`[[24995]]` stays unresolved).
+`NOTE` is a vault-relative path or an unambiguous note name. After exact
+matches, a bare id such as `24995` (quote the `#` form: `'#24995'`) selects the
+one note whose filename starts `24995 - `. Wikilinks do not use the id rule.
+`vv <command> --help` prints usage for any command, and the release archive
+ships a man page (`vv.1`) with the full reference.
 
 ### Read
 
 | command | what it does |
 |---|---|
-| `outline NOTE` | section map: id · level · title · size · sha8 anchor |
-| `read NOTE [SEC \| --section SEC \| --hash SHA8]` | one section — by outline id, heading title / `#Heading` / `(preamble)`, unique title prefix or content sha8; `--hash` reads the token as content only; an ambiguous selector refuses and names the ids. A bare `read NOTE` is a budgeted `show` |
-| `show NOTE [--max-bytes N] [--from SEC]` | budgeted read with a continuation token; `--max-bytes` is a **hard ceiling in UTF-8 bytes**, and a single oversized section is truncated-and-marked rather than emitted whole |
+| `outline NOTE` | section map: id · level · title · size · sha8 |
+| `read NOTE SEC` | one section, by outline id, heading title, a title prefix of three or more characters, or `--hash SHA8`; an ambiguous selector is refused and names the ids |
+| `show NOTE [--max-bytes N] [--from Hn]` | a budgeted read of the whole note (default 4,000 bytes) that says where to resume; `read NOTE` with no section is the same |
 | `head NOTE` · `resolve NAME` | frontmatter only · name → path |
-| `search TERMS [--k N] [--w C]` | ranked full-text: a note **named** for the query outranks mere mentions; a `dir/` term filters by path. Unquoted args are AND-ed terms; a **quoted arg is one phrase** — a zero-hit phrase whose words do co-occur prints a retry-unquoted hint instead of silence |
+| `search TERMS [--k N] [--w C] [--files]` | ranked full text. Arguments are AND-ed; a quoted argument is one phrase; a note named for the query ranks above mentions; a term containing `/` filters by path; `--files` prints paths only |
 
 ### Write
 
 | command | what it does |
 |---|---|
-| `patch NOTE SEC SHA8 <stdin` | replace one section, compare-and-swap on its sha8 — exit 3 = stale, re-outline |
-| `appendsec NOTE SEC TEXT` · `append NOTE [SEC] TEXT` | append inside a section · at end of note, or inside SEC when given |
-| `set NOTE KEY VALUE` · `unset NOTE KEY` | frontmatter field flip, body untouched |
-| `new PATH [--template T] [--KEY VALUE ...]` | create from a vault template |
-| `daily-append TEXT` | append inside today's standup Today section |
+| `patch NOTE SEC SHA8 <stdin` | replace one section if its hash still matches; exit 3 if not |
+| `appendsec NOTE SEC TEXT` · `append NOTE [SEC] TEXT` | append inside a section · at the end of the note |
+| `prepend NOTE TEXT` | insert after the frontmatter |
+| `set NOTE KEY VALUE` · `unset NOTE KEY` | one frontmatter field; the body is untouched |
+| `new PATH [--template T] [--KEY VALUE ...]` | create a note, optionally from a vault template |
+| `daily-append TEXT` | append under `## Today` in the one note under `Standups/` dated today (a convention of the author's vault) |
 
 ### Refactor (link-aware, journaled)
 
 | command | what it does |
 |---|---|
-| `rename NOTE NEWNAME` | dry-run: prints every link that will be rewritten + a **plan digest** |
-| `move NOTE FOLDER` | same, for folder moves; bare-name links are left alone |
-| `... --apply` | execute the plan |
-| `... --apply <digest>` | execute **exactly** the previewed plan — exit 3 if anything drifted since review |
-| (tail rule) | one note per call: after the operands only `--apply [SHA8]` is accepted — an extra positional, an unknown flag, a non-hex plan id, or a flag in an operand slot is a usage error before anything resolves or prints. A bare name or id whose note is a symlink out of the vault is `escape:` |
+| `rename NOTE NEWNAME` | dry run: the files whose links will be rewritten, and a plan id |
+| `move NOTE FOLDER` | the same for a folder move |
+| `trash NOTE` | the same for removal to `.trash/`, listing links that will break |
+| `… --apply [PLAN]` | execute; with the plan id, exit 3 if the plan no longer matches what was reviewed |
+| `impact NOTE` | what a refactor of this note would touch |
 
-### Graph & query
+One note per call. Links in forms vv does not parse (Canvas files, plugin
+syntax, `[x](<file.md>)`) are left as they are, without a warning.
+
+### Graph and query
 
 | command | what it does |
 |---|---|
-| `backlinks NOTE` · `links NOTE` | who links here · where this links |
-| `impact NOTE` | blast radius before a refactor |
-| `orphans [FOLDER]` · `deadends` | nothing links in · nothing links out |
-| `board FOLDER [k=v ...]` | frontmatter table with filters |
-| `tags [--counts]` · `props KEY [FOLDER]` | tag census · one field across notes |
+| `backlinks NOTE` · `links NOTE` | notes that link here · wikilink targets in this note |
+| `orphans [FOLDER]` · `deadends` · `unresolved` | nothing links in · nothing links out · links to no note |
+| `board FOLDER [KEY=VALUE ...]` | frontmatter table with filters |
+| `tags [--counts]` · `props KEY [FOLDER]` | frontmatter tags · notes counted by a field's value |
+| `templates` · `changed --since <epoch\|ISO>` | template names · paths changed since a time |
 
 ### Health
 
 | command | what it does |
 |---|---|
-| `lint [--quick]` | broken links, memory-slug links, table-pipe render breaks (index-served) |
-| `index [--rebuild]` | index status · force a full rebuild |
-| `doctor` | vault / engine / git / journal / metrics status |
-| `doctor --rollback` · `--discard` | resolve a pending journal (restores or drops backups) |
+| `lint --quick [--check]` | broken links, and links whose `\|` breaks a table row; `--check` exits 1 on findings |
+| `index [--rebuild]` | status of the Python engine's index · rebuild it |
+| `doctor` | vault, engine, git, journal and metrics status |
+| `doctor --rollback` · `--discard` | resolve a pending refactor journal |
 
-### Global flags, environment, exit codes
+### Flags and environment
 
 |  |  |
 |---|---|
-| `--vault PATH` / `VV_VAULT` | target vault (flag wins) |
-| `--limit N` | cap any enumerator at N entries; the trailer turns into `(N of M …)` so truncation is never silent. `search` folds it into `--k` |
-| `--jsonl` | opt-in JSON Lines from the enumerators, `search`, and `lint`: `{"v":1,"cmd":…}` first, one record per entry (`path`/`score`/`snippet`, `tag`+`count`, `value`+`count`, `name`+`status`+`type`), `{"total":N,"shown":K}` last; errors become `{"kind","message","next","exit"}` on stderr. Measured 1.05–2.5× the bytes of the default output on a real vault — which is why it is opt-in and the terse forms stay the default |
-| `lint --quick --check` | exit 1 when there are findings — the CI form |
-| `VV_ENGINE=rust\|python` | force an engine — the test gate runs both |
-| `VV_NO_INDEX=1` / `VV_INDEX_ROOT` | disable the index · relocate it (tests) |
-| exit `0 · 1 · 3 · 4 · 5` | ok · usage/not-found · stale hash or plan · dirty journal · not UTF-8 |
-| errors | grep-stable: `kind: message — next: <command>` on one line (plus a `did you mean:` line after a name miss, and a `warning:` line when a directory in the vault is unreadable); control characters in a token are escaped, and the `next` step never comes from a token |
-| `vv <cmd> --help` | per-command usage + summary, ahead of arity checks — never needs real operands to answer |
-
-## Why not just read the files?
-
-Measured before building: agents reading whole notes to change one line burned
-~49% of their read bytes on edit-enablement alone. Section-addressed reads + CAS
-patches cut per-edit context cost by 60–91%. And a vault is not plain text —
-wikilinks resolve through duplicate-basename rules, escaped pipes, HTML comments,
-and fence masking that `grep` silently gets wrong (see *Correctness*, below).
-
-## Benchmarks
-
-Why use this over `grep`/`cat` or the official `obsidian` CLI? Measured on a real
-1,500-note vault (macOS, Apple Silicon, median of 5 runs; reproduce with
-`python3 bench/bench.py` — re-measured 2026-08-27 through the DEFAULT (native)
-entry, after the full-Rust rewrite; `VV_BENCH_ENTRY=python` benches the python
-entry instead):
-
-| task | shell (grep/cat) | obsidian CLI | vv |
-|---|---|---|---|
-| read ONE section of a note | 3 ms · 16,125 B (whole file) | 4 ms · 16,125 B (whole file) | 10 ms · **1,442 B** |
-| search a common term | 5,857 ms · 3,505,090 B | 123 ms · 299,519 B | **36 ms** · **2,993 B** |
-| flip one frontmatter field | 24 ms · 16,126 B round-trip | n/a headless-only | **6 ms** · **35 B** |
-| backlinks of a hub note | 2,299 ms · 107,037 B | **5 ms** · 252 B | 24 ms · 266 B |
-
-The column that matters for an agent is **bytes**: that's the context (token)
-bill, paid on every operation, every session. Reading one section costs **11×
-fewer bytes** than opening the note; search returns ~1,200× fewer bytes than
-grep and ~100× fewer than the obsidian CLI at comparable latency; flipping a
-frontmatter field costs 35 bytes against a 16 KB read-modify-write.
-
-Honest caveats: `cat` still edges vv on a bare single-file read (3 vs 10 ms —
-the residue is vv's resolve + section parse, no longer interpreter startup),
-and the obsidian CLI still wins backlinks outright — the app holds a live
-in-memory cache and its CLI is a 133 KB socket shim into it. vv's job is to be
-*accurate and cheap in context* without needing the app open at all.
-
-## How it works
-
-Two implementations, one semantics: a std-only Rust binary (the default entry)
-answers the common commands natively, and a stdlib-only Python implementation
-remains the semantic authority — the native path execs it for everything it
-doesn't handle and for any input it is unsure about. The two are held to
-identical output by differential parity suites and recorded golden vectors,
-and to *correct* output by a hand-authored expected-vector corpus plus a
-live-Obsidian oracle, so a shared bug can't certify itself.
-
-The native share is growing one slice at a time towards a single engine, with
-python kept as the test oracle. Each slice is proven byte-identical against
-python before it lands; nothing is ported on trust.
-
-### Entry points
-
-Since 2026-08-27 the default entry is the **native binary** (`vv` on PATH →
-`vrust/target/release/vrust`): the four read commands, all graph commands, the
-frontmatter/query commands, and the common writes (`set`/`unset`/`append`/
-`appendsec`/`patch`) are answered natively in 3-26 ms; every other command —
-and any input the native path is unsure about — execs `python3 src/vv.py`
-with the original argv. `python3 src/vv.py` remains a fully supported entry.
-
-Since 3.3.0 the native entry also words the most common refusals itself, in
-python's exact bytes and exit codes, without starting an interpreter:
-
-- a wrong operand count for any native command, and a search with no query;
-- a reference that leaves the vault (`escape:`), names several notes
-  (`ambiguous:`), or cannot be proven unique for a write because a directory
-  cannot be listed (`refused:`);
-- a miss when three or more note names contain the missed one (`not-found:`
-  with its `did you mean:` line).
-
-Everything else is still python's answer, reached by a hand-off that prints
-nothing first: a miss that needs similarity-ranked suggestions, section
-errors, `--jsonl`, per-command `--help`, a bare name outside ASCII (the two
-engines' Unicode tables are different editions), and any malformed global
-flag. A native process that python started never hands the call back, so the
-two engines cannot call each other in a loop.
-
-### The caches
-
-Each entry keeps its own derived, disposable cache under `~/.cache/vv/index/`
-— they never read or write each other's, because two writers on one cache is
-how caches lie. The **native entry** keeps a TSV link cache (`.vvidx`) behind
-`backlinks`/`orphans`/`deadends`; the **python entry** keeps a SQLite index
-behind its graph and frontmatter commands and `lint --quick`. Both follow the
-same freshness contract, described here in the SQLite index's terms.
-
-The `.vvidx` cache additionally carries an **integrity footer** (body length +
-checksum), because the freshness contract alone is not enough to make it safe.
-Per-file `(mtime, size, ino)` equality proves each surviving record still
-describes its file — it cannot prove that record's own link rows survived a
-crash, so a record-aligned partial write would pass every structural check and
-silently serve *missing links*. The footer makes that state detectable, which is
-what lets the write skip `fsync` (a crash can lose the newest cache; it cannot
-produce one that lies). Both halves are pinned by `tests/test_cache_integrity.py`
-and were confirmed by disabling each and watching the suite fail. Format,
-reproduction, and the measured case against backing this with SQLite instead:
-[docs/cache-format.md](docs/cache-format.md).
-
-The python entry's index is a **persistent SQLite cache** under
-`~/.cache/vv/index/`, never inside the vault. Freshness is per-invocation, not
-per-interval: every command stat-walks the vault (no file reads, ~10 ms), diffs
-`(mtime_ns, size, inode)` per file by **equality** against the DB, and re-parses
-only changed files — so a just-edited note is reflected on the very next
-command, with no daemon and no file watcher. Git's "racily clean" rule
-(re-hash anything whose mtime ties the index's own commit stamp) closes the
-same-tick rewrite hole. Raw link targets are stored, never resolved
-destinations — bare-link winners depend on the current duplicate-basename
-population, so resolution happens at query time.
-
-The index is an accelerator, not an authority: on any doubt (corruption, torn
-read, version mismatch) vv falls back to the live scan and the DB is deleted
-and rebuilt — never repaired, never served partially. Byte-parity between the
-indexed and live paths is regression-tested on every accelerated command.
-
-| | before | after |
-|---|--:|--:|
-| backlinks | 242 ms | 77 ms |
-| orphans | 254 ms | 83 ms |
-| impact | 260 ms | 101 ms |
-| tags | 176 ms | 64 ms |
-| `lint --quick` | 1,766 ms | 87 ms |
-| search (parallel Rust scan, not the index) | 153 ms | 99 ms |
-
-(The table above is the python entry's own before/after from 2026-08-27, kept
-as the dated record; the native entry is faster still — see *Benchmarks*.)
-
-`vv index` shows status; `vv index --rebuild` forces a rebuild; `VV_NO_INDEX=1`
-disables the SQLite index (`bench/index_bench.py` measured the before/after).
-The python entry's remaining floor is CPython startup, ~22 ms — which is why
-the native binary became the default entry; the `.vvidx` cache self-heals the
-same way (any doubt → live scan + rebuild, delete-don't-repair).
+| `--vault PATH` / `VV_VAULT` | the vault (the flag wins) |
+| `--limit N` · `--jsonl` | cap a list · JSON Lines output (see above) |
+| `VV_NO_INDEX=1` / `VV_INDEX_ROOT` | disable the derived caches · put them somewhere else (default `~/.cache/vv/index/`) |
+| `VV_NO_METRICS=1` | do not append a timing row per call to `~/.claude/metrics/vv.jsonl` (written only when that directory exists) |
+| `VV_PYTHON` / `VV_PY_ENTRY` | the interpreter and script the native entry hands off to |
+| `--version` · `--help` · `--generate man\|complete-bash\|complete-zsh\|complete-fish` | |
 
 ## Safety model
 
-- **Containment** — every read and write path, including rename/move
-  destinations, resolves through a realpath check that refuses to leave the vault.
-  Known residual: a symlinked `.md` *file* inside a legitimately contained folder
-  is still read by every folder-scoped enumerator — `board`, `props`, `orphans`
-  — (a symlinked *directory* is never descended).
-- **CAS on every writer** — section patches carry a sha8 of the section they replace, and
-  `patch` *also* captures the whole file's `(mtime_ns, size)` signature at read like every
-  other writer, alongside its sha8; `set`/`unset`/`append`/`appendsec`/`daily-append`
-  capture that same `(mtime_ns, size)`
-  signature at read and refuse with exit 3 if the file changed underneath. Obsidian is
-  a second writer whenever the app is open, so this is a live case, not a hypothetical.
-  One documented deviation under the native entry: a CAS conflict there falls back to
-  python, which re-reads the latest bytes and applies — no update is ever lost, but
-  during an active race the exit-3 warning is replaced by a clean retry;
-  rename/move dry-runs print a plan digest over the note's own bytes and every affected file's bytes, and
-  `--apply <digest>` refuses to execute a plan that drifted since review.
-- **Journaled refactors, recoverable after a HARD crash** — rename/move backs up
-  every file (sha256-manifested, vault-scoped) before writing, and the journal
-  also persists the rename endpoints, the transaction phase, and a per-file hash
-  of what this process wrote — each written before the step it describes, the
-  manifest replaced atomically with `fsync`. So recovery works whether the
-  process caught the failure or was killed outright: a kill between the rename
-  and the commit no longer leaves the note at both ends. Rollback *classifies*
-  each file first — bytes that are neither the original nor vv's own write belong
-  to another writer and are never clobbered, including an edit made **after** the
-  crash. A leftover journal blocks all writes (exit 4) until `doctor --rollback`
-  or `doctor --discard`.
-- **Line endings & encoding** — CRLF/LF, BOM, and EOF-newline are preserved
-  byte-for-byte. Non-UTF-8 files are refused, never mangled.
+- **Stale writes are refused.** `patch` checks the hash of the section you
+  read. `set`, `unset`, `append`, `appendsec` and `prepend` check the file's
+  size and modification time between reading and replacing it, and exit 3 if
+  it changed. Obsidian is a second writer whenever the app is open, so this
+  happens in practice. The check and the replace are separate steps and
+  writers are not serialized: this catches most concurrent edits, not all.
+  After exit 3, read again before retrying.
+- **Refactors are previewed, bound and journaled.** `rename`, `move` and
+  `trash` print a plan first. `--apply <plan id>` refuses if the note or any
+  file to be rewritten changed since the preview. Every file is backed up
+  before it is rewritten, and an interrupted run leaves a journal that blocks
+  further writes (exit 4) until `vv doctor --rollback` restores it or
+  `--discard` drops it. Recovery is tested by killing the process mid-run.
+- **Paths stay in the vault.** A note reference or a rename or move
+  destination that resolves outside the vault, including through a symlink,
+  is refused with `escape:`. Files vv discovers by walking (search, link
+  scans, templates) are not all checked this way: use vv on a vault whose
+  contents you trust.
+- **Untouched bytes stay untouched.** Edits keep line endings, a BOM and
+  everything outside the span they change. A note that is not UTF-8 is refused
+  by reads and edits, never rewritten.
 
-## Correctness
+## How it works
 
-Link semantics were **probed against Obsidian's `metadataCache`** on a live
-vault rather than assumed: duplicate basenames resolve same-folder-first then
-shortest-path; `[[Note\|alias]]` table escapes; one trailing backslash consumed
-per boundary; links inside `<!-- -->` are inert while `%%` comments stay real;
-an open comment owns fence markers; a backtick fence's info string may not
-contain backticks; aliases may contain `]`. Each probe is pinned three ways:
-an expected-vector corpus (independent of both engines), an engine parity suite,
-and an opt-in oracle test (`tests/oracle_obsidian.py`) that diffs `vv backlinks`
-against the running app — clean across 1,400+ sampled note comparisons.
+vv is a Rust binary with no dependencies, paired with a Python implementation
+that uses only the standard library. The binary answers the common commands
+itself (`outline`, section `read`, `show`, `head`, `resolve`, `search`,
+`links`, `backlinks`, `orphans`, `deadends`, `board`, `tags`, `props`, `set`,
+`unset`, `append`, `appendsec`, `patch`) and hands every other call, and any
+input it is unsure about, to Python with the original arguments. Both implement
+one CLI; differential tests and recorded golden vectors compare their output,
+exit codes and file changes, and the three known differences are recorded in
+the repository.
 
-The full gate (`./run_tests.sh`) runs fifty suites — the originals on BOTH
-python engines, the native-vs-python differential suites, the cache/patch
-pins, and fuzz seeds — with seeded property/fuzz invariants (sections must
-partition every file; crash injection at every write index must roll back
-byte-identically) and a read-only verification pass over the real vault.
+Link resolution follows Obsidian's rules (duplicate names, aliases, escaped
+pipes in tables, links inside comments and code fences), checked against the
+app's own metadata cache where a rule was unclear.
 
-The move to a single engine is measured by three instruments in that gate:
+Derived caches live under `~/.cache/vv/index/`, outside the vault. They are
+checked against file metadata on each call and rebuilt when in doubt; there is
+no daemon and no file watcher.
 
-- **Golden vectors** (`tests/golden/`): 214 recorded cases of what python
-  answers, each marked `native` (the binary must give the same bytes with no
-  interpreter started), `handoff` (it must hand the call to python untouched)
-  or a recorded divergence. Both directions are enforced, so porting a case is
-  a one-word edit that the replay then has to earn.
-- **A mutation runner** (`bench/mutate.py`): 54 single-line breakages of the
-  native guards, each of which must turn a named check red. A guard that can
-  be removed with the suite still green is the finding.
-- **Difflib vectors** (`tests/difflib/`): 2,571 answers from CPython's real
-  `difflib`, replayed through the Rust port by `cargo test`.
-
-Fault injection covers two different kinds of failure, because they exercise
-different code. Catchable faults (`VV_FAULT_AFTER`, `VV_FAULT_KIND=exit`) test
-the in-process handler. `VV_FAULT_KILL_AFTER_RENAME` uses `os._exit` to bypass
-handlers, `finally` blocks and `atexit` entirely — the only way to reach the
-crash-recovery path, which every catchable injector had been quietly tidying up
-before it could run.
-
-### Replaying real usage
-
-`bench/vault_ops_replay.py` replays every vault operation the last N sessions
-actually performed — 586 from 50 sessions on its first run — against the current
-code. Reads run against the live vault; **writes run against a disposable copy**,
-so a replayed `set`/`patch`/`rename` can never touch a real note. It separates a
-legitimate refusal from a crash, ephemeral test fixtures from real notes, and a
-relocated note from a lost one.
-
-Unit tests cover what you thought to test; this covers what you actually did. It
-is what surfaced the section-addressing gap above: across 50 sessions, callers
-guessed section addressing wrong four distinct ways, and every one was correctly
-refused — the tool being right and unhelpful at the same time.
-
-## Design notes
-
-- Output bytes are the cost function; every op logs `{op, ms, out_bytes, exit, kind, cf_bytes, ref, fb}` to
-  `~/.claude/metrics/vv.jsonl` (best-effort, silent if absent).
-- Two implementations of one semantics is a standing drift risk — accepted
-  deliberately and held in check by the differential suites, the expected
-  vectors, and the fallback contract (the native path answers only when sure,
-  and words a refusal itself only where golden vectors prove the bytes are
-  python's). The maintenance rule that follows: a
-  semantic change lands twice or not at all, and the gate is what proves the
-  twice matched.
-- Patterns adapted from [sqlx](https://github.com/transact-rs/sqlx) (validate
-  against the authoritative engine; dirty-state gates; checksummed bookkeeping;
-  per-backend test matrices) and rustdoc's search internals (tiered matching,
-  did-you-mean suggestions, expected-result test harnesses).
+More: [engines and caches](https://github.com/jquezada19/vv-cli/blob/main/docs/architecture.md) ·
+[cache format](https://github.com/jquezada19/vv-cli/blob/main/docs/cache-format.md) · [how it is tested](https://github.com/jquezada19/vv-cli/blob/main/docs/verification.md).
 
 ## Known limits
 
-Setext (`===`-underlined) headings are not sections; `.canvas` and plugin link
-formats are refused rather than guessed; angle-bracket markdown links
-(`[x](<file.md>)`) are not rewritten by rename (documented, not silent).
-
-The frontmatter reader is **YAML-shaped, not YAML**. It handles plain scalars,
-quoted values, flow lists (`[a, b]`) and dash lists; it does *not* interpret
-block scalars (`|`, `>`), nested maps, or anchors, and it keeps surrounding
-quotes verbatim. Probed against Obsidian's own parser across 16 cases: those
-divergences are values we mis-*read*, not ones Obsidian rejects — with one
-exception that matters, an unquoted `: ` in a value, which makes Obsidian reject
-the whole block and silently drop the note from every Bases view. `set` quotes
-that case on write, and the vault linter flags any pre-existing instance.
+- Sections are ATX headings (`#` to `######`). Setext (underlined) headings are
+  not sections.
+- Frontmatter is read as simple one-line `key: value` fields. Inline lists are
+  returned as text; block scalars, nested maps and multi-line lists are not
+  interpreted. `set` quotes a value that YAML would misread, such as `a: b`.
+- Two engines is a standing risk of drift. A behaviour change lands in both or
+  not at all, and the gate is what shows the two still match.
+- Timing grows with the number of files under the vault, not only notes.
 
 ## Contributing
 
 `vv` keeps two implementations of one semantics, so a semantic change lands
-twice or not at all — see [CONTRIBUTING.md](CONTRIBUTING.md) for the gate, how
+twice or not at all — see [CONTRIBUTING.md](https://github.com/jquezada19/vv-cli/blob/main/CONTRIBUTING.md) for the gate, how
 to run it against your own vault, and what a good change looks like. Bugs and
-proposals go through the [issue templates](.github/ISSUE_TEMPLATE); security
-issues go [privately](SECURITY.md).
+proposals go through the [issue tracker](https://github.com/jquezada19/vv-cli/issues); security
+issues go [privately](https://github.com/jquezada19/vv-cli/blob/main/SECURITY.md).
 
 ## License
 
