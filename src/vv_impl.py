@@ -663,16 +663,19 @@ def _fm_parts(text):
     bom, eol1 (after the opening ---), fm_lines (split on \\n, elements keep
     their \\r), eol2 (before the closing ---), tail (after the closing ---),
     body. _fm_join(*parts) == text for any note that has frontmatter."""
+    # An EMPTY block (`---` directly followed by an exact `---` line) is
+    # frontmatter with no lines: fm_lines == [] and eol2 == "", so _fm_join
+    # still reproduces the text and a writer inserts into the block instead of
+    # stacking a second one on top of it. Checked FIRST: split_fm_full would
+    # run on to a later `---` in the body and call everything between them
+    # frontmatter.
+    bom = BOM if text.startswith(BOM) else ""
+    m = re.match(r"---(\r?\n)---(\r?\n|\Z)", text[len(bom):])
+    if m:
+        return bom, m.group(1), [], "", m.group(2), text[len(bom) + m.end():]
     fm, body, tail, bom = split_fm_full(text)
     if fm is None:
-        # an EMPTY block (`---` directly followed by an exact `---` line) is
-        # frontmatter with no lines: fm_lines == [] and eol2 == "", so
-        # _fm_join still reproduces the text and a writer inserts into the
-        # block instead of stacking a second one on top of it
-        m = re.match(r"---(\r?\n)---(\r?\n|\Z)", text[len(bom):])
-        if not m:
-            return None
-        return bom, m.group(1), [], "", m.group(2), text[len(bom) + m.end():]
+        return None
     head = text[:len(text) - len(body)]          # bom + --- + eol1 + fm + eol2 + --- + tail
     after_open = head[len(bom) + 3:]
     eol1 = "\r\n" if after_open.startswith("\r\n") else "\n"
@@ -875,7 +878,7 @@ def cmd_patch(ref, sid, expect):
     _sig = file_sig(fp)
     lines, secs = parse(read_raw(fp))
     s = find_sec(lines, secs, sid, ref)
-    if s["id"] == "H0" and s["end"] > 0 and lines and lines[0].lstrip(BOM).rstrip("\r") == "---":
+    if s["id"] == "H0" and s["end"] > 0 and fm_bounds(lines) > 0:
         die("refused: H0 contains frontmatter", nxt="vv set/unset (patch would rewrite YAML as body)")
     cur = sec_text(lines, s)
     if sha8(cur) != expect:
@@ -1191,25 +1194,22 @@ def cmd_new(*args):
             die(f"ambiguous: template '{template}' matches {names}", nxt="vv templates")
         content = read_raw(hits[0])
     # a property is a line of the FRONTMATTER: matching the whole template let
-    # `--status done` rewrite a body line that happened to start `status:`
-    parts = _fm_parts(content)
-    if parts is None:
-        if kv:
-            fmb = "\n".join(f"{k}: {v}" for k, v in kv.items())
-            content = f"---\n{fmb}\n---\n" + content
-    else:
+    # `--status done` rewrite a body line that happened to start `status:`.
+    # One key at a time against the current text, so a line an earlier VALUE
+    # introduced is visible to a later key.
+    for k, v in kv.items():
+        parts = _fm_parts(content)
+        if parts is None:
+            content = f"---\n{k}: {v}\n---\n" + content
+            continue
         bom, eol1, fm_lines, eol2, tail, body = parts
-        missing = []
-        for k, v in kv.items():
-            pat = re.compile(rf"^{re.escape(k)}:")
-            hit = [i for i, l in enumerate(fm_lines) if pat.match(l)]
-            if hit:
-                i = hit[0]
-                fm_lines[i] = f"{k}: {v}" + ("\r" if fm_lines[i].endswith("\r") else "")
-            else:
-                missing.append(f"{k}: {v}")
-        if missing:
-            fm_lines, eol2 = _fm_add(fm_lines, eol1, eol2, missing)
+        pat = re.compile(rf"^{re.escape(k)}:")
+        hit = [i for i, l in enumerate(fm_lines) if pat.match(l)]
+        if hit:
+            i = hit[0]
+            fm_lines[i] = f"{k}: {v}" + ("\r" if fm_lines[i].endswith("\r") else "")
+        else:
+            fm_lines, eol2 = _fm_add(fm_lines, eol1, eol2, [f"{k}: {v}"])
         content = _fm_join(bom, eol1, fm_lines, eol2, tail, body)
     atomic_write(fp, content)
     out(f"created {rel(fp)}")
@@ -1513,7 +1513,9 @@ def _parse_search_args(args):
     for a in it:
         if a in ("--k", "--w"):
             v = next(it, None)
-            if v is None or not v.isascii() or not v.isdigit():
+            # one spelling both engines parse alike: an optional `+`, then at
+            # most 18 ASCII digits (fits the native integer; no big-int path)
+            if v is None or not re.fullmatch(r"\+?[0-9]{1,18}", v):
                 die(f"usage: search {a} takes a non-negative integer, got {_q(v, 'N') if v is not None else 'nothing'}",
                     nxt="vv search --help")
             if a == "--k": k = int(v)
@@ -2756,54 +2758,6 @@ def _rewrite_links(text, source_fp, new_rel_noext, rename_base, linking_fp=None)
         lines[i] = l
     return "\n".join(lines), changed
 
-def _rewrite_outgoing(text, old_dir, new_dir, new_fp):
-    """Re-relativise the MOVED note's own relative markdown links for its new
-    folder. Returns (new_text, [(old_target, new_target), ...]).
-
-    A relative `[x](./B.md)` is anchored at the linking note's folder, so a
-    folder change breaks it unless it is rewritten from the destination. Only
-    links that resolve today are touched: an explicit `./` or `../` target, or
-    a plain one that does not resolve from the vault root but does from the
-    note's folder. A target that is the note itself (already rewritten for the
-    new name, relative to the old folder) is re-anchored too. Same masking as
-    _rewrite_links: fenced lines, inline code and HTML comments are inert."""
-    import urllib.parse
-    lines, fenced, cmask = masked_lines(text)
-    pairs = []
-    for i, l in enumerate(lines):
-        if i in fenced:
-            continue
-        spans = code_spans(l) + cmask.get(i, [])
-        repls = []
-        for m in MDLINK_RE.finditer(l):
-            a2, b2 = m.start(2), m.end(2)
-            if any(a <= m.start() < b or (a < b2 and a2 < b) for a, b in spans):
-                continue
-            raw = m.group(2)
-            dec = urllib.parse.unquote(raw)
-            if os.path.isabs(dec):
-                continue
-            cand = os.path.normpath(os.path.join(old_dir, dec))
-            explicit = dec.startswith("./") or dec.startswith("../")
-            if cand != new_fp:
-                if not os.path.isfile(cand):
-                    continue
-                if not explicit and os.path.isfile(os.path.normpath(os.path.join(VAULT, dec))):
-                    continue                      # vault-root form: unaffected by the move
-            newrel = os.path.relpath(cand, new_dir)
-            if dec.startswith("./") and not newrel.startswith("."):
-                newrel = "./" + newrel
-            # keep the author's unencoded style unless the new path needs encoding
-            plain = raw == dec and not re.search(r"[\s()%]", newrel)
-            new = newrel if plain else urllib.parse.quote(newrel)
-            if new != raw:
-                repls.append((a2, b2, new))
-                pairs.append((raw, new))
-        for a, b, r in sorted(repls, reverse=True):
-            l = l[:a] + r + l[b:]
-        lines[i] = l
-    return "\n".join(lines), pairs
-
 _RELOCATE = {"move", "rename", "trash"}   # commands whose *args tail is flags-only
 
 def _file_sha256(fp):
@@ -2886,25 +2840,10 @@ def _do_relocate(ref, dest_rel_noext, apply_, opname, expect_plan=None):
             _read_strict(p)
         except UnicodeDecodeError as e:
             die(f"utf8: {rel(p)} links to {src_rel} but is not valid UTF-8 ({e.reason} at byte {e.start}) — vv only edits UTF-8 notes", 5)
-    # a folder change re-anchors the moved note's own relative markdown links
-    old_dir, new_dir = os.path.dirname(fp), os.path.dirname(new_fp)
-    def _source_plan():
-        """(text the source will hold after every rewrite, outgoing pairs)."""
-        try:
-            text = _read_strict(fp)
-        except UnicodeDecodeError:
-            return None, []          # not ours to edit; the move itself stays legal
-        if fp in hits:
-            text, _n = _rewrite_links(text, fp, dest_rel_noext, rename_base, linking_fp=fp)
-        if old_dir == new_dir:
-            return text, []
-        return _rewrite_outgoing(text, old_dir, new_dir, new_fp)
-    _src_text, outgoing = _source_plan()
     # plan digest: operation + destination + every affected file's byte hash.
     # `--apply <digest>` then executes exactly the previewed blast radius or
     # exits stale — an edit or new link between preview and apply changes it.
     canon = [opname, src_rel, dest_rel_noext, "src:" + _file_sha256(fp)]
-    canon += [f"out:{a}->{b}" for a, b in outgoing]
     for p in sorted(hits, key=rel):
         with open(p, "rb") as f:
             canon.append(f"{rel(p)}:{hits[p]}:{hashlib.sha256(f.read()).hexdigest()}")
@@ -2913,8 +2852,6 @@ def _do_relocate(ref, dest_rel_noext, apply_, opname, expect_plan=None):
     out(f"files to rewrite: {len(hits)} ({sum(hits.values())} link occurrences)")
     for p, n in sorted(hits.items()):
         out(f"  {n}\t{rel(p)}")
-    if outgoing:
-        out(f"outgoing relative links to re-anchor: {len(outgoing)}")
     if not apply_:
         out(f"(dry-run — apply with: --apply, or --apply {plan_id} to bind to THIS plan)")
         return
@@ -2937,8 +2874,6 @@ def _do_relocate(ref, dest_rel_noext, apply_, opname, expect_plan=None):
             if changed != hits[p]:
                 raise RuntimeError(f"span mismatch in {rel(p)}: planned {hits[p]}, rewrote {changed}")
             results[p] = new_text
-        if outgoing:
-            results[fp] = _src_text
         fault_after = int(os.environ.get("VV_FAULT_AFTER", "-1"))
         # VV_FAULT_KIND=exit injects SystemExit instead — pins the BaseException
         # rollback path (a real read_raw exit-5 mid-apply takes it too)
@@ -2986,10 +2921,6 @@ def _do_relocate(ref, dest_rel_noext, apply_, opname, expect_plan=None):
                 t = t[:-3] if t.endswith(".md") else t
                 if kind == "wiki" and (t == old_rel_noext or (rename_base and t == old_base)):
                     stale += 1
-        import urllib.parse as _up
-        for _old, _new in outgoing:
-            if not os.path.isfile(os.path.normpath(os.path.join(new_dir, _up.unquote(_new)))):
-                stale += 1
         if stale:
             raise RuntimeError(f"verification failed: {stale} stale links remain")
         _journal_done(jdir)

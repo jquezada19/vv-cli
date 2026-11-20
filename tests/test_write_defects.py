@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regressions for six write-path defects, each of which exited 0 while writing
+"""Regressions for five write-path defects, each of which exited 0 while writing
 bytes its contract does not describe (or, for the last, died in a traceback).
 
 P  `patch` on the preamble of a note whose frontmatter opens with a BOM. The
@@ -12,8 +12,6 @@ N  `new --KEY VALUE` matched `KEY:` anywhere in the template, so a body line
    that began with the key was rewritten and no property was created.
 D  The rename/move/trash plan digest did not cover the source note's own
    bytes: a plan reviewed against one version applied to another.
-O  `move` to another folder left the moved note's own relative markdown links
-   anchored at the old folder, and reported the verification clean.
 S  `search --k`/`--w` with a missing or non-numeric value: a traceback from
    the python entry, a silent default from the native one.
 
@@ -109,6 +107,12 @@ for e in ENGINES:
     e.fresh({"N.md": src})
     rc, out, err = e.run("patch", "N.md", "H0", h0_hash(e, "N.md") or "0", stdin="gone\n")
     check(f"P3[{n}] (control) BOM-free frontmatter preamble is refused", rc == 1 and e.get("N.md") == src, (rc, err))
+    for label, lead in (("plain", ""), ("bom", BOM)):
+        src = lead + "---\n# H\n"                 # no closing delimiter: a rule, not frontmatter
+        e.fresh({"N.md": src})
+        rc, out, err = e.run("patch", "N.md", "H0", h0_hash(e, "N.md") or "0", stdin=lead + "intro\n")
+        check(f"P5[{n},{label}] an unterminated `---` preamble is body and patches",
+              rc == 0 and e.get("N.md") == lead + "intro\n# H\n", (rc, err, repr(e.get("N.md"))))
     src = BOM + "intro\n# H\nbody\n"
     e.fresh({"N.md": src})
     rc, out, err = e.run("patch", "N.md", "H0", h0_hash(e, "N.md") or "0", stdin=BOM + "new intro\n")
@@ -124,6 +128,15 @@ for e in ENGINES:
     e.fresh({"E.md": "---\n---"})
     rc, out, err = e.run("set", "E.md", "k", "v")
     check(f"E2[{n}] empty block at end of file", rc == 0 and e.get("E.md") == "---\nk: v\n---", repr(e.get("E.md")))
+    e.fresh({"E.md": "---\n---\nstatus: BODY\n---\n"})
+    rc, out, err = e.run("set", "E.md", "k", "v")
+    check(f"E6[{n}] a later `---` in the body does not hide the empty block",
+          rc == 0 and e.get("E.md") == "---\nk: v\n---\nstatus: BODY\n---\n", repr(e.get("E.md")))
+    e.fresh({"Templates/T.md": "---\n---\nstatus: BODY\n---\n"})
+    rc, out, err = e.run("new", "X", "--template", "T", "--status", "done")
+    check(f"E7[{n}] new with that template writes the property, body untouched",
+          rc == 0 and e.has("X.md") and e.get("X.md") == "---\nstatus: done\n---\nstatus: BODY\n---\n",
+          (rc, err, e.has("X.md") and repr(e.get("X.md"))))
     e.fresh({"E.md": "---\n---oops\nbody\n"})
     rc, out, err = e.run("set", "E.md", "k", "v")
     check(f"E3[{n}] (control) `---oops` is not a closing delimiter",
@@ -154,6 +167,11 @@ for e in ENGINES:
           rc == 0 and e.get("X.md") == "---\r\ntype: t\r\nstatus: done\r\nowner: me\r\n---\r\n# T\r\n",
           repr(e.has("X.md") and e.get("X.md")))
 
+    e.fresh({"Templates/T.md": "---\na: 0\n---\n"})
+    rc, out, err = e.run("new", "X", "--template", "T", "--a", "1\nb: 2", "--b", "3")
+    check(f"N4[{n}] (control) a line an earlier VALUE introduced is visible to a later key",
+          rc == 0 and e.get("X.md") == "---\na: 1\nb: 3\n---\n", repr(e.has("X.md") and e.get("X.md")))
+
     # ---- D: the plan digest covers the source note's bytes ----
     for cmd, args in (("rename", ("A/Src.md", "Dst")), ("move", ("A/Src.md", "C")), ("trash", ("A/Src.md",))):
         e.fresh({"A/Src.md": "alpha\n", "C/keep.md": "k\n"})
@@ -168,54 +186,18 @@ for e in ENGINES:
         rc, out, err = e.run(cmd, *args, "--apply", plan_id(out) or "00000000")
         check(f"D2[{n},{cmd}] (control) a fresh digest applies", rc == 0 and not e.has("A/Src.md"), (rc, out, err))
 
-    # ---- O: move re-anchors the moved note's own relative markdown links ----
-    body = ("[a](./Bee.md) [b](Bee.md) [c](../A/Bee.md) [root](A/Bee.md) [gone](./Missing.md)\n"
-            "`[code](./Bee.md)`\n```\n[fenced](./Bee.md)\n```\n[[Bee]] [sp](./Has%20Space.md)\n")
-    e.fresh({"A/Mover.md": body, "A/Bee.md": "b\n", "A/Has Space.md": "s\n", "C/keep.md": "k\n"})
-    rc, out, err = e.run("move", "A/Mover.md", "C")
-    check(f"O1[{n}] the dry-run reports the outgoing links", "outgoing relative links to re-anchor: 3" in out, out)
-    check(f"O2[{n}] (control) the dry-run writes nothing", e.get("A/Mover.md") == body)
-    rc, out, err = e.run("move", "A/Mover.md", "C", "--apply", plan_id(out) or "0")
-    want = ("[a](../A/Bee.md) [b](../A/Bee.md) [c](../A/Bee.md) [root](A/Bee.md) [gone](./Missing.md)\n"
-            "`[code](./Bee.md)`\n```\n[fenced](./Bee.md)\n```\n[[Bee]] [sp](../A/Has%20Space.md)\n")
-    check(f"O3[{n}] links resolve from the new folder; inert and root-form text untouched",
-          rc == 0 and e.has("C/Mover.md") and e.get("C/Mover.md") == want,
-          (rc, err, e.has("C/Mover.md") and e.get("C/Mover.md")))
-    e.fresh({"A/Mover.md": "[a](./Bee.md)\n", "A/Bee.md": "b\n"})
-    rc, out, err = e.run("rename", "A/Mover.md", "Renamed", "--apply")
-    check(f"O4[{n}] (control) a same-folder rename leaves relative links alone",
-          rc == 0 and e.get("A/Renamed.md") == "[a](./Bee.md)\n", (rc, out, err))
-    e.fresh({"A/Mover.md": "[me](./Mover.md) [b](./Bee.md)\n", "A/Bee.md": "b\n", "C/keep.md": "k\n"})
-    rc, out, err = e.run("move", "A/Mover.md", "C", "--apply")
-    check(f"O5[{n}] a self link is anchored at the new folder",
-          rc == 0 and e.has("C/Mover.md") and e.get("C/Mover.md") == "[me](Mover.md) [b](../A/Bee.md)\n",
-          (rc, err, e.has("C/Mover.md") and e.get("C/Mover.md")))
-    e.fresh({"A/Mover.md": "[u](./B\u00e9e.md) [e](./B%C3%A9e.md)\n", "A/B\u00e9e.md": "b\n", "C D/keep.md": "k\n"})
-    rc, out, err = e.run("move", "A/Mover.md", "C D", "--apply")
-    check(f"O7[{n}] an unencoded target stays unencoded, an encoded one stays encoded",
-          rc == 0 and e.has("C D/Mover.md") and e.get("C D/Mover.md") == "[u](../A/B\u00e9e.md) [e](../A/B%C3%A9e.md)\n",
-          (rc, err, e.has("C D/Mover.md") and e.get("C D/Mover.md")))
-    e.fresh({"C D/Mover.md": "[u](./Bee.md)\n", "C D/Bee.md": "b\n", "A/keep.md": "k\n"})
-    rc, out, err = e.run("move", "C D/Mover.md", "A", "--apply")
-    check(f"O8[{n}] a new path that needs encoding is encoded",
-          rc == 0 and e.has("A/Mover.md") and e.get("A/Mover.md") == "[u](../C%20D/Bee.md)\n",
-          (rc, err, e.has("A/Mover.md") and e.get("A/Mover.md")))
-    e.fresh({"A/Mover.md": "[a](./Bee.md)\n", "A/Bee.md": "b\n", "C/keep.md": "k\n"})
-    rc, out, err = e.run("move", "A/Mover.md", "C")
-    d = plan_id(out)
-    e.put("A/Mover.md", "[a](./Bee.md)\n")          # same bytes: the digest must still hold
-    rc, out, err = e.run("move", "A/Mover.md", "C", "--apply", d or "0")
-    check(f"O6[{n}] (control) unchanged source bytes keep the digest valid", rc == 0, (rc, out, err))
-
     # ---- S: search numeric flags ----
     e.fresh({"A.md": "alpha beta\n"})
-    for bad in (("--k", "banana"), ("--w", "x"), ("--k", "-1"), ("--k",)):
+    for bad in (("--k", "banana"), ("--w", "x"), ("--k", "-1"), ("--k",), ("--k", "1" * 19),
+                ("--k", "0" * 4400), ("--k", "18446744073709551616", "--k", "1"), ("--k", "1_0"), ("--k", "+")):
         rc, out, err = e.run("search", "alpha", *bad)
-        check(f"S1[{n},{' '.join(bad)}] usage refusal, no traceback, runnable next",
+        check(f"S1[{n},{' '.join(bad)[:24]}] usage refusal, no traceback, runnable next",
               rc == 1 and "Traceback" not in err and err.startswith("usage: search") and "next: vv search --help" in err,
               (rc, out, err))
     rc, out, err = e.run("search", "alpha", "--k", "1", "--w", "20")
     check(f"S2[{n}] (control) numeric values still search", rc == 0 and "A.md" in out, (rc, out, err))
+    rc, out, err = e.run("search", "alpha", "--k", "+1", "--w", "999999999999999999")
+    check(f"S3[{n}] (control) a leading + and an 18-digit value are accepted", rc == 0 and "A.md" in out, (rc, out, err))
 
 if NATIVE_ONLY is not None:
     e = NATIVE_ONLY

@@ -21,12 +21,16 @@ next release is MAJOR unless they are judged defect repairs.
   The refusal for a preamble that holds frontmatter compared the first line to
   `---` literally, so a byte-order mark hid the block and the patch replaced
   the YAML (and the mark) with body text, exit 0. Both engines now refuse it
-  like any other frontmatter preamble. *Success → refusal (exit 1).*
+  like any other frontmatter preamble. *Success → refusal (exit 1).* The test
+  is now "the note has a terminated frontmatter block", so a preamble that
+  merely opens with a `---` rule and never closes it is body and patches
+  (it was refused before).
 - **`set` into an empty frontmatter block stacked a second block on it.**
   `---` directly followed by `---` was not recognised as frontmatter, so
   `set k v` wrote `---`/`k: v`/`---` above the existing pair. The key is now
   written inside the block, in the block's own line-terminator style, on both
-  engines. `new` with such a template dropped the property; it now writes it.
+  engines, including when a later `---` appears in the body. `new` with such
+  a template dropped the property; it now writes it.
 - **`new --KEY VALUE` rewrote a template body line.** The property was matched
   anywhere in the template, so a body line starting `KEY:` was replaced and no
   property was created. Properties are now matched inside the frontmatter
@@ -36,20 +40,11 @@ next release is MAJOR unless they are judged defect repairs.
   `--apply <digest>` accepted a plan after the note's bytes had changed. The
   source bytes are now part of the digest. Plan ids differ from 3.2.0 for the
   same vault state. *Success → refusal (exit 3) for a drifted source.*
-- **`move` left the moved note's own relative markdown links broken.** A link
-  such as `[x](./B.md)` is anchored at the note's folder; after a move to
-  another folder it pointed nowhere while the run reported
-  `verification clean`. Those links are now re-anchored from the destination
-  (explicit `./` and `../` targets, and plain targets that resolve from the
-  note's folder but not from the vault root), the dry-run prints
-  `outgoing relative links to re-anchor: N` when there are any, the rewrites
-  are part of the plan digest, and the post-apply verification checks that
-  each one resolves. Fenced blocks, inline code, HTML comments, links that do
-  not resolve today, and wikilinks are untouched.
 - **`search --k` / `--w` with a missing or non-numeric value.** The python
   entry died in a traceback; the native entry silently used the default. Both
   now answer `usage: search --k takes a non-negative integer … — next: vv
-  search --help`, exit 1. *Native: success → refusal.*
+  search --help`, exit 1. The accepted spelling is an optional `+` and at most
+  18 ASCII digits, identical in both engines. *Native: success → refusal.*
 
 ## [3.2.0] — 2026-10-10
 

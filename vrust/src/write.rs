@@ -95,11 +95,12 @@ struct FmParts {
 }
 
 fn fm_parts(text: &str) -> Option<FmParts> {
+    // checked FIRST: split_fm_full would run on to a later `---` in the body
+    if let Some(p) = empty_fm_parts(text) {
+        return Some(p);
+    }
     let (fm, body, tail, bom) = split_fm_full(text);
-    let fm = match fm {
-        Some(f) => f,
-        None => return empty_fm_parts(text, bom),
-    };
+    let fm = fm?;
     let head = &text[..text.len() - body.len()];
     let after_open = &head[bom.len() + 3..];
     let eol1 = if after_open.starts_with("\r\n") {
@@ -123,7 +124,12 @@ fn fm_parts(text: &str) -> Option<FmParts> {
 /// frontmatter with no lines: `fm_lines` is empty and `eol2` is "", so
 /// `fm_join` still reproduces the text and a writer inserts into the block
 /// instead of stacking a second one on top of it (mirrors `_fm_parts`).
-fn empty_fm_parts(text: &str, bom: String) -> Option<FmParts> {
+fn empty_fm_parts(text: &str) -> Option<FmParts> {
+    let bom = if text.starts_with(BOM) {
+        BOM.to_string()
+    } else {
+        String::new()
+    };
     let t = &text[bom.len()..];
     let (eol1, rest) = if let Some(r) = t.strip_prefix("---\r\n") {
         ("\r\n", r)
@@ -799,14 +805,7 @@ fn cmd_patch(vault: &Path, args: &[String]) -> Outcome {
         Ok(v) => v,
         Err(_) => return Outcome::Fallback,
     };
-    if s.id == "H0"
-        && s.end > 0
-        && !lines.is_empty()
-        && lines[0]
-            .trim_start_matches('\u{feff}')
-            .trim_end_matches('\r')
-            == "---"
-    {
+    if s.id == "H0" && s.end > 0 && crate::readpath::fm_bounds(&lines) > 0 {
         return Outcome::Fallback; // python's "refused: H0 contains frontmatter" text
     }
     let cur = crate::readpath::sec_text(&lines, s);
