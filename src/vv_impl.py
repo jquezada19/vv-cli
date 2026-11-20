@@ -663,6 +663,13 @@ def _fm_parts(text):
     bom, eol1 (after the opening ---), fm_lines (split on \\n, elements keep
     their \\r), eol2 (before the closing ---), tail (after the closing ---),
     body. _fm_join(*parts) == text for any note that has frontmatter."""
+    # An empty block (`---` then an exact `---` line) is frontmatter with no
+    # lines: fm_lines == [] and eol2 == "". Checked before split_fm_full,
+    # which would run on to a later `---` in the body.
+    bom = BOM if text.startswith(BOM) else ""
+    m = re.match(r"---(\r?\n)---(\r?\n|\Z)", text[len(bom):])
+    if m:
+        return bom, m.group(1), [], "", m.group(2), text[len(bom) + m.end():]
     fm, body, tail, bom = split_fm_full(text)
     if fm is None:
         return None
@@ -672,6 +679,16 @@ def _fm_parts(text):
     rest = after_open[len(eol1) + len(fm):]      # eol2 + --- + tail
     eol2 = rest[:len(rest) - 3 - len(tail)]
     return bom, eol1, fm.split("\n"), eol2, tail, body
+
+def _fm_add(fm_lines, eol1, eol2, new_lines):
+    """Append new_lines to a frontmatter block; returns (fm_lines, eol2).
+    Elements keep their \\r; the last line's terminator is eol2."""
+    if not fm_lines:                      # empty block: the block takes eol1's style
+        cr = "\r" if eol1 == "\r\n" else ""
+        return [l + cr for l in new_lines[:-1]] + [new_lines[-1]], eol1
+    cr = "\r" if eol2 == "\r\n" else ""
+    fm_lines[-1] += cr
+    return fm_lines + [l + cr for l in new_lines[:-1]] + [new_lines[-1]], eol2
 
 def _fm_join(bom, eol1, fm_lines, eol2, tail, body):
     return bom + "---" + eol1 + "\n".join(fm_lines) + eol2 + "---" + tail + body
@@ -858,7 +875,7 @@ def cmd_patch(ref, sid, expect):
     _sig = file_sig(fp)
     lines, secs = parse(read_raw(fp))
     s = find_sec(lines, secs, sid, ref)
-    if s["id"] == "H0" and s["end"] > 0 and lines and lines[0].rstrip("\r") == "---":
+    if s["id"] == "H0" and s["end"] > 0 and fm_bounds(lines) > 0:
         die("refused: H0 contains frontmatter", nxt="vv set/unset (patch would rewrite YAML as body)")
     cur = sec_text(lines, s)
     if sha8(cur) != expect:
@@ -1080,8 +1097,7 @@ def cmd_set(ref, key, value):
             fm_lines[i] = f"{key}: {value}" + ("\r" if fm_lines[i].endswith("\r") else "")
         else:
             # the old last fm line gains a terminator in the fm block's own style; the new key is the new last line
-            fm_lines[-1] += "\r" if eol2 == "\r\n" else ""
-            fm_lines.append(f"{key}: {value}")
+            fm_lines, eol2 = _fm_add(fm_lines, eol1, eol2, [f"{key}: {value}"])
         atomic_write(fp, _fm_join(bom, eol1, fm_lines, eol2, tail, body), expect_sig=_sig)
     out(f"set {key}={value} in {rel(fp)}")
 
@@ -1174,29 +1190,27 @@ def cmd_new(*args):
             names = " | ".join(os.path.basename(h)[:-3] for h in hits[:5])
             die(f"ambiguous: template '{template}' matches {names}", nxt="vv templates")
         content = read_raw(hits[0])
-    missing = []
+    # a property is a line of the frontmatter, never of the body; keys are
+    # applied one at a time against the current text
+    if kv and _fm_parts(content) is None and content.lstrip(BOM).split("\n", 1)[0].rstrip("\r") == "---":
+        # an opening `---` that never closes: there is no block to write a
+        # property into, and stacking a second one above it leaves two
+        die("refused: template frontmatter is unterminated (no closing ---)",
+            nxt="fix the template, or create the note without --KEY flags")
     for k, v in kv.items():
-        pat = re.compile(rf"^{re.escape(k)}:[^\r\n]*", re.M)
-        m = pat.search(content)
-        if m:
-            content = content[:m.start()] + f"{k}: {v}" + content[m.end():]  # literal, no re.sub template
-        else:
-            missing.append((k, v))
-    if missing and content.lstrip(BOM).startswith("---"):
-        # template HAS frontmatter: insert the new keys into it rather than dropping them
         parts = _fm_parts(content)
-        if parts is not None:
-            bom, eol1, fm_lines, eol2, tail, body = parts
-            cr = "\r" if eol2 == "\r\n" else ""
-            fm_lines[-1] += cr
-            new_keys = [f"{k}: {v}" for k, v in missing]
-            fm_lines += [l + cr for l in new_keys[:-1]] + [new_keys[-1]]
-            content = _fm_join(bom, eol1, fm_lines, eol2, tail, body)
-            missing = []
-    kv = dict(missing) if missing else ({} if content.lstrip(BOM).startswith("---") else kv)
-    if kv and not content.lstrip(BOM).startswith("---"):
-        fmb = "\n".join(f"{k}: {v}" for k, v in kv.items())
-        content = f"---\n{fmb}\n---\n" + content
+        if parts is None:
+            content = f"---\n{k}: {v}\n---\n" + content
+            continue
+        bom, eol1, fm_lines, eol2, tail, body = parts
+        pat = re.compile(rf"^{re.escape(k)}:")
+        hit = [i for i, l in enumerate(fm_lines) if pat.match(l)]
+        if hit:
+            i = hit[0]
+            fm_lines[i] = f"{k}: {v}" + ("\r" if fm_lines[i].endswith("\r") else "")
+        else:
+            fm_lines, eol2 = _fm_add(fm_lines, eol1, eol2, [f"{k}: {v}"])
+        content = _fm_join(bom, eol1, fm_lines, eol2, tail, body)
     atomic_write(fp, content)
     out(f"created {rel(fp)}")
 
@@ -1491,14 +1505,25 @@ def cmd_props(key, folder=""):
     _list_out(entries, sum(c.values()), f"notes with {key}", cmd="props",
               fmt=lambda r: f"{r['count']}\t{r['value']}")
 
+_NATIVE_INT_MAX = 10**18 - 1    # the largest --k/--w both engines accept
+
 def _parse_search_args(args):
     # a global --limit (stripped in main) acts as --k unless --k is explicit —
     # accepting the flag and silently ignoring it would be agent-hostile
     k, w, files_only, terms = (_LIMIT or 5), 500, False, []
     it = iter(args)
     for a in it:
-        if a == "--k": k = int(next(it))
-        elif a == "--w": w = int(next(it))
+        if a in ("--k", "--w"):
+            v = next(it, None)
+            # one spelling both engines parse alike: an optional `+`, then
+            # ASCII digits whose value has at most 18 significant digits
+            # (fits the native integer; leading zeros never reach int())
+            if v is None or not re.fullmatch(r"\+?0*[0-9]{1,18}", v):
+                die(f"usage: search {a} takes a non-negative integer of at most 18 digits, got {_q(v, 'N') if v is not None else 'nothing'}",
+                    nxt="vv search --help")
+            n = int(v.lstrip("+").lstrip("0") or "0")
+            if a == "--k": k = n
+            else: w = n
         elif a == "--files": files_only = True
         else: terms.append(a.lower())
     return k, w, files_only, terms
@@ -1618,7 +1643,9 @@ def cmd_search(*args):
         # k already folds in an explicit --k OR the globally-stripped --limit;
         # re-state it for the child, which never saw the stripped flag. A
         # duplicate --k is harmless (same value, last-wins parse).
-        r = subprocess.run([VRUST, "search", *args, "--k", str(k)],
+        # clamped to what the native parser accepts: a global --limit has no
+        # digit bound of its own, and no vault holds 10**18 notes
+        r = subprocess.run([VRUST, "search", *args, "--k", str(min(k, _NATIVE_INT_MAX))],
                            capture_output=True, text=True, env=env)
         sys.stdout.write(r.stdout); sys.stderr.write(r.stderr)
         global _out_total
@@ -2342,7 +2369,7 @@ def cmd_trash(ref, *args):
     while os.path.exists(os.path.join(VAULT, dest_rel)):
         dest_rel = os.path.join(".trash", f"{base[:-3]}-{n}.md")
         n += 1
-    canon = ["trash", src_rel, dest_rel]
+    canon = ["trash", src_rel, dest_rel, "src:" + _file_sha256(fp)]
     for p_ in sorted(hits, key=rel):
         with open(p_, "rb") as f:
             canon.append(f"{rel(p_)}:{hits[p_]}:{hashlib.sha256(f.read()).hexdigest()}")
@@ -2739,6 +2766,14 @@ def _rewrite_links(text, source_fp, new_rel_noext, rename_base, linking_fp=None)
 
 _RELOCATE = {"move", "rename", "trash"}   # commands whose *args tail is flags-only
 
+def _file_sha256(fp):
+    try:
+        with open(fp, "rb") as f:
+            return hashlib.sha256(f.read()).hexdigest()
+    except OSError as e:
+        # a plan cannot be bound to bytes that cannot be read
+        die(f"unreadable: {rel(fp)} ({e.strerror})", nxt="fix the note's permissions, then re-run")
+
 def _relocate_tail(cmd, operands, tail):
     """The trailing-argument GRAMMAR of rename/move/trash: after the fixed
     operands, the only accepted tokens are `--apply`, optionally followed by
@@ -2818,7 +2853,7 @@ def _do_relocate(ref, dest_rel_noext, apply_, opname, expect_plan=None):
     # plan digest: operation + destination + every affected file's byte hash.
     # `--apply <digest>` then executes exactly the previewed blast radius or
     # exits stale — an edit or new link between preview and apply changes it.
-    canon = [opname, src_rel, dest_rel_noext]
+    canon = [opname, src_rel, dest_rel_noext, "src:" + _file_sha256(fp)]
     for p in sorted(hits, key=rel):
         with open(p, "rb") as f:
             canon.append(f"{rel(p)}:{hits[p]}:{hashlib.sha256(f.read()).hexdigest()}")

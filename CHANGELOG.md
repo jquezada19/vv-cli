@@ -10,6 +10,49 @@ An input that was refused (exit 1) and now succeeds (exit 0) is an addition,
 not an exit-code change, and is MINOR. A documented non-zero exit that moves to
 a different non-zero exit, or a success that becomes a refusal, is MAJOR.
 
+## [Unreleased]
+
+Four entries below turn an exit 0 into a refusal; under the rule above the
+next release is MAJOR unless they are judged defect repairs.
+
+### Fixed
+
+- **`patch` on the preamble of a BOM-prefixed note deleted its frontmatter.**
+  The refusal for a preamble that holds frontmatter compared the first line to
+  `---` literally, so a byte-order mark hid the block and the patch replaced
+  the YAML (and the mark) with body text, exit 0. Both engines now refuse it
+  like any other frontmatter preamble. *Success → refusal (exit 1).* The test
+  is now "the note has a terminated frontmatter block", so a preamble that
+  merely opens with a `---` rule and never closes it is body and patches
+  (it was refused before).
+- **`set` into an empty frontmatter block stacked a second block on it.**
+  `---` directly followed by `---` was not recognised as frontmatter, so
+  `set k v` wrote `---`/`k: v`/`---` above the existing pair. The key is now
+  written inside the block, in the block's own line-terminator style, on both
+  engines, including when a later `---` appears in the body. `unset` on an
+  empty block now answers `no key` where it answered `no frontmatter` (exit 1
+  either way). `new` with such
+  a template dropped the property; it now writes it.
+- **`new --KEY VALUE` rewrote a template body line.** The property was matched
+  anywhere in the template, so a body line starting `KEY:` was replaced and no
+  property was created. Properties are now matched inside the frontmatter
+  only, and a missing one is inserted there. A template whose opening `---`
+  never closes is refused when property flags are given (it used to take a
+  replacement anywhere in the text and silently drop a new key).
+  *Success → refusal (exit 1) for that template.*
+- **The plan digest did not cover the source note.** `rename`, `move` and
+  `trash` hashed the files that link to the note but not the note itself, so
+  `--apply <digest>` accepted a plan after the note's bytes had changed. The
+  source bytes are now part of the digest. Plan ids differ from 3.2.0 for the
+  same vault state. *Success → refusal (exit 3) for a drifted source.* A
+  source that cannot be read for the digest is refused (`unreadable: …`,
+  exit 1); such a note could previously be planned and moved unread.
+- **`search --k` / `--w` with a missing or non-numeric value.** The python
+  entry died in a traceback; the native entry silently used the default. Both
+  now answer `usage: search --k takes a non-negative integer of at most 18
+  digits … — next: vv search --help`, exit 1. The accepted spelling is an optional `+` and ASCII
+  digits with at most 18 significant digits, identical in both engines. *Native: success → refusal.*
+
 ## [3.2.0] — 2026-10-10
 
 MINOR: no documented exit code moves. Two refused inputs become accepted

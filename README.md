@@ -276,7 +276,7 @@ same way (any doubt → live scan + rebuild, delete-don't-repair).
   One documented deviation under the native entry: a CAS conflict there falls back to
   python, which re-reads the latest bytes and applies — no update is ever lost, but
   during an active race the exit-3 warning is replaced by a clean retry;
-  rename/move dry-runs print a plan digest over every affected file's bytes, and
+  rename/move dry-runs print a plan digest over the note's own bytes and every affected file's bytes, and
   `--apply <digest>` refuses to execute a plan that drifted since review.
 - **Journaled refactors, recoverable after a HARD crash** — rename/move backs up
   every file (sha256-manifested, vault-scoped) before writing, and the journal

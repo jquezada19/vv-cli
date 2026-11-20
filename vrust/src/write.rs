@@ -95,6 +95,10 @@ struct FmParts {
 }
 
 fn fm_parts(text: &str) -> Option<FmParts> {
+    // checked FIRST: split_fm_full would run on to a later `---` in the body
+    if let Some(p) = empty_fm_parts(text) {
+        return Some(p);
+    }
     let (fm, body, tail, bom) = split_fm_full(text);
     let fm = fm?;
     let head = &text[..text.len() - body.len()];
@@ -113,6 +117,42 @@ fn fm_parts(text: &str) -> Option<FmParts> {
         eol2: eol2.to_string(),
         tail,
         body,
+    })
+}
+
+/// An EMPTY block (`---` directly followed by an exact `---` line) is
+/// frontmatter with no lines: `fm_lines` is empty and `eol2` is "", so
+/// `fm_join` still reproduces the text and a writer inserts into the block
+/// instead of stacking a second one on top of it (mirrors `_fm_parts`).
+fn empty_fm_parts(text: &str) -> Option<FmParts> {
+    let bom = if text.starts_with(BOM) {
+        BOM.to_string()
+    } else {
+        String::new()
+    };
+    let t = &text[bom.len()..];
+    let (eol1, rest) = if let Some(r) = t.strip_prefix("---\r\n") {
+        ("\r\n", r)
+    } else {
+        ("\n", t.strip_prefix("---\n")?)
+    };
+    let post = rest.strip_prefix("---")?;
+    let (tail, body) = if let Some(b) = post.strip_prefix("\r\n") {
+        ("\r\n", b)
+    } else if let Some(b) = post.strip_prefix('\n') {
+        ("\n", b)
+    } else if post.is_empty() {
+        ("", post)
+    } else {
+        return None;
+    };
+    Some(FmParts {
+        bom,
+        eol1: eol1.to_string(),
+        fm_lines: Vec::new(),
+        eol2: String::new(),
+        tail: tail.to_string(),
+        body: body.to_string(),
     })
 }
 
@@ -517,8 +557,14 @@ fn cmd_set(vault: &Path, args: &[String]) -> Outcome {
                     p.fm_lines[i] = format!("{}: {}{}", key, value, cr);
                 }
                 None => {
-                    if p.eol2 == "\r\n" {
-                        p.fm_lines.last_mut().unwrap().push('\r');
+                    match p.fm_lines.last_mut() {
+                        Some(last) => {
+                            if p.eol2 == "\r\n" {
+                                last.push('\r');
+                            }
+                        }
+                        // empty block: the block takes the opener's terminator
+                        None => p.eol2 = p.eol1.clone(),
                     }
                     p.fm_lines.push(format!("{}: {}", key, value));
                 }
@@ -759,7 +805,7 @@ fn cmd_patch(vault: &Path, args: &[String]) -> Outcome {
         Ok(v) => v,
         Err(_) => return Outcome::Fallback,
     };
-    if s.id == "H0" && s.end > 0 && !lines.is_empty() && lines[0].trim_end_matches('\r') == "---" {
+    if s.id == "H0" && s.end > 0 && crate::readpath::fm_bounds(&lines) > 0 {
         return Outcome::Fallback; // python's "refused: H0 contains frontmatter" text
     }
     let cur = crate::readpath::sec_text(&lines, s);

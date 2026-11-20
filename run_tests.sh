@@ -90,6 +90,7 @@ run "read-out follow-ups" python3 tests/test_readout_followups.py
 run "ondisk identity"    python3 tests/test_ondisk_identity.py
 run "affordance sweep"   python3 tests/test_affordance.py
 run "set/new key shape"  python3 tests/test_set_key_shape.py
+run "write defects"      python3 tests/test_write_defects.py
 run "append forms"       python3 tests/test_append_forms.py
 run "selectors"          python3 tests/test_selectors.py
 run "patch guards"       python3 tests/test_patch_guards.py
