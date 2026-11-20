@@ -15,6 +15,32 @@ a different non-zero exit, or a success that becomes a refusal, is MAJOR.
 Four entries below turn an exit 0 into a refusal; under the rule above the
 next release is MAJOR unless they are judged defect repairs.
 
+### Changed
+
+- **A bare ticket id no longer costs a second engine.** `vv outline 24995`
+  found no exact basename natively, handed the call to python, and python
+  walked the vault again. The native entry now applies the id rule on its own
+  walk when exactly one note starts `<digits> - `; zero or several candidates
+  and the `#id` spelling are still python's to answer, with the same text.
+  Measured on a 3,255-note vault: 1,037 ms → 462 ms (p50 of 15).
+- **A search with no hits scans once.** Every zero-hit query was handed to
+  python, which scanned again to rediscover the zero. Python is now reached
+  only for a quoted multi-word argument (the one case the phrase hint can
+  arise) and is told the scan already came back empty. Output is unchanged.
+  Measured: 262 ms → 99 ms for a one-word miss.
+- **The native metrics row no longer spawns `date` per call.** The local UTC
+  offset is asked of `date +%z` once per quarter hour and kept in
+  `~/.cache/vv/tzoffset`; the timestamp keeps its local-time shape. Measured:
+  8.4 ms → 5.0 ms for a logged `outline` by path.
+
+### Added
+
+- **Metrics row fields.** `ref` says how the NOTE operand was addressed
+  (`path`, `name`, `id`). A row python writes after the native entry declined
+  carries `fb: 1`, and its `ms` is measured from the native process start, so
+  it covers the native share and interpreter start-up (it used to cover
+  python's share only, which under-reported every hand-off).
+
 ### Fixed
 
 - **`patch` on the preamble of a BOM-prefixed note deleted its frontmatter.**

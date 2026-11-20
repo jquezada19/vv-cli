@@ -334,7 +334,7 @@ refused — the tool being right and unhelpful at the same time.
 
 ## Design notes
 
-- Output bytes are the cost function; every op logs `{op, ms, out_bytes, exit, kind, cf_bytes}` to
+- Output bytes are the cost function; every op logs `{op, ms, out_bytes, exit, kind, cf_bytes, ref, fb}` to
   `~/.claude/metrics/vv.jsonl` (best-effort, silent if absent).
 - Two implementations of one semantics is a standing drift risk — accepted
   deliberately and held in check by the differential suites, the expected
