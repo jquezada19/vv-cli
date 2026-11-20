@@ -767,8 +767,14 @@ fn main() {
     // --limit N before dispatch, mirroring vv.py (orig keeps it: a python
     // fallback re-parses the full argv itself)
     if let Some(i) = args.iter().position(|a| a == "--limit") {
+        // Only a plain positive ASCII-digit value is taken here. Everything
+        // else (missing, signed, non-ASCII digits, too large) is python's to
+        // judge: it accepts some of those and refuses others, and a value
+        // this parser read differently could let a command run that python
+        // would have refused.
         let ok = args
             .get(i + 1)
+            .filter(|v| !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit()))
             .and_then(|v| v.parse::<usize>().ok())
             .filter(|n| *n >= 1);
         match ok {
@@ -777,15 +783,18 @@ fn main() {
                 let _ = readpath::GLOBAL_FLAG.set(());
                 args.drain(i..=i + 1);
             }
-            None => {
-                eprintln!("usage: --limit requires a positive integer");
-                exit(1);
-            }
+            None => exec_python(&orig),
         }
     }
     // --vault PATH before dispatch, mirroring vv.py
     if let Some(i) = args.iter().position(|a| a == "--vault") {
         let _ = readpath::GLOBAL_FLAG.set(());
+        if i + 1 >= args.len() {
+            // `--vault` with no value is python's usage refusal. Left in the
+            // operand list it became an operand: `append NOTE --vault` wrote
+            // the literal text into the note.
+            exec_python(&orig);
+        }
         if i + 1 < args.len() {
             let mut v = args[i + 1].clone();
             if let Some(rest) = v.strip_prefix("~/") {

@@ -45,7 +45,13 @@ next release is MAJOR unless they are judged defect repairs.
   hint (an unquoted TEXT or VALUE, `--section` given to `append`, a malformed
   `set` KEY) and its runnable next step are printed by the native entry with
   python's exact bytes, from one operand table. A global flag on the command
-  line still hands the call off.
+  line (`--vault`, `--limit`, `--jsonl`) still hands the call off.
+- **A malformed global flag no longer reaches a native command.**
+  `vv append NOTE --vault` (no value) appended the literal text `--vault` to
+  the note and exited 0, and a `--limit` value python refuses (`+1`) was read
+  natively, so the command ran. Both are now python's usage refusal, exit 1,
+  with nothing written. Any `--limit` value that is not plain ASCII digits is
+  python's to judge. *Success → refusal.*
 - **`vv search` with no query says what python says.** The native entry
   printed `error: no query`; it now prints `usage: search needs a query —
   next: vv search <terms> [--k N] [--w CHARS]`, exit 1 as before.

@@ -19,7 +19,7 @@ processes.
 import os, shutil, subprocess, sys, tempfile
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TIMEOUT = 300
+TIMEOUT = 900
 
 # name, file, text to find (exactly once), replacement, suite, a check that must fail
 MUTATIONS = [
@@ -67,6 +67,18 @@ MUTATIONS = [
      "if readpath::GLOBAL_FLAG.get().is_some() || readpath::from_py() {\n            exec_python(orig);",
      "if readpath::from_py() {\n            exec_python(orig);",
      "tests/test_native_errors.py", "B5 with a global flag that refusal is python's too"),
+    ("valueless-vault-becomes-an-operand", "vrust/src/main.rs",
+     "        if i + 1 >= args.len() {\n",
+     "        if false {\n",
+     "tests/test_native_errors.py", "W1[--vault with no value]"),
+    ("signed-limit-read-natively", "vrust/src/main.rs",
+     "            .filter(|v| !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit()))\n            .and_then(|v| v.parse::<usize>().ok())\n            .filter(|n| *n >= 1);",
+     "            .and_then(|v| v.parse::<usize>().ok())\n            .filter(|n| *n >= 1);",
+     "tests/test_native_errors.py", "W1[--limit +1]"),
+    ("python-delegates-an-empty-query", "src/vv_impl.py",
+     "    if use_rust() and terms and _native_argv_ok(args):",
+     "    if use_rust() and _native_argv_ok(args):",
+     "tests/test_native_errors.py", "B7[bare]"),
     ("die-drops-next-step", "vrust/src/err.rs",
      'Some(n) => format!("{}{}{}\\n", msg, SEP, neutralise(esc(n))),',
      'Some(_) => format!("{}\\n", msg),',
@@ -108,8 +120,8 @@ MUTATIONS = [
      "if false {",
      "tests/test_native_errors.py", "P6 a body that could not be read whole"),
     ("python-delegates-undecodable-search", "src/vv_impl.py",
-     "    if use_rust() and _native_argv_ok(args):\n        import subprocess\n        # VV_FROM_PY (our pid",
-     "    if use_rust():\n        import subprocess\n        # VV_FROM_PY (our pid",
+     "    if use_rust() and terms and _native_argv_ok(args):\n        import subprocess\n        # VV_FROM_PY (our pid",
+     "    if use_rust() and terms:\n        import subprocess\n        # VV_FROM_PY (our pid",
      "tests/test_native_errors.py", "U4[one term]"),
     ("patch-handoff-drops-the-body", "vrust/src/write.rs",
      "let _ = si.write_all(body);",
@@ -134,7 +146,10 @@ def baseline(suites):
     """The unmutated suites must pass here first: a check that is already red
     on this host would otherwise be credited to whatever mutation names it."""
     for suite in sorted(suites):
-        r = subprocess.run([sys.executable, suite], cwd=REPO, capture_output=True, text=True, timeout=TIMEOUT)
+        try:
+            r = subprocess.run([sys.executable, suite], cwd=REPO, capture_output=True, text=True, timeout=TIMEOUT)
+        except subprocess.TimeoutExpired:
+            return f"{suite} did not finish within {TIMEOUT}s before any mutation"
         if r.returncode != 0:
             return f"{suite} fails before any mutation"
     return None

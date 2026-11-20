@@ -128,36 +128,50 @@ SHAPES = {
 }
 COMMANDS = ("outline read show head resolve search patch append appendsec set unset "
             "links backlinks orphans deadends board tags props").split()
-box_a, box_b = Box(), Box()
-tried = refused = others = handed = 0
-for cmd in COMMANDS:
-    for shape, pool in SHAPES.items():
-        for n in range(0, 6):
-            argv = [cmd] + pool[:n]
-            if cmd == "search" and any(a in ("--k", "--w") for a in argv):
-                continue                      # numeric-flag refusals have their own suite
-            want = oracle(box_a, argv)
-            # the boundary check's own wording; `append` with three operands is
-            # refused later, by the command, with a line that looks alike
-            is_arity = (re.match(rf"usage: {cmd} takes [0-9+-]+ positional args, got {n}\b",
-                                 want[2].decode("utf-8", "replace")) and not (cmd == "append" and n == 3))
-            if not is_arity:
-                if os.path.exists(box_b.mark):
-                    os.remove(box_b.mark)
-                got = box_b.run(argv)
-                handed += got[0] == 42 and box_b.started()
-                others += 1
-                if re.match(rb"usage: \S+ takes [0-9+-]+ positional args", got[2]):
-                    check(f"B1x[{cmd} {shape} {n}] no native arity refusal where python gives none", False, (got, want))
-                continue                      # a success or another refusal: not this slice
+import threading
+_local = threading.local()
+WRITERS = {"patch", "append", "appendsec", "set", "unset"}
+
+def one_arity_case(job):
+    """Run one argv through the oracle and the native entry and classify the
+    pair. Each worker keeps one fixture copy per engine and replaces it only
+    after a call that could have written: building a vault per case is the
+    slow part of this loop."""
+    cmd, shape, n, argv = job
+    if not hasattr(_local, "a"):
+        _local.a, _local.b = Box(), Box()
+    a, b = _local.a, _local.b
+    if os.path.exists(b.mark):
+        os.remove(b.mark)
+    want = oracle(a, argv)
+    got = b.run(argv)
+    started = b.started()
+    # the boundary check's own wording; `append` with three operands is
+    # refused later, by the command, with a line that looks alike
+    is_arity = bool(re.match(rf"usage: {cmd} takes [0-9+-]+ positional args, got {n}\b",
+                             want[2].decode("utf-8", "replace"))) and not (cmd == "append" and n == 3)
+    if cmd in WRITERS and not is_arity:
+        del _local.a, _local.b            # a write may have landed: start clean next time
+    return cmd, shape, n, is_arity, want, got, started
+
+jobs = [(cmd, shape, n, [cmd] + pool[:n])
+        for cmd in COMMANDS for shape, pool in SHAPES.items() for n in range(0, 6)
+        # numeric-flag refusals have their own suite
+        if not (cmd == "search" and any(a in ("--k", "--w") for a in pool[:n]))]
+import concurrent.futures
+tried = refused = others = 0
+with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool_:
+    for cmd, shape, n, is_arity, want, got, started in pool_.map(one_arity_case, jobs):
+        if is_arity:
             tried += 1
-            if os.path.exists(box_b.mark):
-                os.remove(box_b.mark)
-            got = box_b.run(argv)
-            ok = got == want and not box_b.started()
+            ok = got == want and not started
             refused += ok
             if not ok:
                 check(f"B1[{cmd} {shape} {n}] the native entry gives python's arity refusal itself", False, (got, want))
+        else:
+            others += 1
+            if re.match(rb"usage: \S+ takes [0-9+-]+ positional args", got[2]):
+                check(f"B1x[{cmd} {shape} {n}] no native arity refusal where python gives none", False, (got, want))
 check(f"B1 every arity refusal python gives ({tried}) is answered natively with the same bytes", refused == tried and tried >= 150,
       (refused, tried))
 check(f"B1b no native arity refusal where python gives none ({others} other calls checked)",
@@ -177,6 +191,40 @@ check("B4 a search with no query is python's usage line, given natively",
 b = Box()
 got = b.run(["--limit", "3", "search"])
 check("B5 with a global flag that refusal is python's too", b.started() and got[0] == 42, got)
+# the whole route, with the real python reachable: whichever entry is used and
+# whoever delegates to whom, an empty query ends in python's usage line
+for label, argv in (("bare", ["search"]), ("--files", ["search", "--files"]), ("--k", ["search", "--k", "3"]),
+                    ("--limit", ["--limit", "3", "search"])):
+    b = Box()
+    want = oracle(b, argv)
+    got = b.run(argv, VV_PY_ENTRY=VV)
+    check(f"B6[{label}] an empty query through the native entry is python's answer", got == want, (got, want))
+    got = b.run(argv, entry=[sys.executable, VV])
+    check(f"B7[{label}] and through the python launcher with the scanner built", got == want, (got, want))
+
+# ---- W: a malformed global flag never reaches a native command ----
+# `--vault` with no value used to stay in the operand list, so
+# `append NOTE --vault` appended the literal text; an odd `--limit` value was
+# read natively where python refuses it. Both now reach python untouched.
+for label, argv in (("--vault with no value", ["append", "Area/Solo.md", "--vault"]),
+                    ("--limit +1", ["--limit", "+1", "append", "Area/Solo.md", "x"]),
+                    ("--limit with no value", ["append", "Area/Solo.md", "x", "--limit"]),
+                    ("--limit 0", ["--limit", "0", "set", "Area/Solo.md", "k", "v"]),
+                    ("--limit past 64 bits", ["--limit", "18446744073709551616", "outline"]),
+                    ("--limit non-ASCII digit", ["--limit", "\u0663", "outline"])):
+    b = Box()
+    before = open(os.path.join(b.vault, "Area", "Solo.md"), "rb").read()
+    got = b.run(argv)
+    check(f"W1[{label}] the call is handed to python with its argv intact, nothing written",
+          got[0] == 42 and [a for a, _ in b.handed()] == [[x.encode() for x in argv]]
+          and open(os.path.join(b.vault, "Area", "Solo.md"), "rb").read() == before, (got, b.handed()))
+    b = Box()
+    want = oracle(b, argv)
+    got = b.run(argv, VV_PY_ENTRY=VV)
+    check(f"W2[{label}] and the caller gets python's answer", got == want, (got, want))
+b = Box()
+got = b.run(["--limit", "2", "orphans"])
+check("W3 (control) a plain --limit is still taken natively", got[0] == 0 and not b.started(), got)
 
 # ---- G: a global flag hands the refusal off ----
 for label, argv in (("--limit", ["--limit", "2", "read"]), ("--vault", ["read", "--vault", "/nonexistent-vault"]),
