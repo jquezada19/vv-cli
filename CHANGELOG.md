@@ -46,8 +46,8 @@ next release is MAJOR unless they are judged defect repairs.
 - **`search --k` / `--w` with a missing or non-numeric value.** The python
   entry died in a traceback; the native entry silently used the default. Both
   now answer `usage: search --k takes a non-negative integer … — next: vv
-  search --help`, exit 1. The accepted spelling is an optional `+` and at most
-  18 ASCII digits, identical in both engines. *Native: success → refusal.*
+  search --help`, exit 1. The accepted spelling is an optional `+` and ASCII
+  digits with at most 18 significant digits, identical in both engines. *Native: success → refusal.*
 
 ## [3.2.0] — 2026-10-10
 

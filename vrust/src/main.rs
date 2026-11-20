@@ -220,16 +220,16 @@ fn cmd_search(args: &[String], orig: &[String]) -> ! {
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
-            // One spelling both engines parse alike: an optional `+`, then at
-            // most 18 ASCII digits. Anything else is a usage error and python
+            // One spelling both engines parse alike: an optional `+`, then
+            // ASCII digits whose value has at most 18 significant digits. Anything else is a usage error and python
             // authors that text; python applies the SAME predicate before it
             // delegates back here, so the handoff cannot loop.
             "--k" | "--w" => {
                 let n = it.next().and_then(|v| {
                     let d = v.strip_prefix('+').unwrap_or(v);
-                    let ok =
-                        !d.is_empty() && d.len() <= 18 && d.bytes().all(|b| b.is_ascii_digit());
-                    ok.then(|| d.parse::<usize>().unwrap_or(usize::MAX))
+                    let digits = !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit());
+                    let sig = d.trim_start_matches('0');
+                    (digits && sig.len() <= 18).then(|| sig.parse::<usize>().unwrap_or(0))
                 });
                 match (a.as_str(), n) {
                     ("--k", Some(n)) => k = n,

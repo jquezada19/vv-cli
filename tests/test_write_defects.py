@@ -195,10 +195,19 @@ for e in ENGINES:
         rc, out, err = e.run(cmd, *args, "--apply", plan_id(out) or "00000000")
         check(f"D2[{n},{cmd}] (control) a fresh digest applies", rc == 0 and not e.has("A/Src.md"), (rc, out, err))
 
+    if os.name == "posix" and os.geteuid() != 0:
+        for cmd, args in (("rename", ("A/Src.md", "Dst")), ("trash", ("A/Src.md",))):
+            e.fresh({"A/Src.md": "alpha\n"})
+            os.chmod(os.path.join(e.vault, "A/Src.md"), 0)
+            rc, out, err = e.run(cmd, *args)
+            os.chmod(os.path.join(e.vault, "A/Src.md"), 0o644)
+            check(f"D3[{n},{cmd}] an unreadable source is a clean refusal, not a traceback",
+                  rc == 1 and "Traceback" not in err and e.has("A/Src.md"), (rc, out, err[:300]))
+
     # ---- S: search numeric flags ----
     e.fresh({"A.md": "alpha beta\n"})
     for bad in (("--k", "banana"), ("--w", "x"), ("--k", "-1"), ("--k",), ("--k", "1" * 19),
-                ("--k", "0" * 4400), ("--k", "18446744073709551616", "--k", "1"), ("--k", "1_0"), ("--k", "+")):
+("--k", "18446744073709551616", "--k", "1"), ("--k", "1_0"), ("--k", "+")):
         rc, out, err = e.run("search", "alpha", *bad)
         check(f"S1[{n},{' '.join(bad)[:24]}] usage refusal, no traceback, runnable next",
               rc == 1 and "Traceback" not in err and err.startswith("usage: search") and "next: vv search --help" in err,
@@ -207,6 +216,10 @@ for e in ENGINES:
     check(f"S2[{n}] (control) numeric values still search", rc == 0 and "A.md" in out, (rc, out, err))
     rc, out, err = e.run("search", "alpha", "--k", "+1", "--w", "999999999999999999")
     check(f"S3[{n}] (control) a leading + and an 18-digit value are accepted", rc == 0 and "A.md" in out, (rc, out, err))
+    rc, out, err = e.run("search", "alpha", "--k", "0" * 4400 + "1", "--w", "0000000000000000000020")
+    check(f"S4[{n}] leading zeros do not count toward the digit bound", rc == 0 and "A.md" in out, (rc, out[:80], err[:200]))
+    rc, out, err = e.run("search", "alpha", "--limit", "1" + "0" * 18)   # 19 digits: past the --k bound
+    check(f"S5[{n}] a 19-digit global --limit still searches", rc == 0 and "A.md" in out, (rc, out[:80], err[:200]))
 
 if NATIVE_ONLY is not None:
     e = NATIVE_ONLY

@@ -1510,6 +1510,8 @@ def cmd_props(key, folder=""):
     _list_out(entries, sum(c.values()), f"notes with {key}", cmd="props",
               fmt=lambda r: f"{r['count']}\t{r['value']}")
 
+_NATIVE_INT_MAX = 10**18 - 1    # the largest --k/--w both engines accept
+
 def _parse_search_args(args):
     # a global --limit (stripped in main) acts as --k unless --k is explicit —
     # accepting the flag and silently ignoring it would be agent-hostile
@@ -1518,13 +1520,15 @@ def _parse_search_args(args):
     for a in it:
         if a in ("--k", "--w"):
             v = next(it, None)
-            # one spelling both engines parse alike: an optional `+`, then at
-            # most 18 ASCII digits (fits the native integer; no big-int path)
-            if v is None or not re.fullmatch(r"\+?[0-9]{1,18}", v):
+            # one spelling both engines parse alike: an optional `+`, then
+            # ASCII digits whose value has at most 18 significant digits
+            # (fits the native integer; leading zeros never reach int())
+            if v is None or not re.fullmatch(r"\+?0*[0-9]{1,18}", v):
                 die(f"usage: search {a} takes a non-negative integer, got {_q(v, 'N') if v is not None else 'nothing'}",
                     nxt="vv search --help")
-            if a == "--k": k = int(v)
-            else: w = int(v)
+            n = int(v.lstrip("+").lstrip("0") or "0")
+            if a == "--k": k = n
+            else: w = n
         elif a == "--files": files_only = True
         else: terms.append(a.lower())
     return k, w, files_only, terms
@@ -1644,7 +1648,9 @@ def cmd_search(*args):
         # k already folds in an explicit --k OR the globally-stripped --limit;
         # re-state it for the child, which never saw the stripped flag. A
         # duplicate --k is harmless (same value, last-wins parse).
-        r = subprocess.run([VRUST, "search", *args, "--k", str(k)],
+        # clamped to what the native parser accepts: a global --limit has no
+        # digit bound of its own, and no vault holds 10**18 notes
+        r = subprocess.run([VRUST, "search", *args, "--k", str(min(k, _NATIVE_INT_MAX))],
                            capture_output=True, text=True, env=env)
         sys.stdout.write(r.stdout); sys.stderr.write(r.stderr)
         global _out_total
@@ -2766,8 +2772,12 @@ def _rewrite_links(text, source_fp, new_rel_noext, rename_base, linking_fp=None)
 _RELOCATE = {"move", "rename", "trash"}   # commands whose *args tail is flags-only
 
 def _file_sha256(fp):
-    with open(fp, "rb") as f:
-        return hashlib.sha256(f.read()).hexdigest()
+    try:
+        with open(fp, "rb") as f:
+            return hashlib.sha256(f.read()).hexdigest()
+    except OSError as e:
+        # a plan cannot be bound to bytes that cannot be read
+        die(f"unreadable: {rel(fp)} ({e.strerror})", nxt="fix the note's permissions, then re-run")
 
 def _relocate_tail(cmd, operands, tail):
     """The trailing-argument GRAMMAR of rename/move/trash: after the fixed
