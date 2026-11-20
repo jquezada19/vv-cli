@@ -570,10 +570,46 @@ fn rel_str(vault: &Path, p: &Path) -> String {
         .to_string()
 }
 
-/// python's `rel` for a note a caller may have TYPED: `os.path.relpath`
-/// normalises lexically, so `Area/../Hub.md` is shown as `Hub.md`.
+/// python's `rel` for a note a caller may have TYPED: `os.path.relpath`,
+/// which is lexical. `Area/../Hub.md` is shown as `Hub.md`, and a note
+/// reached through a spelling outside the vault as `../Alias/N.md`.
 pub fn rel_shown(vault: &Path, fp: &Path) -> String {
-    rel_str(vault, &crate::normpath(fp))
+    use std::path::Component;
+    let parts = |p: &Path| -> Vec<std::ffi::OsString> {
+        let abs = if p.is_absolute() {
+            p.to_path_buf()
+        } else {
+            std::env::current_dir().unwrap_or_default().join(p)
+        };
+        crate::normpath(&abs)
+            .components()
+            .filter_map(|c| match c {
+                Component::Normal(n) => Some(n.to_os_string()),
+                _ => None,
+            })
+            .collect()
+    };
+    let (start, path) = (parts(vault), parts(fp));
+    let common = start.iter().zip(&path).take_while(|(a, b)| a == b).count();
+    let mut out: Vec<String> = vec!["..".to_string(); start.len() - common];
+    out.extend(
+        path[common..]
+            .iter()
+            .map(|n| n.to_string_lossy().to_string()),
+    );
+    if out.is_empty() {
+        ".".to_string()
+    } else {
+        out.join("/")
+    }
+}
+
+/// python's `os.path.realpath` of a path.
+pub fn realpath_of(p: &Path) -> PathBuf {
+    use std::os::unix::ffi::OsStrExt;
+    PathBuf::from(std::ffi::OsStr::from_bytes(&realpath(
+        p.as_os_str().as_bytes(),
+    )))
 }
 
 /// python's `resolve`: the note a reference names, or why not. `Err` carries
@@ -650,7 +686,8 @@ pub fn resolve(vault: &Path, ref_: &str, op: &str) -> Result<PathBuf, Outcome> {
         if !hits.is_empty() && partial {
             return Err(cannot_prove(format!("'{}' is unique", want)));
         }
-        hits.sort();
+        // python sorts the path STRINGS: `A-/x.md` before `A/x.md`
+        hits.sort_by(|a, b| a.as_os_str().cmp(b.as_os_str()));
         Ok(hits)
     };
     // a note chosen from the walk gets the containment a typed path gets
@@ -683,6 +720,16 @@ pub fn resolve(vault: &Path, ref_: &str, op: &str) -> Result<PathBuf, Outcome> {
         return Ok(fp);
     }
     if hits.len() > 1 {
+        // Two names are one name here when they lowercase alike, and the two
+        // engines' Unicode tables are not the same edition: outside ASCII
+        // python judges whether these really collide.
+        if !want.is_ascii()
+            || hits
+                .iter()
+                .any(|h| !stem_lower(h).is_some_and(|s| s.is_ascii()))
+        {
+            return Err(Outcome::Fallback);
+        }
         let rels: Vec<String> = hits.iter().map(|h| rel_str(vault, h)).collect();
         return Err(die(
             op,
@@ -704,7 +751,7 @@ pub fn resolve(vault: &Path, ref_: &str, op: &str) -> Result<PathBuf, Outcome> {
                     && p.is_file()
             })
             .collect();
-        cands.sort();
+        cands.sort_by(|a, b| a.as_os_str().cmp(b.as_os_str()));
         if partial {
             // zero visible candidates is not "none"
             return Err(cannot_prove(format!("id {} is unique", want)));

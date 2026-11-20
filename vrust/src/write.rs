@@ -29,7 +29,9 @@ fn journal_root() -> PathBuf {
 }
 
 fn vault_journal_root(vault: &Path) -> PathBuf {
-    let real = fs::canonicalize(vault).unwrap_or_else(|_| vault.to_path_buf());
+    // python keys the journal on `os.path.realpath(VAULT)`, which keeps the
+    // typed spelling of a name the filesystem folds
+    let real = readpath::realpath_of(vault);
     let vid = &readpath::sha256_hex(real.to_string_lossy().as_bytes())[..12];
     journal_root().join(vid)
 }

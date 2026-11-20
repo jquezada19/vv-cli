@@ -760,6 +760,11 @@ fn main() {
         exit(0);
     }
     let orig: Vec<String> = args.clone();
+    // A vault path that is not UTF-8 is one python keeps byte for byte and
+    // this engine would replace with the default vault: python's to serve.
+    if env::var_os("VV_VAULT").is_some_and(|v| v.to_str().is_none()) {
+        exec_python(&orig);
+    }
     // --jsonl is python's surface entirely (one schema author); hand off
     // before any native handler can answer in TSV.
     if args.iter().any(|a| a == "--jsonl") {

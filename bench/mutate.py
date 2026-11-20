@@ -196,8 +196,8 @@ MUTATIONS = [
      '        if true {\n            path = newpath;',
      "tests/test_native_errors.py", 'R2x'),
     ('shown-path-not-normalised', 'vrust/src/readpath.rs',
-     '    rel_str(vault, &crate::normpath(fp))',
-     '    rel_str(vault, fp)',
+     '        crate::normpath(&abs)\n',
+     '        abs\n',
      "tests/test_native_errors.py", "R2x[resolve 'Area/../Hub']"),
 ]
 
