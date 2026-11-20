@@ -744,17 +744,13 @@ fn cmd_appendsec(vault: &Path, args: &[String]) -> Outcome {
 // empty pipe and silently patch an empty body).
 fn exec_python_with_stdin(vault: &Path, args: &[String], body: &[u8]) -> Outcome {
     use std::process::{Command, Stdio};
-    let vv = std::env::var("VV_PY_ENTRY").unwrap_or_else(|_| {
-        std::env::current_exe()
-            .ok()
-            .and_then(|p| std::fs::canonicalize(p).ok())
-            .and_then(|p| p.ancestors().nth(4).map(|a| a.to_path_buf()))
-            .map(|r| r.join("src/vv.py").to_string_lossy().into_owned())
-            .unwrap_or_else(|| "vv.py".into())
-    });
+    // the same entry and interpreter as every other hand-off
+    let Some((python, vv)) = crate::python_launch() else {
+        return Outcome::Done(1);
+    };
     let mut argv: Vec<String> = vec!["patch".into()];
     argv.extend(args.iter().cloned());
-    let child = Command::new("python3")
+    let child = Command::new(&python)
         .arg(&vv)
         .arg("--vault")
         .arg(vault)
@@ -764,7 +760,10 @@ fn exec_python_with_stdin(vault: &Path, args: &[String], body: &[u8]) -> Outcome
         .spawn();
     let mut child = match child {
         Ok(c) => c,
-        Err(_) => return Outcome::Done(1),
+        Err(_) => {
+            crate::python_unavailable(&python);
+            return Outcome::Done(1);
+        }
     };
     if let Some(mut si) = child.stdin.take() {
         let _ = si.write_all(body);

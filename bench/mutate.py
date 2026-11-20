@@ -1,0 +1,117 @@
+#!/usr/bin/env python3
+"""Mutation pass for the native engine's guards: break one line, rebuild, and
+require the named check to turn red.
+
+    python3 bench/mutate.py              # run every mutation
+    python3 bench/mutate.py NAME ...     # run the named ones
+
+Each mutation runs in a throwaway copy of the checkout (the working tree is
+never edited), under a per-run timeout, and is followed by a count of processes
+still running from that copy: a guard removed from one engine has, before now,
+left the two engines handing a call back and forth without end.
+
+A mutation that leaves its suite green is the finding: the guarded line is
+dead, or nothing pins it. The script exits 1 on any of: a mutation that
+applies to zero or several places, a build failure, a suite that stays green,
+a named check that is not among the failures, a timeout, or leftover
+processes.
+"""
+import os, shutil, subprocess, sys, tempfile
+
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+TIMEOUT = 300
+
+# name, file, text to find (exactly once), replacement, suite, a check that must fail
+MUTATIONS = [
+    ("read-arity-hands-off-again", "vrust/src/readpath.rs",
+     '"read" if (args.is_empty() || args.len() > 3) && GLOBAL_FLAG.get().is_none() => {',
+     '"read" if false && (args.is_empty() || args.len() > 3) && GLOBAL_FLAG.get().is_none() => {',
+     "tests/test_native_errors.py", "A1[no operand]"),
+    ("read-arity-ignores-global-flag", "vrust/src/readpath.rs",
+     '"read" if (args.is_empty() || args.len() > 3) && GLOBAL_FLAG.get().is_none() => {',
+     '"read" if (args.is_empty() || args.len() > 3) => {',
+     "tests/test_native_errors.py", "G1[--limit]"),
+    ("die-drops-next-step", "vrust/src/err.rs",
+     'Some(n) => format!("{}{}{}\\n", msg, SEP, neutralise(esc(n))),',
+     'Some(_) => format!("{}\\n", msg),',
+     "tests/test_native_errors.py", "A2[no operand]"),
+    ("die-skips-metrics-row", "vrust/src/err.rs",
+     "log_error(op, first.strip_suffix(':'), code, wire.len());",
+     "let _ = (op, first, code);",
+     "tests/test_native_errors.py", "M1 exactly one row"),
+    ("q-never-quotes", "vrust/src/err.rs",
+     "if !s.is_empty() && s.bytes().all(safe) {",
+     "if true {",
+     "tests/test_native_errors.py", "A2[a quoted operand]"),
+    ("q-ignores-control-characters", "vrust/src/err.rs",
+     "if s.chars().any(is_ctl) || s.contains(SEP) {",
+     "if s.contains(SEP) {",
+     "tests/test_native_errors.py", "A2[a control character]"),
+    ("non-utf8-argv-not-handed-off", "vrust/src/main.rs",
+     "None => exec_python(&raw),",
+     "None => args.push(a.to_string_lossy().into_owned()),",
+     "tests/test_native_errors.py", "U2 python receives the argument byte for byte"),
+    ("patch-handoff-ignores-vv-python", "vrust/src/write.rs",
+     "let child = Command::new(&python)",
+     'let child = Command::new("python3")',
+     "tests/test_native_errors.py", "P2 and honours VV_PYTHON"),
+]
+
+
+def leftovers(root):
+    out = subprocess.run(["ps", "-eo", "pid=,command="], capture_output=True, text=True).stdout
+    return [l.strip() for l in out.splitlines() if root in l and "bench/mutate.py" not in l]
+
+
+def run_one(name, rel, old, new, suite, must_fail):
+    work = os.path.realpath(tempfile.mkdtemp(prefix="vv-mutate-"))
+    try:
+        for d in ("src", "tests", "vrust", "bench"):
+            shutil.copytree(os.path.join(REPO, d), os.path.join(work, d), symlinks=True)
+        shutil.copy(os.path.join(REPO, "VERSION"), work)
+        path = os.path.join(work, rel)
+        text = open(path, encoding="utf-8").read()
+        if text.count(old) != 1:
+            return f"the text to mutate occurs {text.count(old)} times in {rel}, not once"
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(text.replace(old, new))
+        try:
+            b = subprocess.run(["cargo", "build", "--release"], cwd=os.path.join(work, "vrust"),
+                               capture_output=True, text=True, timeout=TIMEOUT)
+            if b.returncode != 0:
+                return "the mutated source does not build: " + b.stderr.strip().splitlines()[-1][:200]
+            r = subprocess.run([sys.executable, suite], cwd=work, capture_output=True, text=True, timeout=TIMEOUT)
+        except subprocess.TimeoutExpired as e:
+            return f"did not finish within {TIMEOUT}s: {e.cmd}"
+        failed = [l[5:] for l in r.stdout.splitlines() if l.startswith("FAIL ")]
+        if r.returncode == 0 or not failed:
+            return f"{suite} stayed green: nothing pins this line"
+        if not any(f.startswith(must_fail) for f in failed):
+            return f"{suite} went red, but not on `{must_fail}`: {failed[:3]}"
+        stray = leftovers(work)
+        if stray:
+            return f"{len(stray)} process(es) still running from the mutated copy: {stray[0][:120]}"
+        return None
+    finally:
+        shutil.rmtree(work, True)
+
+
+def main():
+    want = set(sys.argv[1:])
+    unknown = want - {m[0] for m in MUTATIONS}
+    if unknown:
+        print("FAIL no such mutation: " + ", ".join(sorted(unknown)))
+        sys.exit(1)
+    bad = 0
+    for m in MUTATIONS:
+        if want and m[0] not in want:
+            continue
+        problem = run_one(*m)
+        print(("FAIL " if problem else "ok   ") + m[0] + (f" — {problem}" if problem else f" — red on `{m[5]}`"))
+        bad += bool(problem)
+    print(f"\n{bad} mutation(s) not caught" if bad else "\nALL MUTATIONS CAUGHT")
+    sys.exit(1 if bad else 0)
+
+
+if __name__ == "__main__":
+    main()

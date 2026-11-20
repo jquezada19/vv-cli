@@ -111,6 +111,7 @@ run "metrics provenance" python3 tests/test_metrics_provenance.py
 run "port inventory"     python3 bench/port_inventory.py --check
 run "golden fresh"       python3 tests/golden/generate.py --check
 run "golden replay"      python3 tests/test_golden.py
+run "native errors"      python3 tests/test_native_errors.py
 run "resolve + metrics"  python3 tests/test_resolve_metrics.py
 run "pilot report"       python3 bench/test_pilot_report.py
 run "jsonl surface"      python3 tests/test_jsonl.py

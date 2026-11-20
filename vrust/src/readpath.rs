@@ -4,9 +4,10 @@
 // line-for-line from vv_impl.py (parse/fence_mask/fm_bounds/find_sec/sec_text/
 // sha8/read_raw/resolve). On ANYTHING unusual — name miss, ambiguity, section
 // miss, non-UTF-8, path escape, io error — it returns Fallback and main()
-// execs the Python implementation, which stays the single authority for error
+// execs the Python implementation, which stays the authority for the error
 // grammar, did-you-mean suggestions (difflib is not exactly portable), and
-// exit codes. A native fast path that can only ever be right or silent.
+// exit codes. The exceptions are the refusals this entry words itself through
+// err.rs, each byte-identical to python's and pinned in tests/golden/.
 #![allow(dead_code)]
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -473,6 +474,50 @@ fn resolve_id(vault: &Path, want: &str, files: &[PathBuf]) -> Option<PathBuf> {
 }
 
 // ---------- metrics (mirror _log in vv_impl.py) ----------
+/// The row for a refusal the native entry worded itself (mirrors python's
+/// `die` → `_log`): the exit code and the kind; no `cf_bytes`, `ref` or `sel`,
+/// which python records on success only. Timed from process start.
+pub fn log_error(op: &str, kind: Option<&str>, code: i32, out_bytes: usize) {
+    if std::env::var_os("VV_JOURNAL_ROOT").is_some() || std::env::var_os("VV_NO_METRICS").is_some()
+    {
+        return;
+    }
+    let Some(home) = std::env::var_os("HOME") else {
+        return;
+    };
+    let ts = std::process::Command::new("date")
+        .arg("+%Y-%m-%dT%H:%M:%S")
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
+    let ms = START.get().map(|t| t.elapsed().as_millis()).unwrap_or(0);
+    let src: String = std::env::var("VV_METRICS_SRC")
+        .unwrap_or_default()
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .take(24)
+        .collect();
+    let mut tail = String::new();
+    if !src.is_empty() {
+        tail.push_str(&format!(", \"src\": \"{}\"", src));
+    }
+    // a kind is a bare word from our own message text; anything else is dropped
+    if let Some(k) =
+        kind.filter(|k| !k.is_empty() && k.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-'))
+    {
+        tail.push_str(&format!(", \"kind\": \"{}\"", k));
+    }
+    let rec = format!(
+        "{{\"ts\": \"{}\", \"op\": \"{}\", \"ms\": {}, \"out_bytes\": {}, \"exit\": {}, \"engine\": \"native\", \"ver\": \"{}\"{}}}\n",
+        ts, op, ms, out_bytes, code, env!("CARGO_PKG_VERSION"), tail);
+    use std::io::Write;
+    let path = PathBuf::from(home).join(".claude/metrics/vv.jsonl");
+    if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = f.write_all(rec.as_bytes());
+    }
+}
+
 pub fn log_metrics(op: &str, t0: std::time::Instant, out_bytes: usize, cf: u64, sel: Option<&str>) {
     if std::env::var_os("VV_JOURNAL_ROOT").is_some() || std::env::var_os("VV_NO_METRICS").is_some()
     {
@@ -534,6 +579,14 @@ pub static START_NS: std::sync::OnceLock<u128> = std::sync::OnceLock::new();
 pub fn start_ns() -> String {
     START_NS.get().copied().unwrap_or(0).to_string()
 }
+
+/// Process start on the monotonic clock: a refusal's row is timed from here.
+pub static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+
+/// Set when `--vault` or `--limit` was on the command line. Python validates
+/// those before anything else, so a native refusal that would otherwise
+/// outrank its global-flag refusal hands off instead.
+pub static GLOBAL_FLAG: std::sync::OnceLock<()> = std::sync::OnceLock::new();
 
 /// How the NOTE operand was addressed, for the metrics row: "path" (a typed
 /// vault-relative path), "name" (a unique basename) or "id" (the id rule).
@@ -649,6 +702,20 @@ pub fn run(cmd: &str, args: &[String], vault: &Path) -> Outcome {
         // rather than an unimplemented one: the budget line and the
         // continuation token are output this delegation keeps under a single
         // author, instead of two engines each wording it.
+        // python's `_check_arity`: read takes 1-3 operands, and the next step
+        // is the outline of the note the caller already named
+        "read" if (args.is_empty() || args.len() > 3) && GLOBAL_FLAG.get().is_none() => {
+            let next = match args.first() {
+                Some(a) => format!("vv outline {}", crate::err::q(a, "NOTE")),
+                None => "vv outline NOTE".to_string(),
+            };
+            crate::err::die(
+                "read",
+                &format!("usage: read takes 1-3 positional args, got {}", args.len()),
+                Some(&next),
+                1,
+            )
+        }
         "read" if args.len() == 2 || args.len() == 3 => {
             let (sid, hash_only, flagged) = if args.len() == 2 && !args[1].starts_with("--") {
                 (args[1].clone(), false, false)

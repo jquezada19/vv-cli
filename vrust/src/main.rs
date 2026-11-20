@@ -20,6 +20,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::exit;
 mod cache;
+mod err;
 mod graph;
 mod query;
 mod readpath;
@@ -614,13 +615,16 @@ fn cmd_linkscan(args: &[String]) {
     print!("{}", buf);
 }
 
-fn exec_python(argv: &[String]) -> ! {
-    // fall through to the Python implementation — the semantic authority for
-    // every command the native path doesn't (or declines to) handle.
-    // Resolution order: VV_PY_ENTRY, then src/vv.py BESIDE the executable (the
-    // archive layout: vv + src/ + VERSION in one directory), then the repo
-    // layout — first that exists. v1.0 knew only the repo layout, and a
-    // standalone binary lost most of its surface (roadmap review, 4/4 seats).
+/// Where the python entry and its interpreter are, for BOTH hand-off
+/// launchers (this file's `exec_python` and write.rs's post-stdin `patch`
+/// launcher). Prints the `engine:` refusal and the skew warning itself;
+/// `None` means the caller exits 1.
+///
+/// Resolution order: VV_PY_ENTRY, then src/vv.py BESIDE the executable (the
+/// archive layout: vv + src/ + VERSION in one directory), then the repo
+/// layout — first that exists. v1.0 knew only the repo layout, and a
+/// standalone binary lost most of its surface (roadmap review, 4/4 seats).
+pub fn python_launch() -> Option<(String, String)> {
     let exe = env::current_exe()
         .ok()
         .and_then(|p| std::fs::canonicalize(p).ok());
@@ -643,7 +647,7 @@ fn exec_python(argv: &[String]) -> ! {
         Some(v) => v,
         None => {
             eprintln!("engine: python entry (src/vv.py) not found beside the binary or in a checkout — next: set VV_PY_ENTRY, or reinstall the archive intact");
-            exit(1);
+            return None;
         }
     };
     // Engine-skew handshake: the VERSION beside the resolved entry must match
@@ -663,6 +667,25 @@ fn exec_python(argv: &[String]) -> ! {
         }
     }
     let python = std::env::var("VV_PYTHON").unwrap_or_else(|_| "python3".into());
+    Some((python, vv))
+}
+
+/// The line both launchers print when the interpreter cannot be started.
+pub fn python_unavailable(python: &str) {
+    eprintln!(
+        "engine: python engine unavailable ({} not runnable) — next: install python3, or set VV_PYTHON",
+        python
+    );
+}
+
+/// Fall through to the python implementation — the semantic authority for
+/// every command the native path doesn't (or declines to) handle. Generic
+/// over the argument type so an argv that is not valid UTF-8 is handed over
+/// byte for byte.
+fn exec_python<S: AsRef<std::ffi::OsStr>>(argv: &[S]) -> ! {
+    let Some((python, vv)) = python_launch() else {
+        exit(1);
+    };
     // when this process started: python times its row from here, so a
     // fallback's `ms` is the whole invocation, not python's share of it
     match std::process::Command::new(&python)
@@ -673,10 +696,7 @@ fn exec_python(argv: &[String]) -> ! {
     {
         Ok(s) => exit(s.code().unwrap_or(1)),
         Err(_) => {
-            eprintln!(
-                "engine: python engine unavailable ({} not runnable) — next: install python3, or set VV_PYTHON",
-                python
-            );
+            python_unavailable(&python);
             exit(1);
         }
     }
@@ -692,7 +712,17 @@ fn main() {
             .map(|d| d.as_nanos())
             .unwrap_or(0),
     );
-    let mut args: Vec<String> = env::args().skip(1).collect();
+    let _ = readpath::START.set(std::time::Instant::now());
+    // An argument that is not valid UTF-8 cannot be a `String`; python reads
+    // it with surrogate escapes, so it is python's to answer, byte for byte.
+    let raw: Vec<std::ffi::OsString> = env::args_os().skip(1).collect();
+    let mut args: Vec<String> = Vec::with_capacity(raw.len());
+    for a in &raw {
+        match a.to_str() {
+            Some(s) => args.push(s.to_string()),
+            None => exec_python(&raw),
+        }
+    }
     if matches!(
         args.first().map(String::as_str),
         Some("--version") | Some("version")
@@ -716,6 +746,7 @@ fn main() {
         match ok {
             Some(n) => {
                 let _ = readpath::LIMIT.set(n);
+                let _ = readpath::GLOBAL_FLAG.set(());
                 args.drain(i..=i + 1);
             }
             None => {
@@ -726,6 +757,7 @@ fn main() {
     }
     // --vault PATH before dispatch, mirroring vv.py
     if let Some(i) = args.iter().position(|a| a == "--vault") {
+        let _ = readpath::GLOBAL_FLAG.set(());
         if i + 1 < args.len() {
             let mut v = args[i + 1].clone();
             if let Some(rest) = v.strip_prefix("~/") {
