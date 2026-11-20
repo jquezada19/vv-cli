@@ -12,8 +12,7 @@ Z  Zero-hit search. The native scan handed every zero-hit query to python,
    is told the scan already came back empty.
 M  The metrics row. `ref` says how the NOTE was addressed (path, name, id);
    a row python writes after a native hand-off carries `fb: 1` and an `ms`
-   measured from the native process start; the native timestamp is local time
-   without a subprocess per call (the UTC offset is cached per quarter hour).
+   measured from the native process start.
 
 Each resolve/search check runs through the python entry and the native binary
 in separate throwaway vaults; an arm with the python fallback made unreachable
@@ -107,6 +106,20 @@ for e in ENGINES:
     check(f"Z4[{n}] a phrase that misses while its words match apart prints the hint",
           rc == 0 and out.startswith("(0 of 0 matches)\n") and "hint:" in out and "retry unquoted" in out, (rc, out, err))
 
+    rc, out, err = e.run("search", "beta\x1calpha")
+    check(f"Z7[{n}] a phrase split by U+001C counts as multi-word, as python's split() has it",
+          rc == 0 and "hint:" in out, (rc, out, err))
+    outside = mkdtemp("vv-resm-outside-")
+    with open(os.path.join(outside, "x.md"), "w") as f:
+        f.write("# outside\n")
+    os.symlink(os.path.join(outside, "x.md"), os.path.join(e.vault, "88"))
+    with open(os.path.join(e.vault, "Work", "88 - Good.md"), "w") as f:
+        f.write("# good\n")
+    rc, out, err = e.run("resolve", "88")
+    check(f"I12[{n}] a typed path that escapes the vault is refused, not re-read as an id",
+          rc == 1 and err.startswith("escape:") and out == "", (rc, out, err))
+    os.remove(os.path.join(e.vault, "88")); os.remove(os.path.join(e.vault, "Work", "88 - Good.md"))
+
 if HAVE_NATIVE:
     # ---- the native entry by itself: python unreachable ----
     solo = Engine("native-solo", {"VV_PY_ENTRY": "/nonexistent/vv.py"}, [VRUST])
@@ -141,35 +154,11 @@ if HAVE_NATIVE:
           [r.get("ref") for r in rows] == ["path", "name", "id"], [r.get("ref") for r in rows])
     try:
         stamps = [datetime.datetime.fromisoformat(r["ts"]) for r in rows]
-        ok = all(before - datetime.timedelta(seconds=2) <= s <= after + datetime.timedelta(seconds=2) for s in stamps)
+        ok = len(stamps) == 3 and all(
+            before - datetime.timedelta(seconds=2) <= s_ <= after + datetime.timedelta(seconds=2) for s_ in stamps)
     except (ValueError, KeyError) as ex:
         stamps, ok = repr(ex), False
-    check("M3 the native timestamp is local wall-clock time", ok, (before, stamps, after))
-    cache = os.path.join(m.home, ".cache", "vv", "tzoffset")
-    check("M4 the UTC offset is cached", os.path.exists(cache), os.listdir(m.home))
-    # no `date` on PATH: the cached offset must be enough for a timestamp
-    empty = mkdtemp("vv-resm-emptypath-")
-    m.run("outline", "Top", env={"PATH": empty})
-    last = m.rows()[-1]
-    try:
-        s = datetime.datetime.fromisoformat(last["ts"])
-        ok = abs((s - datetime.datetime.now()).total_seconds()) < 5
-    except (ValueError, KeyError):
-        ok = False
-    check("M5 a call inside the cached quarter hour needs no `date` process", ok, last)
-    # a stale or foreign cache entry is not believed
-    with open(cache, "w") as f:
-        f.write("1 3600 \n")                              # expired long ago, wrong offset
-    m.run("outline", "Top")
-    s = datetime.datetime.fromisoformat(m.rows()[-1]["ts"])
-    check("M6 an expired cache entry is replaced, not used",
-          abs((s - datetime.datetime.now()).total_seconds()) < 5, m.rows()[-1])
-    with open(cache, "w") as f:
-        f.write("99999999999 3600 \n")                    # claims validity far beyond a quarter hour
-    m.run("outline", "Top")
-    s = datetime.datetime.fromisoformat(m.rows()[-1]["ts"])
-    check("M7 an entry valid for longer than a quarter hour is not believed",
-          abs((s - datetime.datetime.now()).total_seconds()) < 5, m.rows()[-1])
+    check("M3 (control) the native timestamp is local wall-clock time", ok, (before, stamps, after))
 
     # a hand-off: python writes the row, flagged, timed from the native start
     n0 = len(m.rows())
@@ -182,14 +171,28 @@ if HAVE_NATIVE:
     new = m.rows()[n0:]
     check("M9 a one-word miss writes exactly one native row", len(new) == 1 and new[0].get("engine") == "native", new)
 
-    # python invoked directly is not a hand-off; a forged start time is ignored
+    # python invoked directly is not a hand-off; only a recent start time is believed
+    import time
     p = Engine("python-metrics", {"VV_ENGINE": "python"}, [sys.executable, VV], metrics=True)
     p.run("outline", "24995")
     p.run("outline", "Top", env={"VV_NATIVE_T0_NS": "12"})
-    p.run("outline", "Top", env={"VV_NATIVE_T0_NS": "1000000000000000000"})   # 2001: not within a day
+    p.run("outline", "Top", env={"VV_NATIVE_T0_NS": "1000000000000000000"})        # 2001
+    p.run("outline", "Top", env={"VV_NATIVE_T0_NS": str(time.time_ns() - 3600 * 10**9)})   # an hour ago
+    p.run("outline", "Top", env={"VV_NATIVE_T0_NS": str(time.time_ns() + 3600 * 10**9)})   # the future
+    p.run("outline", "Top", env={"VV_NATIVE_T0_NS": str(time.time_ns() - 2 * 10**9)})      # two seconds ago
     r = p.rows()
-    check("M10 a direct python call carries ref and no fb", len(r) == 3 and r[0].get("ref") == "id" and "fb" not in r[0], r)
-    check("M11 an implausible start time is not believed", all("fb" not in x and x["ms"] < 60_000 for x in r[1:]), r[1:])
+    check("M10 a direct python call carries ref and no fb", len(r) == 6 and r[0].get("ref") == "id" and "fb" not in r[0], r)
+    check("M11 a stale, future or malformed start time is not believed",
+          len(r) == 6 and all("fb" not in x and 0 <= x["ms"] < 30_000 for x in r[1:5]), r[1:5])
+    check("M12 a recent start time is: the row is flagged and its ms starts there",
+          len(r) == 6 and r[5].get("fb") == 1 and 2_000 <= r[5]["ms"] < 30_000, r[5:])
+
+    # a zero-flag that did not come from this process's own parent is never believed
+    z = Engine("python-launcher", {}, [sys.executable, VV])
+    for forged in ("1", str(os.getpid() + 1)):
+        rc, out, err = z.run("search", "alpha", env={"VV_NATIVE_ZERO": forged})
+        check(f"Z8[{forged == '1' and 'literal' or 'pid'}] an inherited zero-flag cannot turn a hit into a miss",
+              rc == 0 and "Plain Note.md" in out, (rc, out, err))
 
 print(f"\n{len(fails)} failures" if fails else "\nall resolve/metrics checks passed")
 sys.exit(1 if fails else 0)

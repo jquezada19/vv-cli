@@ -69,16 +69,20 @@ def _metrics_src():
 # Set by the native entry when it hands an invocation to python: the
 # wall-clock nanosecond it started at. A row is then timed from there, so
 # `ms` covers the native share and interpreter start-up as well. Only a
-# plausible value is believed (digits, and within a day of now).
+# plausible value is believed: digits, and no more than _HANDOFF_MAX_NS ago
+# (a hand-off reaches this line within interpreter start-up; an older value
+# was inherited from somewhere else).
+_HANDOFF_MAX_NS = 60 * 10**9
 _t0ns = os.environ.get("VV_NATIVE_T0_NS", "")
 _NATIVE_T0_NS = int(_t0ns) if (_t0ns.isascii() and _t0ns.isdigit() and 16 <= len(_t0ns) <= 20) else 0
-if not 0 <= time.time_ns() - _NATIVE_T0_NS <= 86_400 * 10**9:
+if not 0 <= time.time_ns() - _NATIVE_T0_NS <= _HANDOFF_MAX_NS:
     _NATIVE_T0_NS = 0
+# the native share, fixed once: the rest of the row is timed on the monotonic
+# clock, so a wall-clock step mid-command cannot make `ms` negative or absurd
+_PRE_MS = (time.time_ns() - _NATIVE_T0_NS) / 1e6 if _NATIVE_T0_NS else 0.0
 
 def _elapsed_ms():
-    if _NATIVE_T0_NS:
-        return round((time.time_ns() - _NATIVE_T0_NS) / 1e6)
-    return round((time.perf_counter() - _t0) * 1000)
+    return round(_PRE_MS + (time.perf_counter() - _t0) * 1000)
 
 _ref_kind = None   # how the NOTE operand was addressed: "path" | "name" | "id"
 
@@ -265,6 +269,7 @@ def resolve(ref):
         for cand in (bare, bare + ".md"):
             fp_b = contain(cand)
             if os.path.isfile(fp_b):
+                _ref_kind = _ref_kind or "path"
                 return _cf(fp_b)
         want = want[1:]
         hits = _name_hits(want, all_notes)
@@ -1659,7 +1664,7 @@ def cmd_search(*args):
                 for s_, r_, sn in hits[:k]]
         _list_out(rows, len(hits), "matches", cmd="search")
         return
-    if use_rust() and os.environ.get("VV_NATIVE_ZERO") == "1" and terms:
+    if use_rust() and terms and os.environ.get("VV_NATIVE_ZERO") == str(os.getppid()):
         # the native entry already scanned and found nothing; it handed off
         # only for the phrase hint, so do not scan again to rediscover the zero
         out("(0 of 0 matches)")

@@ -28,10 +28,6 @@ next release is MAJOR unless they are judged defect repairs.
   only for a quoted multi-word argument (the one case the phrase hint can
   arise) and is told the scan already came back empty. Output is unchanged.
   Measured: 262 ms → 99 ms for a one-word miss.
-- **The native metrics row no longer spawns `date` per call.** The local UTC
-  offset is asked of `date +%z` once per quarter hour and kept in
-  `~/.cache/vv/tzoffset`; the timestamp keeps its local-time shape. Measured:
-  8.4 ms → 5.0 ms for a logged `outline` by path.
 
 ### Added
 
@@ -40,6 +36,10 @@ next release is MAJOR unless they are judged defect repairs.
   carries `fb: 1`, and its `ms` is measured from the native process start, so
   it covers the native share and interpreter start-up (it used to cover
   python's share only, which under-reported every hand-off).
+- **A typed path that leaves the vault is refused before any name matching.**
+  With a symlink `42` pointing outside the vault and a note `42 - Good.md`,
+  the native entry declines and python answers `escape:`, as it does for
+  every other escaping path.
 
 ### Fixed
 

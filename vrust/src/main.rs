@@ -321,11 +321,18 @@ fn cmd_search(args: &[String], orig: &[String]) -> ! {
     // only then — and tell python the scan already came back empty
     // (VV_NATIVE_ZERO), so it goes straight to the hint instead of scanning
     // the vault again to rediscover the zero.
+    // "Multi-word" is python's `len(t.split()) > 1`: str.split() also breaks
+    // on U+001C..U+001F, which char::is_whitespace does not count.
+    let py_space = |c: char| c.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&c);
     if hits.is_empty()
         && std::env::var_os("VV_FROM_PY").is_none()
-        && terms.iter().any(|t| t.split_whitespace().count() > 1)
+        && terms
+            .iter()
+            .any(|t| t.split(py_space).filter(|w| !w.is_empty()).count() > 1)
     {
-        std::env::set_var("VV_NATIVE_ZERO", "1");
+        // our pid: python believes the flag only from its own parent, so a
+        // value inherited from some outer environment is never a false zero
+        std::env::set_var("VV_NATIVE_ZERO", std::process::id().to_string());
         exec_python(orig);
     }
     let shown = hits.len().min(k);

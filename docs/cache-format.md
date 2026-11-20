@@ -158,8 +158,12 @@ It found three bugs the 21-suite gate did not:
 Cost of the fix, measured: a zero-hit multi-word search went 360 ms → 267 ms →
 **144 ms** across two rounds (the last by letting the hint's own count-search use
 the engine instead of the pure python scanner). A hit is unchanged at ~36 ms.
-The miss path is inherently three scans plus the hint's second search; misses are
-rare and hits are 2x python, so the trade stands.
+That miss path was three scans plus the hint's second search. It is now one
+scan for a miss with no quoted multi-word argument (the native entry answers the
+zero itself), and one scan plus the hint's count-search otherwise: the native
+entry tells python the scan came back empty (`VV_NATIVE_ZERO`, its own pid, which
+python believes only from its parent) so python does not scan again to
+rediscover the zero.
 
 Replay result after the fixes: **138/138 reads byte-identical**, 96 writes against
 a disposable copy with 0 crashes (41 succeeded, 55 refused cleanly — exit 1/3/4
